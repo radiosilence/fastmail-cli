@@ -252,3 +252,211 @@ impl<T: Serialize> Output<T> {
         println!("{}", serde_json::to_string_pretty(self).unwrap());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_email_address_display_with_name() {
+        let addr = EmailAddress {
+            name: Some("John Doe".to_string()),
+            email: "john@example.com".to_string(),
+        };
+        assert_eq!(format!("{}", addr), "John Doe <john@example.com>");
+    }
+
+    #[test]
+    fn test_email_address_display_without_name() {
+        let addr = EmailAddress {
+            name: None,
+            email: "john@example.com".to_string(),
+        };
+        assert_eq!(format!("{}", addr), "john@example.com");
+    }
+
+    #[test]
+    fn test_email_address_display_empty_name() {
+        let addr = EmailAddress {
+            name: Some("".to_string()),
+            email: "john@example.com".to_string(),
+        };
+        assert_eq!(format!("{}", addr), "john@example.com");
+    }
+
+    #[test]
+    fn test_email_is_unread() {
+        let mut email = Email {
+            id: "test".to_string(),
+            blob_id: None,
+            thread_id: None,
+            mailbox_ids: HashMap::new(),
+            keywords: HashMap::new(),
+            size: 0,
+            received_at: None,
+            message_id: None,
+            in_reply_to: None,
+            references: None,
+            from: None,
+            to: None,
+            cc: None,
+            bcc: None,
+            reply_to: None,
+            subject: None,
+            sent_at: None,
+            preview: None,
+            has_attachment: false,
+            text_body: None,
+            html_body: None,
+            attachments: None,
+            body_values: None,
+        };
+        assert!(email.is_unread());
+        email.keywords.insert("$seen".to_string(), true);
+        assert!(!email.is_unread());
+    }
+
+    #[test]
+    fn test_email_is_flagged() {
+        let mut email = Email {
+            id: "test".to_string(),
+            blob_id: None,
+            thread_id: None,
+            mailbox_ids: HashMap::new(),
+            keywords: HashMap::new(),
+            size: 0,
+            received_at: None,
+            message_id: None,
+            in_reply_to: None,
+            references: None,
+            from: None,
+            to: None,
+            cc: None,
+            bcc: None,
+            reply_to: None,
+            subject: None,
+            sent_at: None,
+            preview: None,
+            has_attachment: false,
+            text_body: None,
+            html_body: None,
+            attachments: None,
+            body_values: None,
+        };
+        assert!(!email.is_flagged());
+        email.keywords.insert("$flagged".to_string(), true);
+        assert!(email.is_flagged());
+    }
+
+    #[test]
+    fn test_email_sender_display() {
+        let email = Email {
+            id: "test".to_string(),
+            blob_id: None,
+            thread_id: None,
+            mailbox_ids: HashMap::new(),
+            keywords: HashMap::new(),
+            size: 0,
+            received_at: None,
+            message_id: None,
+            in_reply_to: None,
+            references: None,
+            from: Some(vec![EmailAddress {
+                name: Some("Sender".to_string()),
+                email: "sender@example.com".to_string(),
+            }]),
+            to: None,
+            cc: None,
+            bcc: None,
+            reply_to: None,
+            subject: None,
+            sent_at: None,
+            preview: None,
+            has_attachment: false,
+            text_body: None,
+            html_body: None,
+            attachments: None,
+            body_values: None,
+        };
+        assert_eq!(email.sender_display(), "Sender <sender@example.com>");
+    }
+
+    #[test]
+    fn test_email_sender_display_no_from() {
+        let email = Email {
+            id: "test".to_string(),
+            blob_id: None,
+            thread_id: None,
+            mailbox_ids: HashMap::new(),
+            keywords: HashMap::new(),
+            size: 0,
+            received_at: None,
+            message_id: None,
+            in_reply_to: None,
+            references: None,
+            from: None,
+            to: None,
+            cc: None,
+            bcc: None,
+            reply_to: None,
+            subject: None,
+            sent_at: None,
+            preview: None,
+            has_attachment: false,
+            text_body: None,
+            html_body: None,
+            attachments: None,
+            body_values: None,
+        };
+        assert_eq!(email.sender_display(), "(unknown)");
+    }
+
+    #[test]
+    fn test_output_success() {
+        let output: Output<&str> = Output::success("test data");
+        assert!(output.success);
+        assert_eq!(output.data, Some("test data"));
+        assert!(output.error.is_none());
+    }
+
+    #[test]
+    fn test_output_error() {
+        let output: Output<()> = Output::error("something broke");
+        assert!(!output.success);
+        assert!(output.data.is_none());
+        assert_eq!(output.error, Some("something broke".to_string()));
+    }
+
+    #[test]
+    fn test_session_deserialize() {
+        let json = r#"{
+            "capabilities": {},
+            "accounts": {},
+            "primaryAccounts": {"urn:ietf:params:jmap:mail": "acc1"},
+            "username": "test@example.com",
+            "apiUrl": "https://api.example.com/jmap",
+            "downloadUrl": "https://api.example.com/download",
+            "uploadUrl": "https://api.example.com/upload"
+        }"#;
+        let session: Session = serde_json::from_str(json).unwrap();
+        assert_eq!(session.username, "test@example.com");
+        assert_eq!(session.primary_account_id(), Some("acc1"));
+    }
+
+    #[test]
+    fn test_mailbox_deserialize() {
+        let json = r#"{
+            "id": "mb1",
+            "name": "Inbox",
+            "role": "inbox",
+            "totalEmails": 100,
+            "unreadEmails": 5
+        }"#;
+        let mailbox: Mailbox = serde_json::from_str(json).unwrap();
+        assert_eq!(mailbox.id, "mb1");
+        assert_eq!(mailbox.name, "Inbox");
+        assert_eq!(mailbox.role, Some("inbox".to_string()));
+        assert_eq!(mailbox.total_emails, 100);
+        assert_eq!(mailbox.unread_emails, 5);
+    }
+}

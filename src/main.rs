@@ -3,6 +3,7 @@ mod config;
 mod error;
 mod jmap;
 mod models;
+pub mod util;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
@@ -103,6 +104,50 @@ enum Commands {
         output: Option<String>,
     },
 
+    /// Reply to an email
+    Reply {
+        /// Email ID to reply to
+        email_id: String,
+
+        /// Reply body (plain text)
+        #[arg(long)]
+        body: String,
+
+        /// Reply to all recipients
+        #[arg(long)]
+        all: bool,
+
+        /// Additional CC recipient(s), comma-separated
+        #[arg(long)]
+        cc: Option<String>,
+
+        /// BCC recipient(s), comma-separated
+        #[arg(long)]
+        bcc: Option<String>,
+    },
+
+    /// Forward an email
+    Forward {
+        /// Email ID to forward
+        email_id: String,
+
+        /// Recipient(s), comma-separated
+        #[arg(long)]
+        to: String,
+
+        /// Message to include before forwarded content
+        #[arg(long, default_value = "")]
+        body: String,
+
+        /// CC recipient(s), comma-separated
+        #[arg(long)]
+        cc: Option<String>,
+
+        /// BCC recipient(s), comma-separated
+        #[arg(long)]
+        bcc: Option<String>,
+    },
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -181,6 +226,22 @@ async fn main() {
         Commands::Download { email_id, output } => {
             commands::download_attachment(&email_id, output.as_deref()).await
         }
+
+        Commands::Reply {
+            email_id,
+            body,
+            all,
+            cc,
+            bcc,
+        } => commands::reply(&email_id, &body, all, cc.as_deref(), bcc.as_deref()).await,
+
+        Commands::Forward {
+            email_id,
+            to,
+            body,
+            cc,
+            bcc,
+        } => commands::forward(&email_id, &to, &body, cc.as_deref(), bcc.as_deref()).await,
 
         Commands::Completions { shell } => {
             generate(

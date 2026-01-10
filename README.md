@@ -97,6 +97,50 @@ fastmail-cli spam EMAIL_ID
 fastmail-cli spam EMAIL_ID -y
 ```
 
+### Download Attachments
+
+```bash
+# Download to current directory
+fastmail-cli download EMAIL_ID
+
+# Download to specific directory
+fastmail-cli download EMAIL_ID --output ~/Downloads
+```
+
+### Reply to Email
+
+```bash
+# Reply to sender only
+fastmail-cli reply EMAIL_ID --body "Thanks for your message"
+
+# Reply all
+fastmail-cli reply EMAIL_ID --body "Thanks everyone" --all
+
+# Reply with additional CC/BCC
+fastmail-cli reply EMAIL_ID --body "Response" --cc "boss@example.com"
+```
+
+### Forward Email
+
+```bash
+fastmail-cli forward EMAIL_ID \
+  --to "colleague@example.com" \
+  --body "FYI - see below"
+```
+
+### Shell Completions
+
+```bash
+# Bash
+fastmail-cli completions bash >> ~/.bashrc
+
+# Zsh
+fastmail-cli completions zsh >> ~/.zshrc
+
+# Fish
+fastmail-cli completions fish > ~/.config/fish/completions/fastmail-cli.fish
+```
+
 ## Output Format
 
 All commands output JSON with this structure:
@@ -134,6 +178,7 @@ RUST_LOG=debug fastmail-cli list mailboxes
 ## JMAP API
 
 This CLI uses Fastmail's JMAP implementation. Key capabilities:
+
 - `urn:ietf:params:jmap:core`
 - `urn:ietf:params:jmap:mail`
 - `urn:ietf:params:jmap:submission`

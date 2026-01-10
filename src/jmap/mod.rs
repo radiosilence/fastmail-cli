@@ -615,6 +615,396 @@ impl JmapClient {
         Ok(bytes.to_vec())
     }
 
+    /// Send a reply to an existing email with proper threading headers
+    #[instrument(skip(self, body))]
+    pub async fn reply_email(
+        &self,
+        original: &Email,
+        body: &str,
+        reply_all: bool,
+        cc: Vec<EmailAddress>,
+        bcc: Vec<EmailAddress>,
+    ) -> Result<String> {
+        let account_id = self
+            .session()?
+            .primary_account_id()
+            .ok_or_else(|| Error::Config("No primary account".into()))?;
+
+        let identities = self.list_identities().await?;
+        let identity = identities.first().ok_or(Error::IdentityNotFound)?;
+        let my_email = identity.email.to_lowercase();
+
+        let drafts = self.find_mailbox("drafts").await?;
+        let sent = self.find_mailbox("sent").await?;
+
+        // Build To: reply to sender, or if reply_all, include original recipients
+        let mut to_addrs: Vec<EmailAddress> = original.from.clone().unwrap_or_default();
+
+        if reply_all {
+            // Add original To recipients (except ourselves)
+            if let Some(ref orig_to) = original.to {
+                for addr in orig_to {
+                    if addr.email.to_lowercase() != my_email {
+                        to_addrs.push(addr.clone());
+                    }
+                }
+            }
+        }
+
+        // Build CC: include original CC recipients (if reply_all) plus any new CC
+        let mut cc_addrs = cc;
+        if reply_all && let Some(ref orig_cc) = original.cc {
+            for addr in orig_cc {
+                if addr.email.to_lowercase() != my_email {
+                    cc_addrs.push(addr.clone());
+                }
+            }
+        }
+
+        // Build subject with Re: prefix if not already present
+        let subject = if original
+            .subject
+            .as_ref()
+            .is_some_and(|s| s.to_lowercase().starts_with("re:"))
+        {
+            original.subject.clone().unwrap_or_default()
+        } else {
+            format!("Re: {}", original.subject.as_deref().unwrap_or(""))
+        };
+
+        // Build References header: original references + original message-id
+        let references: Vec<String> = {
+            let mut refs = original.references.clone().unwrap_or_default();
+            if let Some(ref msg_id) = original.message_id {
+                for id in msg_id {
+                    if !refs.contains(id) {
+                        refs.push(id.clone());
+                    }
+                }
+            }
+            refs
+        };
+
+        let mut email_create: HashMap<String, Value> = HashMap::new();
+        email_create.insert("mailboxIds".into(), json!({ drafts.id.clone(): true }));
+        email_create.insert(
+            "from".into(),
+            json!([{ "email": identity.email, "name": identity.name }]),
+        );
+        email_create.insert(
+            "to".into(),
+            json!(
+                to_addrs
+                    .iter()
+                    .map(|a| json!({"email": a.email, "name": a.name}))
+                    .collect::<Vec<_>>()
+            ),
+        );
+        if !cc_addrs.is_empty() {
+            email_create.insert(
+                "cc".into(),
+                json!(
+                    cc_addrs
+                        .iter()
+                        .map(|a| json!({"email": a.email, "name": a.name}))
+                        .collect::<Vec<_>>()
+                ),
+            );
+        }
+        if !bcc.is_empty() {
+            email_create.insert(
+                "bcc".into(),
+                json!(
+                    bcc.iter()
+                        .map(|a| json!({"email": a.email, "name": a.name}))
+                        .collect::<Vec<_>>()
+                ),
+            );
+        }
+        email_create.insert("subject".into(), json!(subject));
+        email_create.insert(
+            "bodyValues".into(),
+            json!({ "body": { "value": body, "charset": "utf-8" } }),
+        );
+        email_create.insert(
+            "textBody".into(),
+            json!([{ "partId": "body", "type": "text/plain" }]),
+        );
+        email_create.insert("keywords".into(), json!({ "$draft": true }));
+
+        // Threading headers
+        if let Some(ref msg_id) = original.message_id {
+            email_create.insert("inReplyTo".into(), json!(msg_id));
+        }
+        if !references.is_empty() {
+            email_create.insert("references".into(), json!(references));
+        }
+
+        let responses = self
+            .request(vec![
+                json!([
+                    "Email/set",
+                    {
+                        "accountId": account_id,
+                        "create": { "draft": email_create }
+                    },
+                    "e0"
+                ]),
+                json!([
+                    "EmailSubmission/set",
+                    {
+                        "accountId": account_id,
+                        "create": {
+                            "submission": {
+                                "identityId": identity.id,
+                                "emailId": "#draft"
+                            }
+                        },
+                        "onSuccessUpdateEmail": {
+                            "#submission": {
+                                "mailboxIds": { sent.id.clone(): true },
+                                "keywords": { "$draft": null, "$seen": true }
+                            }
+                        }
+                    },
+                    "s0"
+                ]),
+            ])
+            .await?;
+
+        #[derive(Deserialize)]
+        struct EmailSetResponse {
+            created: Option<HashMap<String, Value>>,
+            #[serde(rename = "notCreated")]
+            not_created: Option<HashMap<String, Value>>,
+        }
+
+        let email_resp: EmailSetResponse =
+            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/set")?;
+
+        if let Some(ref not_created) = email_resp.not_created
+            && let Some(err) = not_created.get("draft")
+        {
+            let error_type = err
+                .get("type")
+                .and_then(|v: &Value| v.as_str())
+                .unwrap_or("unknown");
+            let description = err
+                .get("description")
+                .and_then(|v: &Value| v.as_str())
+                .unwrap_or("Failed to create email");
+            return Err(Error::Jmap {
+                method: "Email/set".into(),
+                error_type: error_type.into(),
+                description: description.into(),
+            });
+        }
+
+        let email_id = email_resp
+            .created
+            .and_then(|c: HashMap<String, Value>| c.get("draft").cloned())
+            .and_then(|d: Value| {
+                d.get("id")
+                    .and_then(|v: &Value| v.as_str())
+                    .map(String::from)
+            })
+            .ok_or_else(|| Error::Jmap {
+                method: "Email/set".into(),
+                error_type: "unknown".into(),
+                description: "No email ID returned".into(),
+            })?;
+
+        debug!(email_id = %email_id, "Reply sent successfully");
+        Ok(email_id)
+    }
+
+    /// Forward an email with proper attribution
+    #[instrument(skip(self, body))]
+    pub async fn forward_email(
+        &self,
+        original: &Email,
+        to: Vec<EmailAddress>,
+        body: &str,
+        cc: Vec<EmailAddress>,
+        bcc: Vec<EmailAddress>,
+    ) -> Result<String> {
+        let account_id = self
+            .session()?
+            .primary_account_id()
+            .ok_or_else(|| Error::Config("No primary account".into()))?;
+
+        let identities = self.list_identities().await?;
+        let identity = identities.first().ok_or(Error::IdentityNotFound)?;
+
+        let drafts = self.find_mailbox("drafts").await?;
+        let sent = self.find_mailbox("sent").await?;
+
+        // Build subject with Fwd: prefix if not already present
+        let subject = if original
+            .subject
+            .as_ref()
+            .is_some_and(|s| s.to_lowercase().starts_with("fwd:"))
+        {
+            original.subject.clone().unwrap_or_default()
+        } else {
+            format!("Fwd: {}", original.subject.as_deref().unwrap_or(""))
+        };
+
+        // Build forwarded body with attribution
+        let original_body = original
+            .body_values
+            .as_ref()
+            .and_then(|bv| bv.values().next())
+            .map(|v| v.value.as_str())
+            .unwrap_or("");
+
+        let sender = original
+            .from
+            .as_ref()
+            .and_then(|f| f.first())
+            .map(|a| {
+                if let Some(ref name) = a.name {
+                    format!("{} <{}>", name, a.email)
+                } else {
+                    a.email.clone()
+                }
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let date = original.received_at.as_deref().unwrap_or("unknown date");
+
+        let full_body = format!(
+            "{}\n\n---------- Forwarded message ---------\nFrom: {}\nDate: {}\nSubject: {}\n\n{}",
+            body,
+            sender,
+            date,
+            original.subject.as_deref().unwrap_or(""),
+            original_body
+        );
+
+        let mut email_create: HashMap<String, Value> = HashMap::new();
+        email_create.insert("mailboxIds".into(), json!({ drafts.id.clone(): true }));
+        email_create.insert(
+            "from".into(),
+            json!([{ "email": identity.email, "name": identity.name }]),
+        );
+        email_create.insert(
+            "to".into(),
+            json!(
+                to.iter()
+                    .map(|a| json!({"email": a.email, "name": a.name}))
+                    .collect::<Vec<_>>()
+            ),
+        );
+        if !cc.is_empty() {
+            email_create.insert(
+                "cc".into(),
+                json!(
+                    cc.iter()
+                        .map(|a| json!({"email": a.email, "name": a.name}))
+                        .collect::<Vec<_>>()
+                ),
+            );
+        }
+        if !bcc.is_empty() {
+            email_create.insert(
+                "bcc".into(),
+                json!(
+                    bcc.iter()
+                        .map(|a| json!({"email": a.email, "name": a.name}))
+                        .collect::<Vec<_>>()
+                ),
+            );
+        }
+        email_create.insert("subject".into(), json!(subject));
+        email_create.insert(
+            "bodyValues".into(),
+            json!({ "body": { "value": full_body, "charset": "utf-8" } }),
+        );
+        email_create.insert(
+            "textBody".into(),
+            json!([{ "partId": "body", "type": "text/plain" }]),
+        );
+        email_create.insert("keywords".into(), json!({ "$draft": true }));
+
+        let responses = self
+            .request(vec![
+                json!([
+                    "Email/set",
+                    {
+                        "accountId": account_id,
+                        "create": { "draft": email_create }
+                    },
+                    "e0"
+                ]),
+                json!([
+                    "EmailSubmission/set",
+                    {
+                        "accountId": account_id,
+                        "create": {
+                            "submission": {
+                                "identityId": identity.id,
+                                "emailId": "#draft"
+                            }
+                        },
+                        "onSuccessUpdateEmail": {
+                            "#submission": {
+                                "mailboxIds": { sent.id.clone(): true },
+                                "keywords": { "$draft": null, "$seen": true }
+                            }
+                        }
+                    },
+                    "s0"
+                ]),
+            ])
+            .await?;
+
+        #[derive(Deserialize)]
+        struct EmailSetResponse {
+            created: Option<HashMap<String, Value>>,
+            #[serde(rename = "notCreated")]
+            not_created: Option<HashMap<String, Value>>,
+        }
+
+        let email_resp: EmailSetResponse =
+            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/set")?;
+
+        if let Some(ref not_created) = email_resp.not_created
+            && let Some(err) = not_created.get("draft")
+        {
+            let error_type = err
+                .get("type")
+                .and_then(|v: &Value| v.as_str())
+                .unwrap_or("unknown");
+            let description = err
+                .get("description")
+                .and_then(|v: &Value| v.as_str())
+                .unwrap_or("Failed to create email");
+            return Err(Error::Jmap {
+                method: "Email/set".into(),
+                error_type: error_type.into(),
+                description: description.into(),
+            });
+        }
+
+        let email_id = email_resp
+            .created
+            .and_then(|c: HashMap<String, Value>| c.get("draft").cloned())
+            .and_then(|d: Value| {
+                d.get("id")
+                    .and_then(|v: &Value| v.as_str())
+                    .map(String::from)
+            })
+            .ok_or_else(|| Error::Jmap {
+                method: "Email/set".into(),
+                error_type: "unknown".into(),
+                description: "No email ID returned".into(),
+            })?;
+
+        debug!(email_id = %email_id, "Forward sent successfully");
+        Ok(email_id)
+    }
+
     #[allow(dead_code)]
     #[instrument(skip(self))]
     pub async fn set_keywords(

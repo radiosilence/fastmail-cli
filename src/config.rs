@@ -61,3 +61,46 @@ impl Config {
         self.api_token = Some(token);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_default() {
+        let config = Config::default();
+        assert!(config.api_token.is_none());
+    }
+
+    #[test]
+    fn test_config_get_token_none() {
+        let config = Config::default();
+        let result = config.get_token();
+        assert!(matches!(result, Err(Error::NotAuthenticated)));
+    }
+
+    #[test]
+    fn test_config_get_token_some() {
+        let config = Config {
+            api_token: Some("test-token".to_string()),
+        };
+        assert_eq!(config.get_token().unwrap(), "test-token");
+    }
+
+    #[test]
+    fn test_config_set_token() {
+        let mut config = Config::default();
+        config.set_token("new-token".to_string());
+        assert_eq!(config.api_token, Some("new-token".to_string()));
+    }
+
+    #[test]
+    fn test_config_serialize_deserialize() {
+        let config = Config {
+            api_token: Some("test-token".to_string()),
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.api_token, Some("test-token".to_string()));
+    }
+}
