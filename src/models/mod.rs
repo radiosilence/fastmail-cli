@@ -209,6 +209,27 @@ pub struct Identity {
     pub may_delete: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaskedEmail {
+    pub id: String,
+    pub email: String,
+    /// One of: pending, enabled, disabled, deleted
+    pub state: String,
+    #[serde(default)]
+    pub for_domain: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub last_message_at: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub created_by: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct Output<T: Serialize> {
     pub success: bool,
@@ -458,5 +479,24 @@ mod tests {
         assert_eq!(mailbox.role, Some("inbox".to_string()));
         assert_eq!(mailbox.total_emails, 100);
         assert_eq!(mailbox.unread_emails, 5);
+    }
+
+    #[test]
+    fn test_masked_email_deserialize() {
+        let json = r#"{
+            "id": "me123",
+            "email": "abc123@mask.fastmail.com",
+            "state": "enabled",
+            "forDomain": "https://example.com",
+            "description": "Test site",
+            "createdBy": "fastmail-cli"
+        }"#;
+        let masked: MaskedEmail = serde_json::from_str(json).unwrap();
+        assert_eq!(masked.id, "me123");
+        assert_eq!(masked.email, "abc123@mask.fastmail.com");
+        assert_eq!(masked.state, "enabled");
+        assert_eq!(masked.for_domain, Some("https://example.com".to_string()));
+        assert_eq!(masked.description, Some("Test site".to_string()));
+        assert_eq!(masked.created_by, Some("fastmail-cli".to_string()));
     }
 }

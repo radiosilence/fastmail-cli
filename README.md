@@ -141,6 +141,28 @@ fastmail-cli completions zsh >> ~/.zshrc
 fastmail-cli completions fish > ~/.config/fish/completions/fastmail-cli.fish
 ```
 
+### Masked Email
+
+Create disposable email addresses for signups. Requires Fastmail's masked email feature.
+
+```bash
+# List all masked emails
+fastmail-cli masked list
+
+# Create a new masked email
+fastmail-cli masked create --domain "https://example.com" --description "Example Site"
+
+# Create with custom prefix
+fastmail-cli masked create --prefix "shopping" --description "Shopping sites"
+
+# Enable/disable a masked email
+fastmail-cli masked enable MASKED_EMAIL_ID
+fastmail-cli masked disable MASKED_EMAIL_ID
+
+# Delete (requires confirmation)
+fastmail-cli masked delete MASKED_EMAIL_ID -y
+```
+
 ## Output Format
 
 All commands output JSON with this structure:
@@ -182,6 +204,7 @@ This CLI uses Fastmail's JMAP implementation. Key capabilities:
 - `urn:ietf:params:jmap:core`
 - `urn:ietf:params:jmap:mail`
 - `urn:ietf:params:jmap:submission`
+- `https://www.fastmail.com/dev/maskedemail`
 
 For more on JMAP: [jmap.io](https://jmap.io/)
 

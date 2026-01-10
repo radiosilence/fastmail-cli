@@ -154,6 +154,53 @@ enum Commands {
         #[arg(value_enum)]
         shell: Shell,
     },
+
+    /// Manage masked email addresses
+    #[command(subcommand)]
+    Masked(MaskedCommands),
+}
+
+#[derive(Subcommand)]
+enum MaskedCommands {
+    /// List all masked email addresses
+    List,
+
+    /// Create a new masked email address
+    Create {
+        /// Domain this masked email is for (e.g., https://example.com)
+        #[arg(long)]
+        domain: Option<String>,
+
+        /// Description for the masked email
+        #[arg(long)]
+        description: Option<String>,
+
+        /// Custom prefix for the email address (max 64 chars, a-z/0-9/underscore)
+        #[arg(long)]
+        prefix: Option<String>,
+    },
+
+    /// Enable a masked email address
+    Enable {
+        /// Masked email ID
+        id: String,
+    },
+
+    /// Disable a masked email address
+    Disable {
+        /// Masked email ID
+        id: String,
+    },
+
+    /// Delete a masked email address
+    Delete {
+        /// Masked email ID
+        id: String,
+
+        /// Skip confirmation
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -252,6 +299,31 @@ async fn main() {
             );
             return;
         }
+
+        Commands::Masked(cmd) => match cmd {
+            MaskedCommands::List => commands::list_masked_emails().await,
+            MaskedCommands::Create {
+                domain,
+                description,
+                prefix,
+            } => {
+                commands::create_masked_email(
+                    domain.as_deref(),
+                    description.as_deref(),
+                    prefix.as_deref(),
+                )
+                .await
+            }
+            MaskedCommands::Enable { id } => commands::enable_masked_email(&id).await,
+            MaskedCommands::Disable { id } => commands::disable_masked_email(&id).await,
+            MaskedCommands::Delete { id, yes } => {
+                if !yes {
+                    eprintln!("Delete masked email {}? Use -y to confirm.", id);
+                    std::process::exit(1);
+                }
+                commands::delete_masked_email(&id).await
+            }
+        },
     };
 
     if let Err(e) = result {

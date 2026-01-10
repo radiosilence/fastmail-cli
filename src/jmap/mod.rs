@@ -14,6 +14,7 @@ const CAPABILITIES: &[&str] = &[
     "urn:ietf:params:jmap:core",
     "urn:ietf:params:jmap:mail",
     "urn:ietf:params:jmap:submission",
+    "https://www.fastmail.com/dev/maskedemail",
 ];
 
 pub struct JmapClient {
@@ -1054,6 +1055,176 @@ impl JmapClient {
                 .unwrap_or("Failed to update keywords");
             return Err(Error::Jmap {
                 method: "Email/set".into(),
+                error_type: error_type.into(),
+                description: description.into(),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// List all masked email addresses
+    #[instrument(skip(self))]
+    pub async fn list_masked_emails(&self) -> Result<Vec<MaskedEmail>> {
+        let account_id = self
+            .session()?
+            .primary_account_id()
+            .ok_or_else(|| Error::Config("No primary account".into()))?;
+
+        let responses = self
+            .request(vec![json!([
+                "MaskedEmail/get",
+                {
+                    "accountId": account_id,
+                    "ids": null
+                },
+                "me0"
+            ])])
+            .await?;
+
+        #[derive(Deserialize)]
+        struct MaskedEmailGetResponse {
+            list: Vec<MaskedEmail>,
+        }
+
+        let resp: MaskedEmailGetResponse =
+            Self::parse_response(responses.first().unwrap_or(&Value::Null), "MaskedEmail/get")?;
+
+        Ok(resp.list)
+    }
+
+    /// Create a new masked email address
+    #[instrument(skip(self))]
+    pub async fn create_masked_email(
+        &self,
+        for_domain: Option<&str>,
+        description: Option<&str>,
+        email_prefix: Option<&str>,
+    ) -> Result<MaskedEmail> {
+        let account_id = self
+            .session()?
+            .primary_account_id()
+            .ok_or_else(|| Error::Config("No primary account".into()))?;
+
+        let mut create_obj: HashMap<String, Value> = HashMap::new();
+        create_obj.insert("state".into(), json!("enabled"));
+
+        if let Some(domain) = for_domain {
+            create_obj.insert("forDomain".into(), json!(domain));
+        }
+        if let Some(desc) = description {
+            create_obj.insert("description".into(), json!(desc));
+        }
+        if let Some(prefix) = email_prefix {
+            create_obj.insert("emailPrefix".into(), json!(prefix));
+        }
+
+        let responses = self
+            .request(vec![json!([
+                "MaskedEmail/set",
+                {
+                    "accountId": account_id,
+                    "create": { "new": create_obj }
+                },
+                "me0"
+            ])])
+            .await?;
+
+        #[derive(Deserialize)]
+        struct MaskedEmailSetResponse {
+            created: Option<HashMap<String, MaskedEmail>>,
+            #[serde(rename = "notCreated")]
+            not_created: Option<HashMap<String, Value>>,
+        }
+
+        let resp: MaskedEmailSetResponse =
+            Self::parse_response(responses.first().unwrap_or(&Value::Null), "MaskedEmail/set")?;
+
+        if let Some(ref not_created) = resp.not_created
+            && let Some(err) = not_created.get("new")
+        {
+            let error_type = err
+                .get("type")
+                .and_then(|v: &Value| v.as_str())
+                .unwrap_or("unknown");
+            let description = err
+                .get("description")
+                .and_then(|v: &Value| v.as_str())
+                .unwrap_or("Failed to create masked email");
+            return Err(Error::Jmap {
+                method: "MaskedEmail/set".into(),
+                error_type: error_type.into(),
+                description: description.into(),
+            });
+        }
+
+        resp.created
+            .and_then(|mut c| c.remove("new"))
+            .ok_or_else(|| Error::Jmap {
+                method: "MaskedEmail/set".into(),
+                error_type: "unknown".into(),
+                description: "No masked email returned".into(),
+            })
+    }
+
+    /// Update a masked email's state (enable/disable/delete)
+    #[instrument(skip(self))]
+    pub async fn update_masked_email(
+        &self,
+        id: &str,
+        state: Option<&str>,
+        for_domain: Option<&str>,
+        description: Option<&str>,
+    ) -> Result<()> {
+        let account_id = self
+            .session()?
+            .primary_account_id()
+            .ok_or_else(|| Error::Config("No primary account".into()))?;
+
+        let mut update_obj: HashMap<String, Value> = HashMap::new();
+        if let Some(s) = state {
+            update_obj.insert("state".into(), json!(s));
+        }
+        if let Some(domain) = for_domain {
+            update_obj.insert("forDomain".into(), json!(domain));
+        }
+        if let Some(desc) = description {
+            update_obj.insert("description".into(), json!(desc));
+        }
+
+        let responses = self
+            .request(vec![json!([
+                "MaskedEmail/set",
+                {
+                    "accountId": account_id,
+                    "update": { (id): update_obj }
+                },
+                "me0"
+            ])])
+            .await?;
+
+        #[derive(Deserialize)]
+        struct SetResponse {
+            #[serde(rename = "notUpdated")]
+            not_updated: Option<HashMap<String, Value>>,
+        }
+
+        let resp: SetResponse =
+            Self::parse_response(responses.first().unwrap_or(&Value::Null), "MaskedEmail/set")?;
+
+        if let Some(ref not_updated) = resp.not_updated
+            && let Some(err) = not_updated.get(id)
+        {
+            let error_type = err
+                .get("type")
+                .and_then(|v: &Value| v.as_str())
+                .unwrap_or("unknown");
+            let description = err
+                .get("description")
+                .and_then(|v: &Value| v.as_str())
+                .unwrap_or("Failed to update masked email");
+            return Err(Error::Jmap {
+                method: "MaskedEmail/set".into(),
                 error_type: error_type.into(),
                 description: description.into(),
             });
