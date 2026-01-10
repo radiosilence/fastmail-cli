@@ -1,0 +1,638 @@
+use crate::error::{Error, Result};
+use crate::models::*;
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::time::Duration;
+use tracing::{debug, instrument};
+
+const SESSION_URL: &str = "https://api.fastmail.com/jmap/session";
+const TIMEOUT: Duration = Duration::from_secs(30);
+
+const CAPABILITIES: &[&str] = &[
+    "urn:ietf:params:jmap:core",
+    "urn:ietf:params:jmap:mail",
+    "urn:ietf:params:jmap:submission",
+];
+
+pub struct JmapClient {
+    client: Client,
+    token: String,
+    session: Option<Session>,
+}
+
+#[derive(Debug, Serialize)]
+struct JmapRequest {
+    using: Vec<String>,
+    #[serde(rename = "methodCalls")]
+    method_calls: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JmapResponse {
+    #[serde(rename = "methodResponses")]
+    method_responses: Vec<Value>,
+}
+
+impl JmapClient {
+    pub fn new(token: String) -> Self {
+        let client = Client::builder()
+            .timeout(TIMEOUT)
+            .build()
+            .expect("Failed to build HTTP client");
+
+        Self {
+            client,
+            token,
+            session: None,
+        }
+    }
+
+    #[instrument(skip(self))]
+    pub async fn authenticate(&mut self) -> Result<&Session> {
+        debug!("Fetching JMAP session");
+        let resp = self
+            .client
+            .get(SESSION_URL)
+            .bearer_auth(&self.token)
+            .send()
+            .await?;
+
+        match resp.status().as_u16() {
+            401 => return Err(Error::InvalidToken("Authentication failed".into())),
+            429 => return Err(Error::RateLimited),
+            500..=599 => return Err(Error::Server(format!("Server error: {}", resp.status()))),
+            _ => {}
+        }
+
+        let session: Session = resp.json().await?;
+        debug!(username = %session.username, "Session established");
+        self.session = Some(session);
+        Ok(self.session.as_ref().unwrap())
+    }
+
+    pub fn session(&self) -> Result<&Session> {
+        self.session.as_ref().ok_or(Error::NotAuthenticated)
+    }
+
+    #[instrument(skip(self, method_calls))]
+    async fn request(&self, method_calls: Vec<Value>) -> Result<Vec<Value>> {
+        let session = self.session()?;
+        let req = JmapRequest {
+            using: CAPABILITIES.iter().map(|s| s.to_string()).collect(),
+            method_calls,
+        };
+
+        debug!(url = %session.api_url, "Making JMAP request");
+        let resp = self
+            .client
+            .post(&session.api_url)
+            .bearer_auth(&self.token)
+            .json(&req)
+            .send()
+            .await?;
+
+        match resp.status().as_u16() {
+            401 => return Err(Error::InvalidToken("Token expired or invalid".into())),
+            429 => return Err(Error::RateLimited),
+            500..=599 => return Err(Error::Server(format!("Server error: {}", resp.status()))),
+            _ => {}
+        }
+
+        let jmap_resp: JmapResponse = resp.json().await?;
+        Ok(jmap_resp.method_responses)
+    }
+
+    fn parse_response<T: for<'de> Deserialize<'de>>(
+        response: &Value,
+        expected_method: &str,
+    ) -> Result<T> {
+        let arr = response.as_array().ok_or_else(|| Error::Jmap {
+            method: expected_method.into(),
+            error_type: "parse".into(),
+            description: "Response is not an array".into(),
+        })?;
+
+        let method_name = arr.first().and_then(|v: &Value| v.as_str()).unwrap_or("");
+
+        if method_name == "error" {
+            let error_obj = arr.get(1).unwrap_or(&Value::Null);
+            let error_type = error_obj
+                .get("type")
+                .and_then(|v: &Value| v.as_str())
+                .unwrap_or("unknown");
+            let description = error_obj
+                .get("description")
+                .and_then(|v: &Value| v.as_str())
+                .unwrap_or("No description");
+            return Err(Error::Jmap {
+                method: expected_method.into(),
+                error_type: error_type.into(),
+                description: description.into(),
+            });
+        }
+
+        let data = arr.get(1).ok_or_else(|| Error::Jmap {
+            method: expected_method.into(),
+            error_type: "parse".into(),
+            description: "Missing response data".into(),
+        })?;
+
+        serde_json::from_value(data.clone()).map_err(|e| Error::Jmap {
+            method: expected_method.into(),
+            error_type: "parse".into(),
+            description: e.to_string(),
+        })
+    }
+
+    #[instrument(skip(self))]
+    pub async fn list_mailboxes(&self) -> Result<Vec<Mailbox>> {
+        let account_id = self
+            .session()?
+            .primary_account_id()
+            .ok_or_else(|| Error::Config("No primary account".into()))?;
+
+        let responses = self
+            .request(vec![json!([
+                "Mailbox/get",
+                {
+                    "accountId": account_id,
+                    "properties": [
+                        "id", "name", "parentId", "role",
+                        "totalEmails", "unreadEmails",
+                        "totalThreads", "unreadThreads", "sortOrder"
+                    ]
+                },
+                "m0"
+            ])])
+            .await?;
+
+        #[derive(Deserialize)]
+        struct MailboxGetResponse {
+            list: Vec<Mailbox>,
+        }
+
+        let resp: MailboxGetResponse =
+            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Mailbox/get")?;
+
+        Ok(resp.list)
+    }
+
+    pub async fn find_mailbox(&self, name: &str) -> Result<Mailbox> {
+        let mailboxes = self.list_mailboxes().await?;
+        let name_lower = name.to_lowercase();
+
+        if let Some(m) = mailboxes
+            .iter()
+            .find(|m| m.name.to_lowercase() == name_lower)
+        {
+            return Ok(m.clone());
+        }
+
+        if let Some(m) = mailboxes
+            .iter()
+            .find(|m| m.role.as_deref().map(|r: &str| r.to_lowercase()) == Some(name_lower.clone()))
+        {
+            return Ok(m.clone());
+        }
+
+        Err(Error::MailboxNotFound(name.into()))
+    }
+
+    #[instrument(skip(self))]
+    pub async fn list_emails(&self, mailbox_id: &str, limit: u32) -> Result<Vec<Email>> {
+        let account_id = self
+            .session()?
+            .primary_account_id()
+            .ok_or_else(|| Error::Config("No primary account".into()))?;
+
+        let responses = self
+            .request(vec![
+                json!([
+                    "Email/query",
+                    {
+                        "accountId": account_id,
+                        "filter": { "inMailbox": mailbox_id },
+                        "sort": [{"property": "receivedAt", "isAscending": false}],
+                        "limit": limit
+                    },
+                    "q0"
+                ]),
+                json!([
+                    "Email/get",
+                    {
+                        "accountId": account_id,
+                        "#ids": {
+                            "resultOf": "q0",
+                            "name": "Email/query",
+                            "path": "/ids"
+                        },
+                        "properties": [
+                            "id", "threadId", "mailboxIds", "keywords",
+                            "size", "receivedAt", "from", "to", "cc",
+                            "subject", "preview", "hasAttachment"
+                        ]
+                    },
+                    "g0"
+                ]),
+            ])
+            .await?;
+
+        #[derive(Deserialize)]
+        struct EmailGetResponse {
+            list: Vec<Email>,
+        }
+
+        let resp: EmailGetResponse =
+            Self::parse_response(responses.get(1).unwrap_or(&Value::Null), "Email/get")?;
+
+        Ok(resp.list)
+    }
+
+    #[instrument(skip(self))]
+    pub async fn get_email(&self, email_id: &str) -> Result<Email> {
+        let account_id = self
+            .session()?
+            .primary_account_id()
+            .ok_or_else(|| Error::Config("No primary account".into()))?;
+
+        let responses = self
+            .request(vec![json!([
+                "Email/get",
+                {
+                    "accountId": account_id,
+                    "ids": [email_id],
+                    "properties": [
+                        "id", "blobId", "threadId", "mailboxIds", "keywords",
+                        "size", "receivedAt", "messageId", "inReplyTo", "references",
+                        "from", "to", "cc", "bcc", "replyTo", "subject", "sentAt",
+                        "preview", "hasAttachment", "textBody", "htmlBody", "attachments",
+                        "bodyValues"
+                    ],
+                    "fetchTextBodyValues": true,
+                    "fetchHTMLBodyValues": true
+                },
+                "g0"
+            ])])
+            .await?;
+
+        #[derive(Deserialize)]
+        struct EmailGetResponse {
+            list: Vec<Email>,
+            #[serde(rename = "notFound")]
+            not_found: Vec<String>,
+        }
+
+        let resp: EmailGetResponse =
+            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/get")?;
+
+        if !resp.not_found.is_empty() {
+            return Err(Error::EmailNotFound(email_id.into()));
+        }
+
+        resp.list
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::EmailNotFound(email_id.into()))
+    }
+
+    #[instrument(skip(self))]
+    pub async fn search_emails(&self, query: &str, limit: u32) -> Result<Vec<Email>> {
+        let account_id = self
+            .session()?
+            .primary_account_id()
+            .ok_or_else(|| Error::Config("No primary account".into()))?;
+
+        let responses = self
+            .request(vec![
+                json!([
+                    "Email/query",
+                    {
+                        "accountId": account_id,
+                        "filter": { "text": query },
+                        "sort": [{"property": "receivedAt", "isAscending": false}],
+                        "limit": limit
+                    },
+                    "q0"
+                ]),
+                json!([
+                    "Email/get",
+                    {
+                        "accountId": account_id,
+                        "#ids": {
+                            "resultOf": "q0",
+                            "name": "Email/query",
+                            "path": "/ids"
+                        },
+                        "properties": [
+                            "id", "threadId", "mailboxIds", "keywords",
+                            "size", "receivedAt", "from", "to", "cc",
+                            "subject", "preview", "hasAttachment"
+                        ]
+                    },
+                    "g0"
+                ]),
+            ])
+            .await?;
+
+        #[derive(Deserialize)]
+        struct EmailGetResponse {
+            list: Vec<Email>,
+        }
+
+        let resp: EmailGetResponse =
+            Self::parse_response(responses.get(1).unwrap_or(&Value::Null), "Email/get")?;
+
+        Ok(resp.list)
+    }
+
+    #[instrument(skip(self))]
+    pub async fn list_identities(&self) -> Result<Vec<Identity>> {
+        let account_id = self
+            .session()?
+            .primary_account_id()
+            .ok_or_else(|| Error::Config("No primary account".into()))?;
+
+        let responses = self
+            .request(vec![json!([
+                "Identity/get",
+                { "accountId": account_id },
+                "i0"
+            ])])
+            .await?;
+
+        #[derive(Deserialize)]
+        struct IdentityGetResponse {
+            list: Vec<Identity>,
+        }
+
+        let resp: IdentityGetResponse =
+            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Identity/get")?;
+
+        Ok(resp.list)
+    }
+
+    #[instrument(skip(self, body))]
+    pub async fn send_email(
+        &self,
+        to: Vec<EmailAddress>,
+        cc: Vec<EmailAddress>,
+        bcc: Vec<EmailAddress>,
+        subject: &str,
+        body: &str,
+        in_reply_to: Option<&str>,
+    ) -> Result<String> {
+        let account_id = self
+            .session()?
+            .primary_account_id()
+            .ok_or_else(|| Error::Config("No primary account".into()))?;
+
+        let identities = self.list_identities().await?;
+        let identity = identities.first().ok_or(Error::IdentityNotFound)?;
+
+        let drafts = self.find_mailbox("drafts").await?;
+        let sent = self.find_mailbox("sent").await?;
+
+        let mut email_create: HashMap<String, Value> = HashMap::new();
+        email_create.insert("mailboxIds".into(), json!({ drafts.id.clone(): true }));
+        email_create.insert(
+            "from".into(),
+            json!([{ "email": identity.email, "name": identity.name }]),
+        );
+        email_create.insert(
+            "to".into(),
+            json!(
+                to.iter()
+                    .map(|a| json!({"email": a.email, "name": a.name}))
+                    .collect::<Vec<_>>()
+            ),
+        );
+        if !cc.is_empty() {
+            email_create.insert(
+                "cc".into(),
+                json!(
+                    cc.iter()
+                        .map(|a| json!({"email": a.email, "name": a.name}))
+                        .collect::<Vec<_>>()
+                ),
+            );
+        }
+        if !bcc.is_empty() {
+            email_create.insert(
+                "bcc".into(),
+                json!(
+                    bcc.iter()
+                        .map(|a| json!({"email": a.email, "name": a.name}))
+                        .collect::<Vec<_>>()
+                ),
+            );
+        }
+        email_create.insert("subject".into(), json!(subject));
+        email_create.insert(
+            "bodyValues".into(),
+            json!({ "body": { "value": body, "charset": "utf-8" } }),
+        );
+        email_create.insert(
+            "textBody".into(),
+            json!([{ "partId": "body", "type": "text/plain" }]),
+        );
+        email_create.insert("keywords".into(), json!({ "$draft": true }));
+
+        if let Some(reply_id) = in_reply_to {
+            email_create.insert("inReplyTo".into(), json!([reply_id]));
+        }
+
+        let responses = self
+            .request(vec![
+                json!([
+                    "Email/set",
+                    {
+                        "accountId": account_id,
+                        "create": { "draft": email_create }
+                    },
+                    "e0"
+                ]),
+                json!([
+                    "EmailSubmission/set",
+                    {
+                        "accountId": account_id,
+                        "create": {
+                            "submission": {
+                                "identityId": identity.id,
+                                "emailId": "#draft"
+                            }
+                        },
+                        "onSuccessUpdateEmail": {
+                            "#submission": {
+                                "mailboxIds": { sent.id.clone(): true },
+                                "keywords": { "$draft": null, "$seen": true }
+                            }
+                        }
+                    },
+                    "s0"
+                ]),
+            ])
+            .await?;
+
+        #[derive(Deserialize)]
+        struct EmailSetResponse {
+            created: Option<HashMap<String, Value>>,
+            #[serde(rename = "notCreated")]
+            not_created: Option<HashMap<String, Value>>,
+        }
+
+        let email_resp: EmailSetResponse =
+            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/set")?;
+
+        if let Some(ref not_created) = email_resp.not_created
+            && let Some(err) = not_created.get("draft")
+        {
+            let error_type = err
+                .get("type")
+                .and_then(|v: &Value| v.as_str())
+                .unwrap_or("unknown");
+            let description = err
+                .get("description")
+                .and_then(|v: &Value| v.as_str())
+                .unwrap_or("Failed to create email");
+            return Err(Error::Jmap {
+                method: "Email/set".into(),
+                error_type: error_type.into(),
+                description: description.into(),
+            });
+        }
+
+        let email_id = email_resp
+            .created
+            .and_then(|c: HashMap<String, Value>| c.get("draft").cloned())
+            .and_then(|d: Value| {
+                d.get("id")
+                    .and_then(|v: &Value| v.as_str())
+                    .map(String::from)
+            })
+            .ok_or_else(|| Error::Jmap {
+                method: "Email/set".into(),
+                error_type: "unknown".into(),
+                description: "No email ID returned".into(),
+            })?;
+
+        debug!(email_id = %email_id, "Email sent successfully");
+        Ok(email_id)
+    }
+
+    #[instrument(skip(self))]
+    pub async fn move_email(&self, email_id: &str, mailbox_id: &str) -> Result<()> {
+        let account_id = self
+            .session()?
+            .primary_account_id()
+            .ok_or_else(|| Error::Config("No primary account".into()))?;
+
+        let responses = self
+            .request(vec![json!([
+                "Email/set",
+                {
+                    "accountId": account_id,
+                    "update": {
+                        (email_id): {
+                            "mailboxIds": { (mailbox_id): true }
+                        }
+                    }
+                },
+                "m0"
+            ])])
+            .await?;
+
+        #[derive(Deserialize)]
+        struct SetResponse {
+            #[serde(rename = "notUpdated")]
+            not_updated: Option<HashMap<String, Value>>,
+        }
+
+        let resp: SetResponse =
+            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/set")?;
+
+        if let Some(ref not_updated) = resp.not_updated
+            && let Some(err) = not_updated.get(email_id)
+        {
+            let error_type = err
+                .get("type")
+                .and_then(|v: &Value| v.as_str())
+                .unwrap_or("unknown");
+            let description = err
+                .get("description")
+                .and_then(|v: &Value| v.as_str())
+                .unwrap_or("Failed to move email");
+            return Err(Error::Jmap {
+                method: "Email/set".into(),
+                error_type: error_type.into(),
+                description: description.into(),
+            });
+        }
+
+        Ok(())
+    }
+
+    #[instrument(skip(self))]
+    pub async fn mark_spam(&self, email_id: &str) -> Result<()> {
+        let junk = self.find_mailbox("junk").await?;
+        self.move_email(email_id, &junk.id).await
+    }
+
+    #[allow(dead_code)]
+    #[instrument(skip(self))]
+    pub async fn set_keywords(
+        &self,
+        email_id: &str,
+        keywords: HashMap<String, bool>,
+    ) -> Result<()> {
+        let account_id = self
+            .session()?
+            .primary_account_id()
+            .ok_or_else(|| Error::Config("No primary account".into()))?;
+
+        let responses = self
+            .request(vec![json!([
+                "Email/set",
+                {
+                    "accountId": account_id,
+                    "update": {
+                        (email_id): {
+                            "keywords": keywords
+                        }
+                    }
+                },
+                "k0"
+            ])])
+            .await?;
+
+        #[derive(Deserialize)]
+        struct SetResponse {
+            #[serde(rename = "notUpdated")]
+            not_updated: Option<HashMap<String, Value>>,
+        }
+
+        let resp: SetResponse =
+            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/set")?;
+
+        if let Some(ref not_updated) = resp.not_updated
+            && let Some(err) = not_updated.get(email_id)
+        {
+            let error_type = err
+                .get("type")
+                .and_then(|v: &Value| v.as_str())
+                .unwrap_or("unknown");
+            let description = err
+                .get("description")
+                .and_then(|v: &Value| v.as_str())
+                .unwrap_or("Failed to update keywords");
+            return Err(Error::Jmap {
+                method: "Email/set".into(),
+                error_type: error_type.into(),
+                description: description.into(),
+            });
+        }
+
+        Ok(())
+    }
+}
