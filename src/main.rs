@@ -4,8 +4,10 @@ mod error;
 mod jmap;
 mod models;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{Shell, generate};
 use models::Output;
+use std::io;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -100,6 +102,13 @@ enum Commands {
         #[arg(short, long)]
         output: Option<String>,
     },
+
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: Shell,
+    },
 }
 
 #[derive(Subcommand)]
@@ -171,6 +180,16 @@ async fn main() {
 
         Commands::Download { email_id, output } => {
             commands::download_attachment(&email_id, output.as_deref()).await
+        }
+
+        Commands::Completions { shell } => {
+            generate(
+                shell,
+                &mut Cli::command(),
+                "fastmail-cli",
+                &mut io::stdout(),
+            );
+            return;
         }
     };
 
