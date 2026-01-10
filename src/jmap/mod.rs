@@ -579,6 +579,42 @@ impl JmapClient {
         self.move_email(email_id, &junk.id).await
     }
 
+    /// Download a blob (attachment) by ID
+    #[instrument(skip(self))]
+    pub async fn download_blob(&self, blob_id: &str) -> Result<Vec<u8>> {
+        let session = self.session()?;
+        let account_id = session
+            .primary_account_id()
+            .ok_or_else(|| Error::Config("No primary account".into()))?;
+
+        // downloadUrl template: https://api.fastmail.com/jmap/download/{accountId}/{blobId}/{name}?accept={type}
+        let url = session
+            .download_url
+            .replace("{accountId}", account_id)
+            .replace("{blobId}", blob_id)
+            .replace("{name}", "attachment")
+            .replace("{type}", "application/octet-stream");
+
+        debug!(url = %url, "Downloading blob");
+        let resp = self
+            .client
+            .get(&url)
+            .bearer_auth(&self.token)
+            .send()
+            .await?;
+
+        match resp.status().as_u16() {
+            401 => return Err(Error::InvalidToken("Token expired or invalid".into())),
+            404 => return Err(Error::Config(format!("Blob not found: {}", blob_id))),
+            429 => return Err(Error::RateLimited),
+            500..=599 => return Err(Error::Server(format!("Server error: {}", resp.status()))),
+            _ => {}
+        }
+
+        let bytes = resp.bytes().await?;
+        Ok(bytes.to_vec())
+    }
+
     #[allow(dead_code)]
     #[instrument(skip(self))]
     pub async fn set_keywords(

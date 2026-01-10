@@ -90,6 +90,16 @@ enum Commands {
         #[arg(short = 'y', long)]
         yes: bool,
     },
+
+    /// Download attachments from an email
+    Download {
+        /// Email ID
+        email_id: String,
+
+        /// Output directory (default: current directory)
+        #[arg(short, long)]
+        output: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -157,6 +167,10 @@ async fn main() {
                 std::process::exit(1);
             }
             commands::mark_spam(&email_id).await
+        }
+
+        Commands::Download { email_id, output } => {
+            commands::download_attachment(&email_id, output.as_deref()).await
         }
     };
 

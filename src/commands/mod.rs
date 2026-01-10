@@ -1,4 +1,5 @@
 mod auth;
+mod download;
 mod get;
 mod list;
 mod r#move;
@@ -7,6 +8,7 @@ mod send;
 mod spam;
 
 pub use auth::*;
+pub use download::*;
 pub use get::*;
 pub use list::*;
 pub use r#move::*;
