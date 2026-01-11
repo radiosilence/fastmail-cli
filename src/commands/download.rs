@@ -1,14 +1,16 @@
 use crate::config::Config;
 use crate::jmap::JmapClient;
 use crate::models::Output;
+use crate::util::{extract_text, infer_image_mime, is_image, parse_size, resize_image};
 use std::path::Path;
-use std::process::Command;
 
 pub async fn download_attachment(
     email_id: &str,
     output_dir: Option<&str>,
     format: Option<&str>,
+    max_size: Option<&str>,
 ) -> anyhow::Result<()> {
+    let max_bytes = max_size.and_then(parse_size);
     let config = Config::load()?;
     let token = config.get_token()?;
 
@@ -70,10 +72,50 @@ pub async fn download_attachment(
             .clone()
             .unwrap_or_else(|| format!("{}.bin", blob_id));
 
+        let content_type = attachment
+            .content_type
+            .as_deref()
+            .unwrap_or("application/octet-stream");
+
         let bytes = client.download_blob(blob_id).await?;
 
-        let path = Path::new(out_dir).join(&filename);
-        std::fs::write(&path, &bytes)?;
+        // Resize images if --max-size specified
+        let (final_bytes, final_filename) = if let Some(max) = max_bytes {
+            let mime = if is_image(content_type, &filename) {
+                infer_image_mime(&filename).unwrap_or(content_type)
+            } else {
+                content_type
+            };
+
+            if is_image(mime, &filename) {
+                match resize_image(&bytes, mime, max) {
+                    Ok((resized, new_mime)) => {
+                        // Update extension if format changed (e.g., PNG -> JPEG)
+                        let new_filename = if new_mime == "image/jpeg"
+                            && !filename.to_lowercase().ends_with(".jpg")
+                            && !filename.to_lowercase().ends_with(".jpeg")
+                        {
+                            let stem = Path::new(&filename)
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or(&filename);
+                            format!("{}.jpg", stem)
+                        } else {
+                            filename.clone()
+                        };
+                        (resized, new_filename)
+                    }
+                    Err(_) => (bytes, filename.clone()),
+                }
+            } else {
+                (bytes, filename.clone())
+            }
+        } else {
+            (bytes, filename.clone())
+        };
+
+        let path = Path::new(out_dir).join(&final_filename);
+        std::fs::write(&path, &final_bytes)?;
 
         downloaded.push(path.to_string_lossy().to_string());
     }
@@ -94,146 +136,4 @@ struct AttachmentContent {
     content_type: String,
     size: usize,
     text: Option<String>,
-}
-
-fn extract_text(
-    bytes: &[u8],
-    content_type: &str,
-    filename: &str,
-) -> anyhow::Result<Option<String>> {
-    let ext = Path::new(filename)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    // Plain text
-    if content_type.starts_with("text/") || ext == "txt" || ext == "md" || ext == "csv" {
-        return Ok(Some(String::from_utf8_lossy(bytes).to_string()));
-    }
-
-    // PDF - use pdf-extract (pure Rust)
-    if content_type == "application/pdf" || ext == "pdf" {
-        return Ok(pdf_extract::extract_text_from_mem(bytes).ok());
-    }
-
-    // DOCX - use docx-lite (pure Rust)
-    if content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        || ext == "docx"
-    {
-        let temp_path =
-            std::env::temp_dir().join(format!("fastmail-cli-{}.docx", std::process::id()));
-        std::fs::write(&temp_path, bytes)?;
-        let result = docx_lite::extract_text(&temp_path).ok();
-        let _ = std::fs::remove_file(&temp_path);
-        return Ok(result);
-    }
-
-    // DOC (old format) - try textutil (macOS), antiword, or catdoc
-    if content_type == "application/msword" || ext == "doc" {
-        let temp_path =
-            std::env::temp_dir().join(format!("fastmail-cli-{}.doc", std::process::id()));
-        std::fs::write(&temp_path, bytes)?;
-        // Try textutil (macOS) first, then antiword, then catdoc
-        let result = extract_with_textutil(&temp_path)
-            .or_else(|_| extract_with_command_file(&temp_path, "antiword", &[]))
-            .or_else(|_| extract_with_command_file(&temp_path, "catdoc", &[]));
-        let _ = std::fs::remove_file(&temp_path);
-        return result;
-    }
-
-    // RTF - use unrtf or pandoc
-    if content_type == "application/rtf" || ext == "rtf" {
-        let temp_path =
-            std::env::temp_dir().join(format!("fastmail-cli-{}.rtf", std::process::id()));
-        std::fs::write(&temp_path, bytes)?;
-        let result = extract_with_command_file(&temp_path, "pandoc", &["-t", "plain"]);
-        let _ = std::fs::remove_file(&temp_path);
-        return result;
-    }
-
-    // Images - OCR via tesseract if available
-    if content_type.starts_with("image/")
-        || ext == "png"
-        || ext == "jpg"
-        || ext == "jpeg"
-        || ext == "gif"
-        || ext == "tiff"
-        || ext == "webp"
-        || ext == "bmp"
-    {
-        let temp_path =
-            std::env::temp_dir().join(format!("fastmail-cli-{}.{}", std::process::id(), ext));
-        std::fs::write(&temp_path, bytes)?;
-        let result = extract_with_tesseract(&temp_path);
-        let _ = std::fs::remove_file(&temp_path);
-        return result;
-    }
-
-    // Unknown format
-    Ok(None)
-}
-
-fn extract_with_command_file(
-    path: &Path,
-    cmd: &str,
-    extra_args: &[&str],
-) -> anyhow::Result<Option<String>> {
-    let mut args: Vec<&str> = vec![path.to_str().unwrap_or("")];
-    args.extend(extra_args);
-
-    let output = Command::new(cmd)
-        .args(&args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => Ok(Some(String::from_utf8_lossy(&o.stdout).to_string())),
-        Ok(_) => Ok(None),
-        Err(_) => Ok(None), // Command not available
-    }
-}
-
-/// Use tesseract for OCR on images
-fn extract_with_tesseract(path: &Path) -> anyhow::Result<Option<String>> {
-    let output = Command::new("tesseract")
-        .arg(path)
-        .arg("stdout")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => {
-            let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if text.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(text))
-            }
-        }
-        Ok(_) => Ok(None),
-        Err(_) => Ok(None), // tesseract not installed
-    }
-}
-
-/// Use macOS textutil to convert doc to txt
-fn extract_with_textutil(path: &Path) -> anyhow::Result<Option<String>> {
-    let output_path = path.with_extension("txt");
-
-    let output = Command::new("textutil")
-        .args(["-convert", "txt", "-stdout"])
-        .arg(path)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output();
-
-    let _ = std::fs::remove_file(&output_path); // cleanup if textutil wrote a file
-
-    match output {
-        Ok(o) if o.status.success() => Ok(Some(String::from_utf8_lossy(&o.stdout).to_string())),
-        Ok(_) => Ok(None),
-        Err(_) => Ok(None),
-    }
 }

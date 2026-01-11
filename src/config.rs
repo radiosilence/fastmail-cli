@@ -53,8 +53,13 @@ impl Config {
         Ok(())
     }
 
-    pub fn get_token(&self) -> Result<&str> {
-        self.api_token.as_deref().ok_or(Error::NotAuthenticated)
+    /// Get the API token, preferring FASTMAIL_API_TOKEN env var over config file
+    pub fn get_token(&self) -> Result<String> {
+        // Prefer env var (works for both CLI and MCP usage)
+        if let Ok(token) = std::env::var("FASTMAIL_API_TOKEN") {
+            return Ok(token);
+        }
+        self.api_token.clone().ok_or(Error::NotAuthenticated)
     }
 
     pub fn set_token(&mut self, token: String) {

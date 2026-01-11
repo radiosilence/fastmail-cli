@@ -2,6 +2,7 @@ mod commands;
 mod config;
 mod error;
 mod jmap;
+mod mcp;
 mod models;
 pub mod util;
 
@@ -157,6 +158,16 @@ enum Commands {
         yes: bool,
     },
 
+    /// Mark email as read or unread
+    MarkRead {
+        /// Email ID
+        email_id: String,
+
+        /// Mark as unread instead of read
+        #[arg(long)]
+        unread: bool,
+    },
+
     /// Download attachments from an email
     Download {
         /// Email ID
@@ -169,6 +180,10 @@ enum Commands {
         /// Output format: raw (save files) or json (extract text)
         #[arg(short, long)]
         format: Option<String>,
+
+        /// Max size for images (e.g., 500K, 1M). Images larger than this are resized.
+        #[arg(long)]
+        max_size: Option<String>,
     },
 
     /// Reply to an email
@@ -225,6 +240,9 @@ enum Commands {
     /// Manage masked email addresses
     #[command(subcommand)]
     Masked(MaskedCommands),
+
+    /// Run as MCP (Model Context Protocol) server for Claude integration
+    Mcp,
 }
 
 #[derive(Subcommand)]
@@ -378,11 +396,22 @@ async fn main() {
             commands::mark_spam(&email_id).await
         }
 
+        Commands::MarkRead { email_id, unread } => commands::mark_read(&email_id, !unread).await,
+
         Commands::Download {
             email_id,
             output,
             format,
-        } => commands::download_attachment(&email_id, output.as_deref(), format.as_deref()).await,
+            max_size,
+        } => {
+            commands::download_attachment(
+                &email_id,
+                output.as_deref(),
+                format.as_deref(),
+                max_size.as_deref(),
+            )
+            .await
+        }
 
         Commands::Reply {
             email_id,
@@ -434,6 +463,8 @@ async fn main() {
                 commands::delete_masked_email(&id).await
             }
         },
+
+        Commands::Mcp => mcp::run_server().await,
     };
 
     if let Err(e) = result {
