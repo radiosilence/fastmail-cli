@@ -45,6 +45,30 @@ fastmail-cli auth YOUR_TOKEN
 
 Token is stored in `~/.fastmail-cli/config.json` with 0600 permissions.
 
+### Configuration
+
+Credentials can be set via environment variables or config file. Env vars take precedence.
+
+**Environment variables:**
+
+```bash
+export FASTMAIL_API_TOKEN="fmu1-..."      # Required for JMAP (email)
+export FASTMAIL_USERNAME="you@fastmail.com"  # Required for CardDAV (contacts)
+export FASTMAIL_APP_PASSWORD="xxxx..."    # Required for CardDAV (contacts)
+```
+
+**Config file** (`~/.fastmail-cli/config.json`):
+
+```json
+{
+  "api_token": "fmu1-...",
+  "username": "you@fastmail.com",
+  "app_password": "xxxx..."
+}
+```
+
+The `auth` command only sets `api_token`. For contacts, add `username` and `app_password` manually or use env vars.
+
 ## Usage
 
 All output is JSON for easy scripting with `jq`.
