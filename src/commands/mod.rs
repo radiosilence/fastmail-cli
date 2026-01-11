@@ -1,4 +1,5 @@
 mod auth;
+mod contacts;
 mod download;
 mod forward;
 mod get;
@@ -13,6 +14,7 @@ mod spam;
 mod thread;
 
 pub use auth::*;
+pub use contacts::*;
 pub use download::*;
 pub use forward::*;
 pub use get::*;

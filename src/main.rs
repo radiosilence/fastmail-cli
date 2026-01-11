@@ -1,3 +1,4 @@
+mod carddav;
 mod commands;
 mod config;
 mod error;
@@ -241,6 +242,10 @@ enum Commands {
     #[command(subcommand)]
     Masked(MaskedCommands),
 
+    /// Manage contacts via CardDAV
+    #[command(subcommand)]
+    Contacts(ContactsCommands),
+
     /// Run as MCP (Model Context Protocol) server for Claude integration
     Mcp,
 }
@@ -302,6 +307,18 @@ enum ListCommands {
         /// Maximum results
         #[arg(short, long, default_value = "50")]
         limit: u32,
+    },
+}
+
+#[derive(Subcommand)]
+enum ContactsCommands {
+    /// List all contacts
+    List,
+
+    /// Search contacts by name or email
+    Search {
+        /// Search query
+        query: String,
     },
 }
 
@@ -462,6 +479,11 @@ async fn main() {
                 }
                 commands::delete_masked_email(&id).await
             }
+        },
+
+        Commands::Contacts(cmd) => match cmd {
+            ContactsCommands::List => commands::list_contacts().await,
+            ContactsCommands::Search { query } => commands::search_contacts(&query).await,
         },
 
         Commands::Mcp => mcp::run_server().await,

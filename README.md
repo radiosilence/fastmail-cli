@@ -8,6 +8,7 @@ CLI for Fastmail's JMAP API. Read, search, send, and manage emails from your ter
 | --------------------- | ------------------------------------------------- |
 | **Email**             | List, search, read, send, reply, forward, threads |
 | **Mailboxes**         | List folders, move emails, mark spam/read         |
+| **Contacts**          | Search contacts via CardDAV                       |
 | **Attachments**       | Download files, extract text, resize images       |
 | **Text Extraction**   | PDF, DOCX (pure Rust), DOC (textutil)             |
 | **Image Resizing**    | `--max-size` to resize images on download         |
@@ -206,6 +207,24 @@ fastmail-cli completions zsh >> ~/.zshrc
 fastmail-cli completions fish > ~/.config/fish/completions/fastmail-cli.fish
 ```
 
+### Contacts
+
+Search your Fastmail contacts via CardDAV. Requires an app password (API tokens don't work for CardDAV).
+
+```bash
+# Set credentials
+export FASTMAIL_USERNAME="you@fastmail.com"
+export FASTMAIL_APP_PASSWORD="your-app-password"
+
+# List all contacts
+fastmail-cli contacts list
+
+# Search by name, email, or organization
+fastmail-cli contacts search "alice"
+```
+
+Generate an app password at [Fastmail Settings > Privacy & Security > Integrations > App passwords](https://app.fastmail.com/settings/security/devicekeys).
+
 ### Masked Email
 
 Create disposable email addresses for signups. Requires Fastmail's masked email feature.
@@ -271,19 +290,24 @@ Configure in Claude Desktop's `claude_desktop_config.json`:
       "command": "fastmail-cli",
       "args": ["mcp"],
       "env": {
-        "FASTMAIL_API_TOKEN": "your-token-here"
+        "FASTMAIL_API_TOKEN": "your-token-here",
+        "FASTMAIL_USERNAME": "you@fastmail.com",
+        "FASTMAIL_APP_PASSWORD": "your-app-password"
       }
     }
   }
 }
 ```
 
-The MCP server exposes 16 tools for email operations:
+Username and app password are optional - only needed for contact search (CardDAV requires app password, API tokens don't work).
+
+The MCP server exposes 17 tools for email operations:
 
 - **Reading**: `list_mailboxes`, `list_emails`, `get_email`, `search_emails`
 - **Actions**: `move_email`, `mark_as_read`, `mark_as_spam`
 - **Sending**: `send_email`, `reply_to_email`, `forward_email` (preview/confirm flow)
 - **Attachments**: `list_attachments`, `get_attachment` (auto text extraction, image resizing)
+- **Contacts**: `search_contacts` (requires app password)
 - **Masked Email**: `list_masked_emails`, `create_masked_email`, `enable_masked_email`, `disable_masked_email`, `delete_masked_email`
 
 Token can be set via `FASTMAIL_API_TOKEN` env var or config file.

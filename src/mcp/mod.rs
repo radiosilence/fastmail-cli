@@ -12,6 +12,7 @@ use rmcp::{
 };
 use tokio::sync::Mutex;
 
+use crate::carddav::CardDavClient;
 use crate::config::Config;
 use crate::jmap::JmapClient;
 use crate::models::EmailAddress;
@@ -194,6 +195,12 @@ pub struct CreateMaskedEmailRequest {
 pub struct MaskedEmailIdRequest {
     /// The masked email ID (from list_masked_emails)
     pub id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SearchContactsRequest {
+    /// Search query - matches name, email, or organization
+    pub query: String,
 }
 
 // ============ Server Implementation ============
@@ -990,6 +997,61 @@ impl FastmailMcp {
         {
             Ok(()) => Self::text_result(format!("Masked email {} deleted.", req.id)),
             Err(e) => Self::error_result(format!("Failed to delete masked email: {}", e)),
+        }
+    }
+
+    // ============ Contact Tools (CardDAV) ============
+
+    #[tool(
+        description = "Search contacts by name, email, or organization. Use this to find someone's email address when composing. Returns name, emails, phones, and organization. Requires FASTMAIL_APP_PASSWORD to be set (API tokens don't work for CardDAV)."
+    )]
+    async fn search_contacts(
+        &self,
+        Parameters(req): Parameters<SearchContactsRequest>,
+    ) -> ToolResult {
+        let config = match Config::load() {
+            Ok(c) => c,
+            Err(e) => return Self::error_result(format!("Config error: {}", e)),
+        };
+
+        let username = match config.get_username() {
+            Ok(u) => u,
+            Err(_) => {
+                return Self::error_result(
+                    "Username not configured. Set FASTMAIL_USERNAME env var.",
+                );
+            }
+        };
+
+        let app_password = match config.get_app_password() {
+            Ok(p) => p,
+            Err(_) => {
+                return Self::error_result(
+                    "App password not configured. Set FASTMAIL_APP_PASSWORD env var (API tokens don't work for CardDAV).",
+                );
+            }
+        };
+
+        let client = CardDavClient::new(username, app_password);
+
+        match client.search_contacts(&req.query).await {
+            Ok(contacts) => {
+                if contacts.is_empty() {
+                    return Self::text_result(format!(
+                        "No contacts found matching \"{}\"",
+                        req.query
+                    ));
+                }
+
+                let text = contacts
+                    .iter()
+                    .map(format_contact)
+                    .collect::<Vec<_>>()
+                    .join("\n\n---\n\n");
+
+                Self::text_result(format!("Found {} contact(s):\n\n{}", contacts.len(), text))
+            }
+            Err(e) => Self::error_result(format!("Failed to search contacts: {}", e)),
         }
     }
 }
