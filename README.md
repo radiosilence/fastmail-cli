@@ -126,7 +126,18 @@ Text extraction supports:
 - **PDF** - pure Rust via `pdf-extract`
 - **DOCX** - pure Rust via `docx-lite`
 - **DOC** - via `textutil` (macOS), `antiword`, or `catdoc`
+- **Images** - OCR via `tesseract` (if installed)
 - **TXT/CSV/MD** - direct UTF-8 read
+
+For image OCR, install tesseract:
+
+```bash
+# macOS
+brew install tesseract
+
+# Ubuntu/Debian
+apt install tesseract-ocr
+```
 
 ### Reply to Email
 

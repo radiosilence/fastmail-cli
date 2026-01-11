@@ -152,7 +152,24 @@ fn extract_text(
         return result;
     }
 
-    // Images - no OCR support currently, return None
+    // Images - OCR via tesseract if available
+    if content_type.starts_with("image/")
+        || ext == "png"
+        || ext == "jpg"
+        || ext == "jpeg"
+        || ext == "gif"
+        || ext == "tiff"
+        || ext == "webp"
+        || ext == "bmp"
+    {
+        let temp_path =
+            std::env::temp_dir().join(format!("fastmail-cli-{}.{}", std::process::id(), ext));
+        std::fs::write(&temp_path, bytes)?;
+        let result = extract_with_tesseract(&temp_path);
+        let _ = std::fs::remove_file(&temp_path);
+        return result;
+    }
+
     // Unknown format
     Ok(None)
 }
@@ -175,6 +192,29 @@ fn extract_with_command_file(
         Ok(o) if o.status.success() => Ok(Some(String::from_utf8_lossy(&o.stdout).to_string())),
         Ok(_) => Ok(None),
         Err(_) => Ok(None), // Command not available
+    }
+}
+
+/// Use tesseract for OCR on images
+fn extract_with_tesseract(path: &Path) -> anyhow::Result<Option<String>> {
+    let output = Command::new("tesseract")
+        .arg(path)
+        .arg("stdout")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if text.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(text))
+            }
+        }
+        Ok(_) => Ok(None),
+        Err(_) => Ok(None), // tesseract not installed
     }
 }
 
