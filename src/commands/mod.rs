@@ -9,6 +9,7 @@ mod reply;
 mod search;
 mod send;
 mod spam;
+mod thread;
 
 pub use auth::*;
 pub use download::*;
@@ -21,3 +22,4 @@ pub use reply::*;
 pub use search::*;
 pub use send::*;
 pub use spam::*;
+pub use thread::*;

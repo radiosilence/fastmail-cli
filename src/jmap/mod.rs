@@ -299,6 +299,81 @@ impl JmapClient {
             .ok_or_else(|| Error::EmailNotFound(email_id.into()))
     }
 
+    /// Get all emails in a thread
+    #[instrument(skip(self))]
+    pub async fn get_thread(&self, email_id: &str) -> Result<Vec<Email>> {
+        let account_id = self
+            .session()?
+            .primary_account_id()
+            .ok_or_else(|| Error::Config("No primary account".into()))?;
+
+        // First get the email to find its threadId
+        let email = self.get_email(email_id).await?;
+        let thread_id = email
+            .thread_id
+            .ok_or_else(|| Error::Config("Email has no thread ID".into()))?;
+
+        // Get the thread to find all email IDs
+        let responses = self
+            .request(vec![json!([
+                "Thread/get",
+                {
+                    "accountId": account_id,
+                    "ids": [thread_id]
+                },
+                "t0"
+            ])])
+            .await?;
+
+        #[derive(Deserialize)]
+        struct Thread {
+            #[serde(rename = "emailIds")]
+            email_ids: Vec<String>,
+        }
+
+        #[derive(Deserialize)]
+        struct ThreadGetResponse {
+            list: Vec<Thread>,
+        }
+
+        let thread_resp: ThreadGetResponse =
+            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Thread/get")?;
+
+        let thread = thread_resp
+            .list
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::Config("Thread not found".into()))?;
+
+        // Now get all emails in the thread
+        let responses = self
+            .request(vec![json!([
+                "Email/get",
+                {
+                    "accountId": account_id,
+                    "ids": thread.email_ids,
+                    "properties": [
+                        "id", "threadId", "mailboxIds", "keywords",
+                        "size", "receivedAt", "from", "to", "cc",
+                        "subject", "preview", "hasAttachment", "bodyValues"
+                    ],
+                    "fetchTextBodyValues": true
+                },
+                "e0"
+            ])])
+            .await?;
+
+        #[derive(Deserialize)]
+        struct EmailGetResponse {
+            list: Vec<Email>,
+        }
+
+        let resp: EmailGetResponse =
+            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/get")?;
+
+        Ok(resp.list)
+    }
+
     /// Search emails with full JMAP filter support
     #[instrument(skip(self, filter))]
     pub async fn search_emails_filtered(

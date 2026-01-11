@@ -37,6 +37,12 @@ enum Commands {
         email_id: String,
     },
 
+    /// Get all emails in a thread/conversation
+    Thread {
+        /// Email ID (will fetch entire thread this email belongs to)
+        email_id: String,
+    },
+
     /// Search emails with JMAP filters
     Search {
         /// Full-text search (from, to, cc, bcc, subject, body)
@@ -299,6 +305,8 @@ async fn main() {
         },
 
         Commands::Get { email_id } => commands::get_email(&email_id).await,
+
+        Commands::Thread { email_id } => commands::get_thread(&email_id).await,
 
         Commands::Search {
             text,
