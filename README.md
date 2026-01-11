@@ -95,6 +95,9 @@ fastmail-cli search --after 2024-01-01 --before 2024-12-31
 fastmail-cli search --unread
 fastmail-cli search --flagged
 
+# Pinned emails (shortcut for --flagged --mailbox INBOX)
+fastmail-cli search --pinned
+
 # Combine filters
 fastmail-cli search --from "boss" --has-attachment --after 2024-06-01 --limit 20
 ```

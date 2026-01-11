@@ -8,7 +8,8 @@
 - Full JMAP filter support for search command
 - Search flags: `--text`, `--from`, `--to`, `--cc`, `--bcc`, `--subject`, `--body`
 - Search flags: `--mailbox`, `--has-attachment`, `--min-size`, `--max-size`
-- Search flags: `--before`, `--after`, `--unread`, `--flagged`
+- Search flags: `--before`, `--after`, `--unread`, `--flagged`, `--pinned`
+- `--pinned` shortcut for `--flagged --mailbox INBOX`
 
 ### Changed
 
