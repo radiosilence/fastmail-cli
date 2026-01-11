@@ -43,7 +43,7 @@ cargo install --git https://github.com/radiosilence/fastmail-cli
 fastmail-cli auth YOUR_TOKEN
 ```
 
-Token is stored in `~/.fastmail-cli/config.json` with 0600 permissions.
+Token is stored in `~/.config/fastmail-cli/config.toml` with 0600 permissions.
 
 ### Configuration
 
@@ -57,17 +57,18 @@ export FASTMAIL_USERNAME="you@fastmail.com"  # Required for CardDAV (contacts)
 export FASTMAIL_APP_PASSWORD="xxxx..."    # Required for CardDAV (contacts)
 ```
 
-**Config file** (`~/.fastmail-cli/config.json`):
+**Config file** (`~/.config/fastmail-cli/config.toml`):
 
-```json
-{
-  "api_token": "fmu1-...",
-  "username": "you@fastmail.com",
-  "app_password": "xxxx..."
-}
+```toml
+[core]
+api_token = "fmu1-..."
+
+[contacts]
+username = "you@fastmail.com"
+app_password = "xxxx..."
 ```
 
-The `auth` command only sets `api_token`. For contacts, add `username` and `app_password` manually or use env vars.
+The `auth` command only sets `[core].api_token`. For contacts, add `[contacts]` section manually or use env vars.
 
 ## Usage
 

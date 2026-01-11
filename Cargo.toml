@@ -1,6 +1,6 @@
 [package]
 name = "fastmail-cli"
-version = "1.5.0"
+version = "1.6.0"
 edition = "2024"
 description = "CLI for Fastmail's JMAP API"
 license = "MIT"
@@ -24,6 +24,7 @@ rmcp = { version = "0.12", features = ["server", "transport-io"] }
 schemars = "0.8"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+toml = "0.8"
 thiserror = "2.0.17"
 tokio = { version = "1.49.0", features = ["full"] }
 tracing = "0.1.44"
