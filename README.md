@@ -7,11 +7,12 @@ CLI for Fastmail's JMAP API. Read, search, send, and manage emails from your ter
 | Feature               | Description                                       |
 | --------------------- | ------------------------------------------------- |
 | **Email**             | List, search, read, send, reply, forward, threads |
-| **Mailboxes**         | List folders, move emails, mark spam              |
-| **Attachments**       | Download files, extract text as JSON              |
+| **Mailboxes**         | List folders, move emails, mark spam/read         |
+| **Attachments**       | Download files, extract text, resize images       |
 | **Text Extraction**   | PDF, DOCX (pure Rust), DOC (textutil)             |
-| **Image OCR**         | PNG, JPG, TIFF, etc via tesseract                 |
+| **Image Resizing**    | `--max-size` to resize images on download         |
 | **Masked Email**      | Create, list, enable/disable aliases              |
+| **MCP Server**        | Claude integration via Model Context Protocol     |
 | **Shell Completions** | Bash, Zsh, Fish, PowerShell                       |
 | **JSON Output**       | All commands output JSON for scripting            |
 
@@ -138,6 +139,16 @@ fastmail-cli spam EMAIL_ID
 fastmail-cli spam EMAIL_ID -y
 ```
 
+### Mark as Read/Unread
+
+```bash
+# Mark as read
+fastmail-cli mark-read EMAIL_ID
+
+# Mark as unread
+fastmail-cli mark-read EMAIL_ID --unread
+```
+
 ### Download Attachments
 
 ```bash
@@ -149,6 +160,9 @@ fastmail-cli download EMAIL_ID --output ~/Downloads
 
 # Extract text content as JSON (PDF, DOCX, DOC, TXT)
 fastmail-cli download EMAIL_ID --format json
+
+# Resize images to max 500KB
+fastmail-cli download EMAIL_ID --max-size 500K
 ```
 
 Text extraction supports:
@@ -156,18 +170,7 @@ Text extraction supports:
 - **PDF** - pure Rust via `pdf-extract`
 - **DOCX** - pure Rust via `docx-lite`
 - **DOC** - via `textutil` (macOS), `antiword`, or `catdoc`
-- **Images** - OCR via `tesseract` (if installed)
 - **TXT/CSV/MD** - direct UTF-8 read
-
-For image OCR, install tesseract:
-
-```bash
-# macOS
-brew install tesseract
-
-# Ubuntu/Debian
-apt install tesseract-ocr
-```
 
 ### Reply to Email
 
@@ -250,6 +253,40 @@ fastmail-cli list emails | jq '.data.emails[].subject'
 # Get email body
 fastmail-cli get EMAIL_ID | jq -r '.data.bodyValues | to_entries[0].value.value'
 ```
+
+## MCP Server (Claude Integration)
+
+Run as an MCP server for use with Claude Desktop or other MCP clients:
+
+```bash
+fastmail-cli mcp
+```
+
+Configure in Claude Desktop's `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "fastmail": {
+      "command": "fastmail-cli",
+      "args": ["mcp"],
+      "env": {
+        "FASTMAIL_API_TOKEN": "your-token-here"
+      }
+    }
+  }
+}
+```
+
+The MCP server exposes 16 tools for email operations:
+
+- **Reading**: `list_mailboxes`, `list_emails`, `get_email`, `search_emails`
+- **Actions**: `move_email`, `mark_as_read`, `mark_as_spam`
+- **Sending**: `send_email`, `reply_to_email`, `forward_email` (preview/confirm flow)
+- **Attachments**: `list_attachments`, `get_attachment` (auto text extraction, image resizing)
+- **Masked Email**: `list_masked_emails`, `create_masked_email`, `enable_masked_email`, `disable_masked_email`, `delete_masked_email`
+
+Token can be set via `FASTMAIL_API_TOKEN` env var or config file.
 
 ## Debug Logging
 
