@@ -105,7 +105,17 @@ fastmail-cli download EMAIL_ID
 
 # Download to specific directory
 fastmail-cli download EMAIL_ID --output ~/Downloads
+
+# Extract text content as JSON (PDF, DOCX, DOC, TXT)
+fastmail-cli download EMAIL_ID --format json
 ```
+
+Text extraction supports:
+
+- **PDF** - pure Rust via `pdf-extract`
+- **DOCX** - pure Rust via `docx-lite`
+- **DOC** - via `textutil` (macOS), `antiword`, or `catdoc`
+- **TXT/CSV/MD** - direct UTF-8 read
 
 ### Reply to Email
 

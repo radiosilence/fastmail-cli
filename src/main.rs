@@ -102,6 +102,10 @@ enum Commands {
         /// Output directory (default: current directory)
         #[arg(short, long)]
         output: Option<String>,
+
+        /// Output format: raw (save files) or json (extract text)
+        #[arg(short, long)]
+        format: Option<String>,
     },
 
     /// Reply to an email
@@ -270,9 +274,11 @@ async fn main() {
             commands::mark_spam(&email_id).await
         }
 
-        Commands::Download { email_id, output } => {
-            commands::download_attachment(&email_id, output.as_deref()).await
-        }
+        Commands::Download {
+            email_id,
+            output,
+            format,
+        } => commands::download_attachment(&email_id, output.as_deref(), format.as_deref()).await,
 
         Commands::Reply {
             email_id,
