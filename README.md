@@ -268,8 +268,8 @@ Configure in Claude Desktop's `claude_desktop_config.json`:
 {
   "mcpServers": {
     "fastmail": {
-      "command": "fastmail-cli",
-      "args": ["mcp"],
+      "command": "mise",
+      "args": ["x", "--", "fastmail-cli", "mcp"],
       "env": {
         "FASTMAIL_API_TOKEN": "your-token-here"
       }
