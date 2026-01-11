@@ -4,16 +4,16 @@ CLI for Fastmail's JMAP API. Read, search, send, and manage emails from your ter
 
 ## Features
 
-| Feature               | Description                              |
-| --------------------- | ---------------------------------------- |
-| **Email**             | List, search, read, send, reply, forward |
-| **Mailboxes**         | List folders, move emails, mark spam     |
-| **Attachments**       | Download files, extract text as JSON     |
-| **Text Extraction**   | PDF, DOCX (pure Rust), DOC (textutil)    |
-| **Image OCR**         | PNG, JPG, TIFF, etc via tesseract        |
-| **Masked Email**      | Create, list, enable/disable aliases     |
-| **Shell Completions** | Bash, Zsh, Fish, PowerShell              |
-| **JSON Output**       | All commands output JSON for scripting   |
+| Feature               | Description                                       |
+| --------------------- | ------------------------------------------------- |
+| **Email**             | List, search, read, send, reply, forward, threads |
+| **Mailboxes**         | List folders, move emails, mark spam              |
+| **Attachments**       | Download files, extract text as JSON              |
+| **Text Extraction**   | PDF, DOCX (pure Rust), DOC (textutil)             |
+| **Image OCR**         | PNG, JPG, TIFF, etc via tesseract                 |
+| **Masked Email**      | Create, list, enable/disable aliases              |
+| **Shell Completions** | Bash, Zsh, Fish, PowerShell                       |
+| **JSON Output**       | All commands output JSON for scripting            |
 
 ## Quick Start
 
@@ -186,6 +186,16 @@ fastmail-cli forward EMAIL_ID \
   --to "colleague@example.com" \
   --body "FYI - see below"
 ```
+
+### View Thread
+
+Get all emails in a conversation:
+
+```bash
+fastmail-cli thread EMAIL_ID
+```
+
+Returns all emails in the thread sorted oldest-first.
 
 ### Shell Completions
 

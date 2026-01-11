@@ -4,6 +4,7 @@
 
 ### Added
 
+- `thread` command to view all emails in a conversation
 - Full JMAP filter support for search command
 - Search flags: `--text`, `--from`, `--to`, `--cc`, `--bcc`, `--subject`, `--body`
 - Search flags: `--mailbox`, `--has-attachment`, `--min-size`, `--max-size`
