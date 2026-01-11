@@ -71,10 +71,35 @@ fastmail-cli get EMAIL_ID
 
 ### Search
 
+Search uses JMAP filter flags (all filters are ANDed together):
+
 ```bash
-fastmail-cli search "from:alice subject:meeting"
-fastmail-cli search "has:attachment" --limit 20
+# Full-text search
+fastmail-cli search --text "meeting notes"
+
+# Filter by header fields
+fastmail-cli search --from "alice@example.com"
+fastmail-cli search --to "bob" --subject "project"
+
+# Filter by mailbox
+fastmail-cli search --mailbox Sent --limit 10
+
+# Attachments and size
+fastmail-cli search --has-attachment
+fastmail-cli search --min-size 1000000  # > 1MB
+
+# Date range (ISO 8601)
+fastmail-cli search --after 2024-01-01 --before 2024-12-31
+
+# Status filters
+fastmail-cli search --unread
+fastmail-cli search --flagged
+
+# Combine filters
+fastmail-cli search --from "boss" --has-attachment --after 2024-06-01 --limit 20
 ```
+
+Available flags: `--text`, `--from`, `--to`, `--cc`, `--bcc`, `--subject`, `--body`, `--mailbox`, `--has-attachment`, `--min-size`, `--max-size`, `--before`, `--after`, `--unread`, `--flagged`
 
 ### Send Email
 

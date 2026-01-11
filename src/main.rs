@@ -37,10 +37,67 @@ enum Commands {
         email_id: String,
     },
 
-    /// Search emails
+    /// Search emails with JMAP filters
     Search {
-        /// Search query
-        query: String,
+        /// Full-text search (from, to, cc, bcc, subject, body)
+        #[arg(short, long)]
+        text: Option<String>,
+
+        /// Filter by From header
+        #[arg(long)]
+        from: Option<String>,
+
+        /// Filter by To header
+        #[arg(long)]
+        to: Option<String>,
+
+        /// Filter by Cc header
+        #[arg(long)]
+        cc: Option<String>,
+
+        /// Filter by Bcc header
+        #[arg(long)]
+        bcc: Option<String>,
+
+        /// Filter by Subject
+        #[arg(long)]
+        subject: Option<String>,
+
+        /// Filter by body content
+        #[arg(long)]
+        body: Option<String>,
+
+        /// Filter by mailbox name
+        #[arg(short, long)]
+        mailbox: Option<String>,
+
+        /// Only emails with attachments
+        #[arg(long)]
+        has_attachment: bool,
+
+        /// Minimum email size in bytes
+        #[arg(long)]
+        min_size: Option<u32>,
+
+        /// Maximum email size in bytes
+        #[arg(long)]
+        max_size: Option<u32>,
+
+        /// Emails received before date (ISO 8601, e.g., 2024-01-01)
+        #[arg(long)]
+        before: Option<String>,
+
+        /// Emails received on or after date (ISO 8601, e.g., 2024-01-01)
+        #[arg(long)]
+        after: Option<String>,
+
+        /// Only unread emails
+        #[arg(long)]
+        unread: bool,
+
+        /// Only flagged/starred emails
+        #[arg(long)]
+        flagged: bool,
 
         /// Maximum results
         #[arg(short, long, default_value = "50")]
@@ -243,7 +300,46 @@ async fn main() {
 
         Commands::Get { email_id } => commands::get_email(&email_id).await,
 
-        Commands::Search { query, limit } => commands::search(&query, limit).await,
+        Commands::Search {
+            text,
+            from,
+            to,
+            cc,
+            bcc,
+            subject,
+            body,
+            mailbox,
+            has_attachment,
+            min_size,
+            max_size,
+            before,
+            after,
+            unread,
+            flagged,
+            limit,
+        } => {
+            commands::search(
+                commands::SearchFilter {
+                    text,
+                    from,
+                    to,
+                    cc,
+                    bcc,
+                    subject,
+                    body,
+                    mailbox,
+                    has_attachment,
+                    min_size,
+                    max_size,
+                    before,
+                    after,
+                    unread,
+                    flagged,
+                },
+                limit,
+            )
+            .await
+        }
 
         Commands::Send {
             to,

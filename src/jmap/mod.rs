@@ -1,3 +1,4 @@
+use crate::commands::SearchFilter;
 use crate::error::{Error, Result};
 use crate::models::*;
 use reqwest::Client;
@@ -298,12 +299,78 @@ impl JmapClient {
             .ok_or_else(|| Error::EmailNotFound(email_id.into()))
     }
 
-    #[instrument(skip(self))]
-    pub async fn search_emails(&self, query: &str, limit: u32) -> Result<Vec<Email>> {
+    /// Search emails with full JMAP filter support
+    #[instrument(skip(self, filter))]
+    pub async fn search_emails_filtered(
+        &self,
+        filter: &SearchFilter,
+        mailbox_id: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<Email>> {
         let account_id = self
             .session()?
             .primary_account_id()
             .ok_or_else(|| Error::Config("No primary account".into()))?;
+
+        // Build JMAP filter object
+        let mut jmap_filter = json!({});
+
+        if let Some(ref text) = filter.text {
+            jmap_filter["text"] = json!(text);
+        }
+        if let Some(ref from) = filter.from {
+            jmap_filter["from"] = json!(from);
+        }
+        if let Some(ref to) = filter.to {
+            jmap_filter["to"] = json!(to);
+        }
+        if let Some(ref cc) = filter.cc {
+            jmap_filter["cc"] = json!(cc);
+        }
+        if let Some(ref bcc) = filter.bcc {
+            jmap_filter["bcc"] = json!(bcc);
+        }
+        if let Some(ref subject) = filter.subject {
+            jmap_filter["subject"] = json!(subject);
+        }
+        if let Some(ref body) = filter.body {
+            jmap_filter["body"] = json!(body);
+        }
+        if let Some(mailbox) = mailbox_id {
+            jmap_filter["inMailbox"] = json!(mailbox);
+        }
+        if filter.has_attachment {
+            jmap_filter["hasAttachment"] = json!(true);
+        }
+        if let Some(min_size) = filter.min_size {
+            jmap_filter["minSize"] = json!(min_size);
+        }
+        if let Some(max_size) = filter.max_size {
+            jmap_filter["maxSize"] = json!(max_size);
+        }
+        if let Some(ref before) = filter.before {
+            // Normalize date to ISO 8601 if needed
+            let date = if before.contains('T') {
+                before.clone()
+            } else {
+                format!("{}T00:00:00Z", before)
+            };
+            jmap_filter["before"] = json!(date);
+        }
+        if let Some(ref after) = filter.after {
+            let date = if after.contains('T') {
+                after.clone()
+            } else {
+                format!("{}T00:00:00Z", after)
+            };
+            jmap_filter["after"] = json!(date);
+        }
+        if filter.unread {
+            jmap_filter["notKeyword"] = json!("$seen");
+        }
+        if filter.flagged {
+            jmap_filter["hasKeyword"] = json!("$flagged");
+        }
 
         let responses = self
             .request(vec![
@@ -311,7 +378,7 @@ impl JmapClient {
                     "Email/query",
                     {
                         "accountId": account_id,
-                        "filter": { "text": query },
+                        "filter": jmap_filter,
                         "sort": [{"property": "receivedAt", "isAscending": false}],
                         "limit": limit
                     },
