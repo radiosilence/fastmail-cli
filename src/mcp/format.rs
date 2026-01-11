@@ -1,5 +1,6 @@
 //! Formatting helpers for MCP tool output
 
+use crate::carddav::Contact;
 use crate::models::{Email, EmailAddress, Mailbox, MaskedEmail};
 
 pub fn format_address(addr: &EmailAddress) -> String {
@@ -123,6 +124,61 @@ pub fn format_masked_email(m: &MaskedEmail) -> String {
     }
     if let Some(ref created) = m.created_at {
         lines.push(format!("Created: {}", created));
+    }
+
+    lines.join("\n")
+}
+
+pub fn format_contact(c: &Contact) -> String {
+    let mut lines = vec![format!("**{}**", c.name)];
+
+    if !c.emails.is_empty() {
+        let emails: Vec<String> = c
+            .emails
+            .iter()
+            .map(|e| {
+                let label = e
+                    .label
+                    .as_ref()
+                    .map(|l| l.trim_end_matches(';').to_lowercase())
+                    .filter(|l| !l.is_empty())
+                    .map(|l| format!(" ({})", l))
+                    .unwrap_or_default();
+                format!("  {}{}", e.email, label)
+            })
+            .collect();
+        lines.push(format!("Emails:\n{}", emails.join("\n")));
+    }
+
+    if !c.phones.is_empty() {
+        let phones: Vec<String> = c
+            .phones
+            .iter()
+            .map(|p| {
+                let label = p
+                    .label
+                    .as_ref()
+                    .map(|l| l.trim_end_matches(';').to_lowercase())
+                    .filter(|l| !l.is_empty())
+                    .map(|l| format!(" ({})", l))
+                    .unwrap_or_default();
+                format!("  {}{}", p.number, label)
+            })
+            .collect();
+        lines.push(format!("Phones:\n{}", phones.join("\n")));
+    }
+
+    if let Some(ref org) = c.organization {
+        let org = org.trim_end_matches(';').trim();
+        if !org.is_empty() {
+            lines.push(format!("Organization: {}", org));
+        }
+    }
+
+    if let Some(ref title) = c.title {
+        if !title.is_empty() {
+            lines.push(format!("Title: {}", title));
+        }
     }
 
     lines.join("\n")

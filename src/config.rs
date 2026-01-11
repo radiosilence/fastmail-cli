@@ -6,6 +6,9 @@ use std::path::PathBuf;
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Config {
     pub api_token: Option<String>,
+    pub username: Option<String>,
+    /// App password for CardDAV (contacts) - API tokens don't work for CardDAV
+    pub app_password: Option<String>,
 }
 
 impl Config {
@@ -62,8 +65,31 @@ impl Config {
         self.api_token.clone().ok_or(Error::NotAuthenticated)
     }
 
+    /// Get the username (email), preferring FASTMAIL_USERNAME env var over config file
+    pub fn get_username(&self) -> Result<String> {
+        if let Ok(username) = std::env::var("FASTMAIL_USERNAME") {
+            return Ok(username);
+        }
+        self.username
+            .clone()
+            .ok_or_else(|| Error::Config("Username not set. Run `fastmail-cli auth` again.".into()))
+    }
+
     pub fn set_token(&mut self, token: String) {
         self.api_token = Some(token);
+    }
+
+    /// Get the app password for CardDAV, preferring FASTMAIL_APP_PASSWORD env var
+    pub fn get_app_password(&self) -> Result<String> {
+        if let Ok(password) = std::env::var("FASTMAIL_APP_PASSWORD") {
+            return Ok(password);
+        }
+        self.app_password.clone().ok_or_else(|| {
+            Error::Config(
+                "App password not set. Set FASTMAIL_APP_PASSWORD or add app_password to config."
+                    .into(),
+            )
+        })
     }
 }
 
