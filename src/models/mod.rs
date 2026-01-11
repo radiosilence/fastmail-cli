@@ -215,7 +215,8 @@ pub struct MaskedEmail {
     pub id: String,
     pub email: String,
     /// One of: pending, enabled, disabled, deleted
-    pub state: String,
+    #[serde(default)]
+    pub state: Option<String>,
     #[serde(default)]
     pub for_domain: Option<String>,
     #[serde(default)]
@@ -494,7 +495,7 @@ mod tests {
         let masked: MaskedEmail = serde_json::from_str(json).unwrap();
         assert_eq!(masked.id, "me123");
         assert_eq!(masked.email, "abc123@mask.fastmail.com");
-        assert_eq!(masked.state, "enabled");
+        assert_eq!(masked.state, Some("enabled".to_string()));
         assert_eq!(masked.for_domain, Some("https://example.com".to_string()));
         assert_eq!(masked.description, Some("Test site".to_string()));
         assert_eq!(masked.created_by, Some("fastmail-cli".to_string()));
