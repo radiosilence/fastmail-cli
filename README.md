@@ -1,6 +1,6 @@
 # fastmail-cli
 
-CLI for Fastmail's JMAP API. Read, search, send, and manage emails from your terminal.
+CLI for Fastmail's JMAP API. Read, search, send, and manage emails from your terminal or AI assistant.
 
 ## Features
 

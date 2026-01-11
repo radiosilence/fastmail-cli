@@ -1,6 +1,6 @@
 [package]
 name = "fastmail-cli"
-version = "1.4.0"
+version = "1.4.1"
 edition = "2024"
 description = "CLI for Fastmail's JMAP API"
 license = "MIT"
