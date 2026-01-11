@@ -2,6 +2,17 @@
 
 CLI for Fastmail's JMAP API. Read, search, send, and manage emails from your terminal.
 
+## Features
+
+| Feature               | Description                                 |
+| --------------------- | ------------------------------------------- |
+| **Email**             | List, search, read, send, reply, forward    |
+| **Mailboxes**         | List folders, move emails, mark spam        |
+| **Attachments**       | Download files, extract text (PDF/DOCX/DOC) |
+| **Masked Email**      | Create, list, enable/disable aliases        |
+| **Shell Completions** | Bash, Zsh, Fish, PowerShell                 |
+| **JSON Output**       | All commands output JSON for scripting      |
+
 ## Quick Start
 
 ### Installation
