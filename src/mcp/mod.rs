@@ -870,8 +870,8 @@ impl FastmailMcp {
             };
         }
 
-        // Try to extract text from documents (PDF, DOCX, DOC, etc.)
-        match extract_text(&data, content_type, name) {
+        // Try to extract text from documents (PDF, DOC, DOCX, XLSX, PPTX, etc.)
+        match extract_text(&data, name).await {
             Ok(Some(text)) => {
                 return Self::text_result(format!("Extracted text from {}:\n\n{}", name, text));
             }

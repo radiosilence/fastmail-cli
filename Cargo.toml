@@ -1,6 +1,6 @@
 [package]
 name = "fastmail-cli"
-version = "1.6.0"
+version = "1.7.0"
 edition = "2024"
 description = "CLI for Fastmail's JMAP API"
 license = "MIT"
@@ -15,9 +15,8 @@ chrono = { version = "0.4.42", features = ["serde"] }
 clap = { version = "4.5.54", features = ["derive"] }
 clap_complete = "4.5.65"
 dirs = "6.0.0"
-docx-lite = "0.2.0"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
-pdf-extract = "0.10.0"
+kreuzberg = { version = "4.0", features = ["pdf", "bundled-pdfium", "office", "email", "archives", "html", "xml", "excel", "language-detection"] }
 vcard = "0.4"
 reqwest = { version = "0.13.1", default-features = false, features = ["json", "rustls"] }
 rmcp = { version = "0.12", features = ["server", "transport-io"] }

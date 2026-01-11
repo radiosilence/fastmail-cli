@@ -43,7 +43,7 @@ pub async fn download_attachment(
             let content_type = attachment.content_type.clone().unwrap_or_default();
             let bytes = client.download_blob(blob_id).await?;
 
-            let text = extract_text(&bytes, &content_type, &filename)?;
+            let text = extract_text(&bytes, &filename).await?;
 
             results.push(AttachmentContent {
                 filename,

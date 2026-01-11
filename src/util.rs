@@ -1,6 +1,5 @@
 use crate::models::EmailAddress;
 use std::path::Path;
-use std::process::Command;
 
 pub fn parse_addresses(input: &str) -> Vec<EmailAddress> {
     input
@@ -32,101 +31,149 @@ pub fn parse_addresses(input: &str) -> Vec<EmailAddress> {
 
 // ============ Text Extraction ============
 
-/// Extract text from attachment data based on content type and filename
-pub fn extract_text(
-    bytes: &[u8],
-    content_type: &str,
-    filename: &str,
-) -> anyhow::Result<Option<String>> {
+/// Extract text from attachment data using kreuzberg
+/// Supports: PDF, DOC, DOCX, ODT, XLSX, XLS, ODS, PPTX, PPT, EPUB, RTF,
+/// HTML, XML, JSON, YAML, CSV, TSV, TXT, MD, EML, MSG, and more
+/// NOTE: Returns None for images - use existing image pipeline instead
+pub async fn extract_text(bytes: &[u8], filename: &str) -> anyhow::Result<Option<String>> {
+    use kreuzberg::{ExtractionConfig, extract_bytes};
+
+    // Skip images - we have our own pipeline for those (resize + send to Claude)
+    if is_image_extension(filename) {
+        return Ok(None);
+    }
+
+    let mime_type = mime_from_filename(filename);
+    let config = ExtractionConfig::default();
+
+    match extract_bytes(bytes, &mime_type, &config).await {
+        Ok(result) => {
+            let content = result.content.trim();
+            if content.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(content.to_string()))
+            }
+        }
+        Err(e) => {
+            tracing::debug!("kreuzberg extraction failed for {}: {}", filename, e);
+            Ok(None)
+        }
+    }
+}
+
+/// Synchronous version for non-async contexts
+/// NOTE: Returns None for images - use existing image pipeline instead
+pub fn extract_text_sync(bytes: &[u8], filename: &str) -> anyhow::Result<Option<String>> {
+    use kreuzberg::{ExtractionConfig, extract_bytes_sync};
+
+    // Skip images - we have our own pipeline for those (resize + send to Claude)
+    if is_image_extension(filename) {
+        return Ok(None);
+    }
+
+    let mime_type = mime_from_filename(filename);
+    let config = ExtractionConfig::default();
+
+    match extract_bytes_sync(bytes, &mime_type, &config) {
+        Ok(result) => {
+            let content = result.content.trim();
+            if content.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(content.to_string()))
+            }
+        }
+        Err(e) => {
+            tracing::debug!("kreuzberg extraction failed for {}: {}", filename, e);
+            Ok(None)
+        }
+    }
+}
+
+/// Check if filename has an image extension (used to skip kreuzberg for images)
+fn is_image_extension(filename: &str) -> bool {
+    let ext = Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    matches!(
+        ext.as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "ico" | "svg" | "heic"
+    )
+}
+
+/// Infer MIME type from filename extension for documents
+fn mime_from_filename(filename: &str) -> String {
     let ext = Path::new(filename)
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
 
-    // Plain text
-    if content_type.starts_with("text/") || ext == "txt" || ext == "md" || ext == "csv" {
-        return Ok(Some(String::from_utf8_lossy(bytes).to_string()));
+    match ext.as_str() {
+        // Documents
+        "pdf" => "application/pdf",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "odt" => "application/vnd.oasis.opendocument.text",
+        "rtf" => "application/rtf",
+        // Spreadsheets
+        "xls" | "xla" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "xlsm" => "application/vnd.ms-excel.sheet.macroEnabled.12",
+        "xlsb" => "application/vnd.ms-excel.sheet.binary.macroEnabled.12",
+        "xlam" => "application/vnd.ms-excel.addin.macroEnabled.12",
+        "xltm" => "application/vnd.ms-excel.template.macroEnabled.12",
+        "ods" => "application/vnd.oasis.opendocument.spreadsheet",
+        "csv" => "text/csv",
+        "tsv" => "text/tab-separated-values",
+        // Presentations
+        "ppt" => "application/vnd.ms-powerpoint",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "ppsx" => "application/vnd.openxmlformats-officedocument.presentationml.slideshow",
+        // eBooks
+        "epub" => "application/epub+zip",
+        "fb2" => "application/x-fictionbook+xml",
+        // Text & markup
+        "txt" => "text/plain",
+        "md" | "markdown" => "text/markdown",
+        "html" | "htm" | "xhtml" => "text/html",
+        "xml" => "application/xml",
+        "svg" => "image/svg+xml",
+        "json" => "application/json",
+        "yaml" | "yml" => "application/yaml",
+        "toml" => "application/toml",
+        "rst" => "text/x-rst",
+        "org" => "text/x-org",
+        // Email
+        "eml" => "message/rfc822",
+        "msg" => "application/vnd.ms-outlook",
+        // Archives
+        "zip" => "application/zip",
+        "tar" => "application/x-tar",
+        "tgz" | "gz" => "application/gzip",
+        "7z" => "application/x-7z-compressed",
+        // Scientific & academic
+        "bib" | "biblatex" => "application/x-bibtex",
+        "ris" => "application/x-research-info-systems",
+        "enw" => "application/x-endnote-refer",
+        "csl" => "application/vnd.citationstyles.style+xml",
+        "tex" | "latex" => "application/x-tex",
+        "typst" => "application/x-typst",
+        "jats" => "application/jats+xml",
+        "ipynb" => "application/x-ipynb+json",
+        "docbook" => "application/docbook+xml",
+        // Documentation
+        "opml" => "text/x-opml",
+        "pod" => "text/x-pod",
+        "mdoc" => "text/troff",
+        "troff" => "text/troff",
+        // Default - let kreuzberg figure it out
+        _ => "application/octet-stream",
     }
-
-    // PDF - use pdf-extract (pure Rust)
-    if content_type == "application/pdf" || ext == "pdf" {
-        return Ok(pdf_extract::extract_text_from_mem(bytes).ok());
-    }
-
-    // DOCX - use docx-lite (pure Rust)
-    if content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        || ext == "docx"
-    {
-        let temp_path =
-            std::env::temp_dir().join(format!("fastmail-cli-{}.docx", std::process::id()));
-        std::fs::write(&temp_path, bytes)?;
-        let result = docx_lite::extract_text(&temp_path).ok();
-        let _ = std::fs::remove_file(&temp_path);
-        return Ok(result);
-    }
-
-    // DOC (old format) - try textutil (macOS), antiword, or catdoc
-    if content_type == "application/msword" || ext == "doc" {
-        let temp_path =
-            std::env::temp_dir().join(format!("fastmail-cli-{}.doc", std::process::id()));
-        std::fs::write(&temp_path, bytes)?;
-        let result = extract_with_textutil(&temp_path)
-            .or_else(|_| extract_with_command(&temp_path, "antiword", &[]))
-            .or_else(|_| extract_with_command(&temp_path, "catdoc", &[]));
-        let _ = std::fs::remove_file(&temp_path);
-        return result;
-    }
-
-    // RTF - use pandoc
-    if content_type == "application/rtf" || ext == "rtf" {
-        let temp_path =
-            std::env::temp_dir().join(format!("fastmail-cli-{}.rtf", std::process::id()));
-        std::fs::write(&temp_path, bytes)?;
-        let result = extract_with_command(&temp_path, "pandoc", &["-t", "plain"]);
-        let _ = std::fs::remove_file(&temp_path);
-        return result;
-    }
-
-    // Unknown format
-    Ok(None)
-}
-
-fn extract_with_command(
-    path: &Path,
-    cmd: &str,
-    extra_args: &[&str],
-) -> anyhow::Result<Option<String>> {
-    let mut args: Vec<&str> = vec![path.to_str().unwrap_or("")];
-    args.extend(extra_args);
-
-    let output = Command::new(cmd)
-        .args(&args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => Ok(Some(String::from_utf8_lossy(&o.stdout).to_string())),
-        Ok(_) => Ok(None),
-        Err(_) => Ok(None),
-    }
-}
-
-/// Use macOS textutil to convert doc to txt
-fn extract_with_textutil(path: &Path) -> anyhow::Result<Option<String>> {
-    let output = Command::new("textutil")
-        .args(["-convert", "txt", "-stdout"])
-        .arg(path)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => Ok(Some(String::from_utf8_lossy(&o.stdout).to_string())),
-        Ok(_) => Ok(None),
-        Err(_) => Ok(None),
-    }
+    .to_string()
 }
 
 // ============ Image Processing ============

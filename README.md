@@ -4,18 +4,18 @@ CLI for Fastmail's JMAP API. Read, search, send, and manage emails from your ter
 
 ## Features
 
-| Feature               | Description                                       |
-| --------------------- | ------------------------------------------------- |
-| **Email**             | List, search, read, send, reply, forward, threads |
-| **Mailboxes**         | List folders, move emails, mark spam/read         |
-| **Contacts**          | Search contacts via CardDAV                       |
-| **Attachments**       | Download files, extract text, resize images       |
-| **Text Extraction**   | PDF, DOCX (pure Rust), DOC (textutil)             |
-| **Image Resizing**    | `--max-size` to resize images on download         |
-| **Masked Email**      | Create, list, enable/disable aliases              |
-| **MCP Server**        | Claude integration via Model Context Protocol     |
-| **Shell Completions** | Bash, Zsh, Fish, PowerShell                       |
-| **JSON Output**       | All commands output JSON for scripting            |
+| Feature               | Description                                                            |
+| --------------------- | ---------------------------------------------------------------------- |
+| **Email**             | List, search, read, send, reply, forward, threads                      |
+| **Mailboxes**         | List folders, move emails, mark spam/read                              |
+| **Contacts**          | Search contacts via CardDAV                                            |
+| **Attachments**       | Download files, extract text, resize images                            |
+| **Text Extraction**   | 56 formats via [kreuzberg](https://github.com/kreuzberg-dev/kreuzberg) |
+| **Image Resizing**    | `--max-size` to resize images on download                              |
+| **Masked Email**      | Create, list, enable/disable aliases                                   |
+| **MCP Server**        | Claude integration via Model Context Protocol                          |
+| **Shell Completions** | Bash, Zsh, Fish, PowerShell                                            |
+| **JSON Output**       | All commands output JSON for scripting                                 |
 
 ## Quick Start
 
@@ -191,12 +191,17 @@ fastmail-cli download EMAIL_ID --format json
 fastmail-cli download EMAIL_ID --max-size 500K
 ```
 
-Text extraction supports:
+Text extraction uses [kreuzberg](https://github.com/kreuzberg-dev/kreuzberg) and supports 56 formats:
 
-- **PDF** - pure Rust via `pdf-extract`
-- **DOCX** - pure Rust via `docx-lite`
-- **DOC** - via `textutil` (macOS), `antiword`, or `catdoc`
-- **TXT/CSV/MD** - direct UTF-8 read
+- **Documents**: PDF, DOC, DOCX, ODT, RTF
+- **Spreadsheets**: XLS, XLSX, ODS, CSV, TSV
+- **Presentations**: PPT, PPTX
+- **eBooks**: EPUB, FB2
+- **Markup**: HTML, XML, Markdown, RST, Org
+- **Data**: JSON, YAML, TOML
+- **Email**: EML, MSG
+- **Archives**: ZIP, TAR, GZ, 7z
+- **Academic**: BibTeX, LaTeX, Typst, Jupyter notebooks
 
 ### Reply to Email
 
