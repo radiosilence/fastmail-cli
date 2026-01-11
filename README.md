@@ -187,16 +187,6 @@ fastmail-cli forward EMAIL_ID \
   --body "FYI - see below"
 ```
 
-### View Thread
-
-Get all emails in a conversation:
-
-```bash
-fastmail-cli thread EMAIL_ID
-```
-
-Returns all emails in the thread sorted oldest-first.
-
 ### Shell Completions
 
 ```bash
