@@ -534,11 +534,11 @@ impl JmapClient {
         let identities = self.list_identities().await?;
         let identity = identities.first().ok_or(Error::IdentityNotFound)?;
 
-        let drafts = self.find_mailbox("drafts").await?;
         let sent = self.find_mailbox("sent").await?;
 
         let mut email_create: HashMap<String, Value> = HashMap::new();
-        email_create.insert("mailboxIds".into(), json!({ drafts.id.clone(): true }));
+        // Create directly in Sent - no draft needed
+        email_create.insert("mailboxIds".into(), json!({ sent.id.clone(): true }));
         email_create.insert(
             "from".into(),
             json!([{ "email": identity.email, "name": identity.name }]),
@@ -580,8 +580,6 @@ impl JmapClient {
             "textBody".into(),
             json!([{ "partId": "body", "type": "text/plain" }]),
         );
-        email_create.insert("keywords".into(), json!({ "$draft": true }));
-
         if let Some(reply_id) = in_reply_to {
             email_create.insert("inReplyTo".into(), json!([reply_id]));
         }
@@ -592,7 +590,7 @@ impl JmapClient {
                     "Email/set",
                     {
                         "accountId": account_id,
-                        "create": { "draft": email_create }
+                        "create": { "email": email_create }
                     },
                     "e0"
                 ]),
@@ -603,13 +601,12 @@ impl JmapClient {
                         "create": {
                             "submission": {
                                 "identityId": identity.id,
-                                "emailId": "#draft"
+                                "emailId": "#email"
                             }
                         },
                         "onSuccessUpdateEmail": {
                             "#submission": {
-                                "mailboxIds": { sent.id.clone(): true },
-                                "keywords": { "$draft": null, "$seen": true }
+                                "keywords/$seen": true
                             }
                         }
                     },
@@ -629,7 +626,7 @@ impl JmapClient {
             Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/set")?;
 
         if let Some(ref not_created) = email_resp.not_created
-            && let Some(err) = not_created.get("draft")
+            && let Some(err) = not_created.get("email")
         {
             let error_type = err
                 .get("type")
@@ -648,7 +645,7 @@ impl JmapClient {
 
         let email_id = email_resp
             .created
-            .and_then(|c: HashMap<String, Value>| c.get("draft").cloned())
+            .and_then(|c: HashMap<String, Value>| c.get("email").cloned())
             .and_then(|d: Value| {
                 d.get("id")
                     .and_then(|v: &Value| v.as_str())
@@ -777,7 +774,6 @@ impl JmapClient {
         let identity = identities.first().ok_or(Error::IdentityNotFound)?;
         let my_email = identity.email.to_lowercase();
 
-        let drafts = self.find_mailbox("drafts").await?;
         let sent = self.find_mailbox("sent").await?;
 
         // Build To: reply to sender, or if reply_all, include original recipients
@@ -829,7 +825,8 @@ impl JmapClient {
         };
 
         let mut email_create: HashMap<String, Value> = HashMap::new();
-        email_create.insert("mailboxIds".into(), json!({ drafts.id.clone(): true }));
+        // Create directly in Sent - no draft needed
+        email_create.insert("mailboxIds".into(), json!({ sent.id.clone(): true }));
         email_create.insert(
             "from".into(),
             json!([{ "email": identity.email, "name": identity.name }]),
@@ -873,7 +870,6 @@ impl JmapClient {
             "textBody".into(),
             json!([{ "partId": "body", "type": "text/plain" }]),
         );
-        email_create.insert("keywords".into(), json!({ "$draft": true }));
 
         // Threading headers
         if let Some(ref msg_id) = original.message_id {
@@ -889,7 +885,7 @@ impl JmapClient {
                     "Email/set",
                     {
                         "accountId": account_id,
-                        "create": { "draft": email_create }
+                        "create": { "email": email_create }
                     },
                     "e0"
                 ]),
@@ -900,13 +896,12 @@ impl JmapClient {
                         "create": {
                             "submission": {
                                 "identityId": identity.id,
-                                "emailId": "#draft"
+                                "emailId": "#email"
                             }
                         },
                         "onSuccessUpdateEmail": {
                             "#submission": {
-                                "mailboxIds": { sent.id.clone(): true },
-                                "keywords": { "$draft": null, "$seen": true }
+                                "keywords/$seen": true
                             }
                         }
                     },
@@ -926,7 +921,7 @@ impl JmapClient {
             Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/set")?;
 
         if let Some(ref not_created) = email_resp.not_created
-            && let Some(err) = not_created.get("draft")
+            && let Some(err) = not_created.get("email")
         {
             let error_type = err
                 .get("type")
@@ -945,7 +940,7 @@ impl JmapClient {
 
         let email_id = email_resp
             .created
-            .and_then(|c: HashMap<String, Value>| c.get("draft").cloned())
+            .and_then(|c: HashMap<String, Value>| c.get("email").cloned())
             .and_then(|d: Value| {
                 d.get("id")
                     .and_then(|v: &Value| v.as_str())
@@ -979,7 +974,6 @@ impl JmapClient {
         let identities = self.list_identities().await?;
         let identity = identities.first().ok_or(Error::IdentityNotFound)?;
 
-        let drafts = self.find_mailbox("drafts").await?;
         let sent = self.find_mailbox("sent").await?;
 
         // Build subject with Fwd: prefix if not already present
@@ -1026,7 +1020,8 @@ impl JmapClient {
         );
 
         let mut email_create: HashMap<String, Value> = HashMap::new();
-        email_create.insert("mailboxIds".into(), json!({ drafts.id.clone(): true }));
+        // Create directly in Sent - no draft needed
+        email_create.insert("mailboxIds".into(), json!({ sent.id.clone(): true }));
         email_create.insert(
             "from".into(),
             json!([{ "email": identity.email, "name": identity.name }]),
@@ -1068,7 +1063,6 @@ impl JmapClient {
             "textBody".into(),
             json!([{ "partId": "body", "type": "text/plain" }]),
         );
-        email_create.insert("keywords".into(), json!({ "$draft": true }));
 
         let responses = self
             .request(vec![
@@ -1076,7 +1070,7 @@ impl JmapClient {
                     "Email/set",
                     {
                         "accountId": account_id,
-                        "create": { "draft": email_create }
+                        "create": { "email": email_create }
                     },
                     "e0"
                 ]),
@@ -1087,13 +1081,12 @@ impl JmapClient {
                         "create": {
                             "submission": {
                                 "identityId": identity.id,
-                                "emailId": "#draft"
+                                "emailId": "#email"
                             }
                         },
                         "onSuccessUpdateEmail": {
                             "#submission": {
-                                "mailboxIds": { sent.id.clone(): true },
-                                "keywords": { "$draft": null, "$seen": true }
+                                "keywords/$seen": true
                             }
                         }
                     },
@@ -1113,7 +1106,7 @@ impl JmapClient {
             Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/set")?;
 
         if let Some(ref not_created) = email_resp.not_created
-            && let Some(err) = not_created.get("draft")
+            && let Some(err) = not_created.get("email")
         {
             let error_type = err
                 .get("type")
@@ -1132,7 +1125,7 @@ impl JmapClient {
 
         let email_id = email_resp
             .created
-            .and_then(|c: HashMap<String, Value>| c.get("draft").cloned())
+            .and_then(|c: HashMap<String, Value>| c.get("email").cloned())
             .and_then(|d: Value| {
                 d.get("id")
                     .and_then(|v: &Value| v.as_str())
