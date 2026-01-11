@@ -115,8 +115,7 @@ impl CardDavClient {
             if response.contains("addressbook") && !href.is_empty() {
                 let name = displayname.unwrap_or_else(|| {
                     href.split('/')
-                        .filter(|s| !s.is_empty())
-                        .last()
+                        .rfind(|s| !s.is_empty())
                         .unwrap_or("Unknown")
                         .to_string()
                 });
@@ -272,7 +271,7 @@ fn parse_vcard(vcard_str: &str) -> Option<Contact> {
             } else {
                 None
             };
-            let email = line.split(':').last().unwrap_or("").to_string();
+            let email = line.split(':').next_back().unwrap_or("").to_string();
             if !email.is_empty() {
                 emails.push(ContactEmail { email, label });
             }
@@ -286,7 +285,7 @@ fn parse_vcard(vcard_str: &str) -> Option<Contact> {
             } else {
                 None
             };
-            let number = line.split(':').last().unwrap_or("").to_string();
+            let number = line.split(':').next_back().unwrap_or("").to_string();
             if !number.is_empty() {
                 phones.push(ContactPhone { number, label });
             }

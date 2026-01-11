@@ -175,10 +175,10 @@ pub fn format_contact(c: &Contact) -> String {
         }
     }
 
-    if let Some(ref title) = c.title {
-        if !title.is_empty() {
-            lines.push(format!("Title: {}", title));
-        }
+    if let Some(ref title) = c.title
+        && !title.is_empty()
+    {
+        lines.push(format!("Title: {}", title));
     }
 
     lines.join("\n")
