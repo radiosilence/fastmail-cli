@@ -33,6 +33,9 @@ pub enum Error {
     #[error("Identity not found for sending")]
     IdentityNotFound,
 
+    #[error("No identity found matching '{0}'. Run `fastmail-cli list identities` to see available identities.")]
+    IdentityNotFoundForEmail(String),
+
     #[error("Config error: {0}")]
     Config(String),
 

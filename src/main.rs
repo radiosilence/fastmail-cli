@@ -137,6 +137,10 @@ enum Commands {
         /// In-Reply-To message ID (for threading)
         #[arg(long)]
         reply_to: Option<String>,
+
+        /// Send from a specific identity (email address). Use `list identities` to see available.
+        #[arg(long)]
+        from: Option<String>,
     },
 
     /// Move email to a mailbox
@@ -207,6 +211,10 @@ enum Commands {
         /// BCC recipient(s), comma-separated
         #[arg(long)]
         bcc: Option<String>,
+
+        /// Send from a specific identity (email address). Use `list identities` to see available.
+        #[arg(long)]
+        from: Option<String>,
     },
 
     /// Forward an email
@@ -229,6 +237,10 @@ enum Commands {
         /// BCC recipient(s), comma-separated
         #[arg(long)]
         bcc: Option<String>,
+
+        /// Send from a specific identity (email address). Use `list identities` to see available.
+        #[arg(long)]
+        from: Option<String>,
     },
 
     /// Generate shell completions
@@ -308,6 +320,9 @@ enum ListCommands {
         #[arg(short, long, default_value = "50")]
         limit: u32,
     },
+
+    /// List sender identities (for use with --from)
+    Identities,
 }
 
 #[derive(Subcommand)]
@@ -337,6 +352,7 @@ async fn main() {
         Commands::List(cmd) => match cmd {
             ListCommands::Mailboxes => commands::list_mailboxes().await,
             ListCommands::Emails { mailbox, limit } => commands::list_emails(&mailbox, limit).await,
+            ListCommands::Identities => commands::list_identities().await,
         },
 
         Commands::Get { email_id } => commands::get_email(&email_id).await,
@@ -391,6 +407,7 @@ async fn main() {
             cc,
             bcc,
             reply_to,
+            from,
         } => {
             commands::send(
                 &to,
@@ -399,6 +416,7 @@ async fn main() {
                 cc.as_deref(),
                 bcc.as_deref(),
                 reply_to.as_deref(),
+                from.as_deref(),
             )
             .await
         }
@@ -436,7 +454,8 @@ async fn main() {
             all,
             cc,
             bcc,
-        } => commands::reply(&email_id, &body, all, cc.as_deref(), bcc.as_deref()).await,
+            from,
+        } => commands::reply(&email_id, &body, all, cc.as_deref(), bcc.as_deref(), from.as_deref()).await,
 
         Commands::Forward {
             email_id,
@@ -444,7 +463,8 @@ async fn main() {
             body,
             cc,
             bcc,
-        } => commands::forward(&email_id, &to, &body, cc.as_deref(), bcc.as_deref()).await,
+            from,
+        } => commands::forward(&email_id, &to, &body, cc.as_deref(), bcc.as_deref(), from.as_deref()).await,
 
         Commands::Completions { shell } => {
             generate(

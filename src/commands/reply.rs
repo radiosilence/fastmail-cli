@@ -9,6 +9,7 @@ pub async fn reply(
     reply_all: bool,
     cc: Option<&str>,
     bcc: Option<&str>,
+    from: Option<&str>,
 ) -> anyhow::Result<()> {
     let config = Config::load()?;
     let token = config.get_token()?;
@@ -22,7 +23,7 @@ pub async fn reply(
     let bcc_addrs = bcc.map(parse_addresses).unwrap_or_default();
 
     let new_email_id = client
-        .reply_email(&original, body, reply_all, cc_addrs, bcc_addrs)
+        .reply_email(&original, body, reply_all, cc_addrs, bcc_addrs, from)
         .await?;
 
     #[derive(serde::Serialize)]

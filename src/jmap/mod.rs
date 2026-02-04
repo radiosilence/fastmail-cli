@@ -517,6 +517,21 @@ impl JmapClient {
         Ok(resp.list)
     }
 
+    /// Resolve an identity by email address, or return the default (first) identity.
+    async fn resolve_identity(&self, from: Option<&str>) -> Result<Identity> {
+        let identities = self.list_identities().await?;
+        match from {
+            Some(email) => identities
+                .into_iter()
+                .find(|i| i.email.eq_ignore_ascii_case(email))
+                .ok_or_else(|| Error::IdentityNotFoundForEmail(email.to_string())),
+            None => identities
+                .into_iter()
+                .next()
+                .ok_or(Error::IdentityNotFound),
+        }
+    }
+
     #[instrument(skip(self, body))]
     pub async fn send_email(
         &self,
@@ -526,14 +541,14 @@ impl JmapClient {
         subject: &str,
         body: &str,
         in_reply_to: Option<&str>,
+        from: Option<&str>,
     ) -> Result<String> {
         let account_id = self
             .session()?
             .primary_account_id()
             .ok_or_else(|| Error::Config("No primary account".into()))?;
 
-        let identities = self.list_identities().await?;
-        let identity = identities.first().ok_or(Error::IdentityNotFound)?;
+        let identity = self.resolve_identity(from).await?;
 
         let sent = self.find_mailbox("sent").await?;
 
@@ -765,14 +780,14 @@ impl JmapClient {
         reply_all: bool,
         cc: Vec<EmailAddress>,
         bcc: Vec<EmailAddress>,
+        from: Option<&str>,
     ) -> Result<String> {
         let account_id = self
             .session()?
             .primary_account_id()
             .ok_or_else(|| Error::Config("No primary account".into()))?;
 
-        let identities = self.list_identities().await?;
-        let identity = identities.first().ok_or(Error::IdentityNotFound)?;
+        let identity = self.resolve_identity(from).await?;
         let my_email = identity.email.to_lowercase();
 
         let sent = self.find_mailbox("sent").await?;
@@ -966,14 +981,14 @@ impl JmapClient {
         body: &str,
         cc: Vec<EmailAddress>,
         bcc: Vec<EmailAddress>,
+        from: Option<&str>,
     ) -> Result<String> {
         let account_id = self
             .session()?
             .primary_account_id()
             .ok_or_else(|| Error::Config("No primary account".into()))?;
 
-        let identities = self.list_identities().await?;
-        let identity = identities.first().ok_or(Error::IdentityNotFound)?;
+        let identity = self.resolve_identity(from).await?;
 
         let sent = self.find_mailbox("sent").await?;
 

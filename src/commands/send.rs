@@ -37,6 +37,7 @@ pub async fn send(
     cc: Option<&str>,
     bcc: Option<&str>,
     reply_to: Option<&str>,
+    from: Option<&str>,
 ) -> anyhow::Result<()> {
     let config = Config::load()?;
     let token = config.get_token()?;
@@ -49,7 +50,7 @@ pub async fn send(
     let bcc_addrs = bcc.map(parse_addresses).unwrap_or_default();
 
     let email_id = client
-        .send_email(to_addrs, cc_addrs, bcc_addrs, subject, body, reply_to)
+        .send_email(to_addrs, cc_addrs, bcc_addrs, subject, body, reply_to, from)
         .await?;
 
     #[derive(serde::Serialize)]

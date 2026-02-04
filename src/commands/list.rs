@@ -35,3 +35,16 @@ pub async fn list_emails(mailbox: &str, limit: u32) -> anyhow::Result<()> {
 
     Ok(())
 }
+
+pub async fn list_identities() -> anyhow::Result<()> {
+    let config = Config::load()?;
+    let token = config.get_token()?;
+
+    let mut client = JmapClient::new(token.to_string());
+    client.authenticate().await?;
+
+    let identities = client.list_identities().await?;
+    Output::success(identities).print();
+
+    Ok(())
+}
