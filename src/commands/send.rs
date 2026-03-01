@@ -10,6 +10,7 @@ pub async fn send(
     bcc: Option<&str>,
     reply_to: Option<&str>,
     from: Option<&str>,
+    draft: bool,
 ) -> anyhow::Result<()> {
     let client = authenticated_client().await?;
 
@@ -18,7 +19,9 @@ pub async fn send(
     let bcc_addrs = bcc.map(parse_addresses).unwrap_or_default();
 
     let email_id = client
-        .send_email(to_addrs, cc_addrs, bcc_addrs, subject, body, reply_to, from)
+        .send_email(
+            to_addrs, cc_addrs, bcc_addrs, subject, body, reply_to, from, draft,
+        )
         .await?;
 
     #[derive(serde::Serialize)]

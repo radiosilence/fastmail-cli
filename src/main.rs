@@ -141,6 +141,10 @@ enum Commands {
         /// Send from a specific identity (email address). Use `list identities` to see available.
         #[arg(long)]
         from: Option<String>,
+
+        /// Save as draft instead of sending
+        #[arg(long)]
+        draft: bool,
     },
 
     /// Move email to a mailbox
@@ -215,6 +219,10 @@ enum Commands {
         /// Send from a specific identity (email address). Use `list identities` to see available.
         #[arg(long)]
         from: Option<String>,
+
+        /// Save as draft instead of sending
+        #[arg(long)]
+        draft: bool,
     },
 
     /// Forward an email
@@ -241,6 +249,10 @@ enum Commands {
         /// Send from a specific identity (email address). Use `list identities` to see available.
         #[arg(long)]
         from: Option<String>,
+
+        /// Save as draft instead of sending
+        #[arg(long)]
+        draft: bool,
     },
 
     /// Generate shell completions
@@ -408,6 +420,7 @@ async fn main() {
             bcc,
             reply_to,
             from,
+            draft,
         } => {
             commands::send(
                 &to,
@@ -417,6 +430,7 @@ async fn main() {
                 bcc.as_deref(),
                 reply_to.as_deref(),
                 from.as_deref(),
+                draft,
             )
             .await
         }
@@ -455,6 +469,7 @@ async fn main() {
             cc,
             bcc,
             from,
+            draft,
         } => {
             commands::reply(
                 &email_id,
@@ -463,6 +478,7 @@ async fn main() {
                 cc.as_deref(),
                 bcc.as_deref(),
                 from.as_deref(),
+                draft,
             )
             .await
         }
@@ -474,6 +490,7 @@ async fn main() {
             cc,
             bcc,
             from,
+            draft,
         } => {
             commands::forward(
                 &email_id,
@@ -482,6 +499,7 @@ async fn main() {
                 cc.as_deref(),
                 bcc.as_deref(),
                 from.as_deref(),
+                draft,
             )
             .await
         }

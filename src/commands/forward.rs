@@ -9,6 +9,7 @@ pub async fn forward(
     cc: Option<&str>,
     bcc: Option<&str>,
     from: Option<&str>,
+    draft: bool,
 ) -> anyhow::Result<()> {
     let client = authenticated_client().await?;
 
@@ -19,7 +20,7 @@ pub async fn forward(
     let bcc_addrs = bcc.map(parse_addresses).unwrap_or_default();
 
     let new_email_id = client
-        .forward_email(&original, to_addrs, body, cc_addrs, bcc_addrs, from)
+        .forward_email(&original, to_addrs, body, cc_addrs, bcc_addrs, from, draft)
         .await?;
 
     #[derive(serde::Serialize)]

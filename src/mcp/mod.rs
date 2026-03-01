@@ -112,7 +112,7 @@ pub struct MarkAsSpamRequest {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SendEmailRequest {
-    /// 'preview' to see the draft, 'confirm' to send - ALWAYS preview first
+    /// 'preview' to see the draft, 'confirm' to send, 'draft' to save as draft without sending - ALWAYS preview first
     pub action: String,
     /// Recipient email address(es), comma-separated
     pub to: String,
@@ -133,7 +133,7 @@ pub struct SendEmailRequest {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ReplyEmailRequest {
-    /// 'preview' to see the draft, 'confirm' to send - ALWAYS preview first
+    /// 'preview' to see the draft, 'confirm' to send, 'draft' to save as draft without sending - ALWAYS preview first
     pub action: String,
     /// The email ID to reply to
     pub email_id: String,
@@ -155,7 +155,7 @@ pub struct ReplyEmailRequest {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ForwardEmailRequest {
-    /// 'preview' to see the draft, 'confirm' to send - ALWAYS preview first
+    /// 'preview' to see the draft, 'confirm' to send, 'draft' to save as draft without sending - ALWAYS preview first
     pub action: String,
     /// The email ID to forward
     pub email_id: String,
@@ -534,7 +534,7 @@ impl FastmailMcp {
     // ============ Send/Reply/Forward Tools ============
 
     #[tool(
-        description = "Compose and send a new email. CRITICAL: You MUST call with action='preview' first, show the user the draft, get explicit approval, then call again with action='confirm'. NEVER skip the preview step."
+        description = "Compose and send a new email. CRITICAL: You MUST call with action='preview' first, show the user the draft, get explicit approval, then call again with action='confirm' to send or action='draft' to save as a draft without sending. NEVER skip the preview step."
     )]
     async fn send_email(&self, Parameters(req): Parameters<SendEmailRequest>) -> ToolResult {
         let to_addrs = parse_addresses(&req.to);
@@ -577,6 +577,7 @@ impl FastmailMcp {
         }
 
         let client = self.client.lock().await;
+        let draft = req.action == "draft";
         match client
             .send_email(
                 to_addrs.clone(),
@@ -586,24 +587,30 @@ impl FastmailMcp {
                 &req.body,
                 None,
                 req.from.as_deref(),
+                draft,
             )
             .await
         {
             Ok(email_id) => Self::text_result(format!(
-                "Email sent successfully!\n\
+                "Email {} successfully!\n\
                 To: {}\n\
                 Subject: {}\n\
                 Email ID: {}",
+                if draft { "saved as draft" } else { "sent" },
                 format_address_list(Some(&to_addrs)),
                 req.subject,
                 email_id
             )),
-            Err(e) => Self::error_result(format!("Failed to send email: {}", e)),
+            Err(e) => Self::error_result(format!(
+                "Failed to {} email: {}",
+                if draft { "draft" } else { "send" },
+                e
+            )),
         }
     }
 
     #[tool(
-        description = "Reply to an existing email thread. CRITICAL: You MUST call with action='preview' first, show the user the draft, get explicit approval, then call again with action='confirm'. NEVER skip the preview step. For reply-all, set all=true."
+        description = "Reply to an existing email thread. CRITICAL: You MUST call with action='preview' first, show the user the draft, get explicit approval, then call again with action='confirm' to send or action='draft' to save as a draft without sending. NEVER skip the preview step. For reply-all, set all=true."
     )]
     async fn reply_to_email(&self, Parameters(req): Parameters<ReplyEmailRequest>) -> ToolResult {
         let client = self.client.lock().await;
@@ -672,6 +679,7 @@ impl FastmailMcp {
             ));
         }
 
+        let draft = req.action == "draft";
         match client
             .reply_email(
                 &original,
@@ -680,24 +688,30 @@ impl FastmailMcp {
                 cc_addrs,
                 bcc_addrs,
                 req.from.as_deref(),
+                draft,
             )
             .await
         {
             Ok(email_id) => Self::text_result(format!(
-                "Reply sent successfully!\n\
+                "Reply {} successfully!\n\
                 To: {}\n\
                 Subject: {}\n\
                 Email ID: {}",
+                if draft { "saved as draft" } else { "sent" },
                 format_address_list(Some(&to_addrs)),
                 subject,
                 email_id
             )),
-            Err(e) => Self::error_result(format!("Failed to send reply: {}", e)),
+            Err(e) => Self::error_result(format!(
+                "Failed to {} reply: {}",
+                if draft { "draft" } else { "send" },
+                e
+            )),
         }
     }
 
     #[tool(
-        description = "Forward an email to new recipients. CRITICAL: You MUST call with action='preview' first, show the user the draft, get explicit approval, then call again with action='confirm'. NEVER skip the preview step."
+        description = "Forward an email to new recipients. CRITICAL: You MUST call with action='preview' first, show the user the draft, get explicit approval, then call again with action='confirm' to send or action='draft' to save as a draft without sending. NEVER skip the preview step."
     )]
     async fn forward_email(&self, Parameters(req): Parameters<ForwardEmailRequest>) -> ToolResult {
         let client = self.client.lock().await;
@@ -779,6 +793,7 @@ impl FastmailMcp {
             ));
         }
 
+        let draft = req.action == "draft";
         match client
             .forward_email(
                 &original,
@@ -787,19 +802,25 @@ impl FastmailMcp {
                 cc_addrs,
                 bcc_addrs,
                 req.from.as_deref(),
+                draft,
             )
             .await
         {
             Ok(email_id) => Self::text_result(format!(
-                "Email forwarded successfully!\n\
+                "Forward {} successfully!\n\
                 To: {}\n\
                 Subject: {}\n\
                 Email ID: {}",
+                if draft { "saved as draft" } else { "sent" },
                 format_address_list(Some(&to_addrs)),
                 subject,
                 email_id
             )),
-            Err(e) => Self::error_result(format!("Failed to forward email: {}", e)),
+            Err(e) => Self::error_result(format!(
+                "Failed to {} forward: {}",
+                if draft { "draft" } else { "send" },
+                e
+            )),
         }
     }
 
