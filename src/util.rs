@@ -204,9 +204,6 @@ pub fn infer_image_mime(filename: &str) -> Option<&'static str> {
     }
 }
 
-/// Default max size for MCP (Claude's ~1MB base64 limit means raw < 700KB)
-pub const MCP_IMAGE_MAX_BYTES: usize = 700 * 1024;
-
 /// Resize image if needed to stay under a size limit
 /// Returns (processed_bytes, mime_type)
 pub fn resize_image(

@@ -13,7 +13,7 @@ CLI for Fastmail's JMAP API. Read, search, send, and manage emails from your ter
 | **Text Extraction**   | 56 formats via [kreuzberg](https://github.com/kreuzberg-dev/kreuzberg) |
 | **Image Resizing**    | `--max-size` to resize images on download                              |
 | **Masked Email**      | Create, list, enable/disable aliases                                   |
-| **MCP Server**        | Claude integration via Model Context Protocol                          |
+| **MCP Server**        | Claude integration via CLI instructions (no tool overhead)             |
 | **Shell Completions** | Bash, Zsh, Fish, PowerShell                                            |
 | **JSON Output**       | All commands output JSON for scripting                                 |
 
@@ -326,7 +326,7 @@ fastmail-cli get EMAIL_ID | jq -r '.data.bodyValues | to_entries[0].value.value'
 
 ## MCP Server (Claude Integration)
 
-Run as an MCP server for use with Claude Desktop or other MCP clients:
+The MCP server provides Claude with instructions for using the CLI directly via bash — no MCP tools, no schema overhead. Claude runs `fastmail-cli` commands and parses JSON output.
 
 ```bash
 fastmail-cli mcp
@@ -350,19 +350,9 @@ Configure in Claude Desktop's `claude_desktop_config.json`:
 }
 ```
 
-Username and app password are optional - only needed for contact search (CardDAV requires app password, API tokens don't work).
+Username and app password are optional — only needed for contact search (CardDAV requires app password, API tokens don't work).
 
-The MCP server exposes 18 tools for email operations:
-
-- **Reading**: `list_mailboxes`, `list_emails`, `get_email`, `search_emails`
-- **Actions**: `move_email`, `mark_as_read`, `mark_as_spam`
-- **Sending**: `send_email`, `reply_to_email`, `forward_email` (preview/confirm flow, `--from` identity selection)
-- **Identities**: `list_identities`
-- **Attachments**: `list_attachments`, `get_attachment` (auto text extraction, image resizing)
-- **Contacts**: `search_contacts` (requires app password)
-- **Masked Email**: `list_masked_emails`, `create_masked_email`, `enable_masked_email`, `disable_masked_email`, `delete_masked_email`
-
-Token can be set via `FASTMAIL_API_TOKEN` env var or config file.
+The MCP server injects a condensed CLI reference that teaches Claude how to list/search/read/send/reply/forward emails, manage attachments, contacts, and masked emails — all through the CLI's JSON interface. This approach is lightweight (no tool schemas to inflate context) and lets Claude use the full power of the CLI including `jq` for parsing.
 
 ## Debug Logging
 

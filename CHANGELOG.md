@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.0.0] - 2026-03-16
+
+### Changed
+
+- **Breaking:** MCP server no longer exposes tools — provides CLI usage instructions instead
+- Claude now uses `fastmail-cli` directly via bash commands with JSON output
+- Massively reduced context window usage (no tool schemas, no request/response types)
+- Removed `schemars` and `base64` dependencies (MCP-only)
+
+### Why
+
+MCP tools are slow, inflate the context window with schemas, and duplicate functionality the CLI already has. The new approach injects a condensed CLI reference so Claude runs commands directly — faster, simpler, and more capable (full CLI + jq).
+
 ## [1.8.0] - 2026-02-27
 
 ### Added
