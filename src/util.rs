@@ -76,7 +76,7 @@ fn is_image_extension(filename: &str) -> bool {
 }
 
 /// Infer MIME type from filename extension for documents
-fn mime_from_filename(filename: &str) -> String {
+pub fn mime_from_filename(filename: &str) -> String {
     let ext = Path::new(filename)
         .extension()
         .and_then(|e| e.to_str())

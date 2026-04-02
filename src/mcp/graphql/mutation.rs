@@ -21,6 +21,8 @@ impl MutationRoot {
         #[graphql(desc = "Recipient email address(es), comma-separated")] to: String,
         #[graphql(desc = "Email subject line")] subject: String,
         #[graphql(desc = "Email body text")] body: String,
+        #[graphql(desc = "Optional HTML body (creates multipart/alternative with plain text)")]
+        html_body: Option<String>,
         #[graphql(desc = "CC recipients, comma-separated")] cc: Option<String>,
         #[graphql(desc = "BCC recipients (hidden), comma-separated")] bcc: Option<String>,
         #[graphql(desc = "Send from a specific identity/email address")] from: Option<String>,
@@ -44,11 +46,17 @@ impl MutationRoot {
         let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
         let client = client.lock().await;
 
+        let message_body = crate::jmap::MessageBody {
+            text: body,
+            html: html_body,
+            attachments: vec![],
+        };
+
         match client
             .send_email(
                 to_addrs,
                 &subject,
-                &body,
+                message_body,
                 None,
                 crate::jmap::ComposeParams {
                     cc: cc_addrs,
@@ -82,6 +90,10 @@ impl MutationRoot {
         action: SendAction,
         #[graphql(desc = "The email ID to reply to")] email_id: String,
         #[graphql(desc = "Reply body text (your response, without quoting original)")] body: String,
+        #[graphql(
+            desc = "Optional HTML reply body (creates multipart/alternative with plain text)"
+        )]
+        html_body: Option<String>,
         #[graphql(desc = "Reply to all recipients")] all: Option<bool>,
         #[graphql(desc = "CC recipients, comma-separated")] cc: Option<String>,
         #[graphql(desc = "BCC recipients, comma-separated")] bcc: Option<String>,
@@ -139,10 +151,16 @@ impl MutationRoot {
         }
 
         let draft = matches!(action, SendAction::Draft);
+        let message_body = crate::jmap::MessageBody {
+            text: body,
+            html: html_body,
+            attachments: vec![],
+        };
+
         match client
             .reply_email(
                 &original,
-                &body,
+                message_body,
                 reply_all,
                 crate::jmap::ComposeParams {
                     cc: cc_addrs,
@@ -177,6 +195,9 @@ impl MutationRoot {
         #[graphql(desc = "The email ID to forward")] email_id: String,
         #[graphql(desc = "Recipient email address(es), comma-separated")] to: String,
         #[graphql(desc = "Your message to include above forwarded content")] body: Option<String>,
+        #[graphql(desc = "Optional HTML message above forwarded content")] html_body: Option<
+            String,
+        >,
         #[graphql(desc = "CC recipients, comma-separated")] cc: Option<String>,
         #[graphql(desc = "BCC recipients, comma-separated")] bcc: Option<String>,
         #[graphql(desc = "Send from a specific identity/email address")] from: Option<String>,
@@ -238,11 +259,17 @@ impl MutationRoot {
         }
 
         let draft = matches!(action, SendAction::Draft);
+        let message_body = crate::jmap::MessageBody {
+            text: body_str.to_string(),
+            html: html_body,
+            attachments: vec![],
+        };
+
         match client
             .forward_email(
                 &original,
                 to_addrs,
-                body_str,
+                message_body,
                 crate::jmap::ComposeParams {
                     cc: cc_addrs,
                     bcc: bcc_addrs,

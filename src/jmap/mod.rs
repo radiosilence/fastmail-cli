@@ -42,6 +42,63 @@ pub struct ComposeParams<'a> {
     pub draft: bool,
 }
 
+/// A file attachment that has been uploaded as a JMAP blob
+#[derive(Debug, Clone)]
+pub struct UploadedAttachment {
+    pub blob_id: String,
+    pub name: String,
+    pub content_type: String,
+    pub size: u64,
+}
+
+/// Structured email body with optional HTML alternative and attachments
+pub struct MessageBody {
+    pub text: String,
+    pub html: Option<String>,
+    pub attachments: Vec<UploadedAttachment>,
+}
+
+impl MessageBody {
+    /// Apply body parts to a JMAP Email/set create object
+    fn apply_to_email(&self, email_create: &mut HashMap<String, Value>) {
+        let mut body_values = json!({
+            "text": { "value": self.text, "charset": "utf-8" }
+        });
+        email_create.insert(
+            "textBody".into(),
+            json!([{ "partId": "text", "type": "text/plain" }]),
+        );
+
+        if let Some(ref html) = self.html {
+            body_values["html"] = json!({ "value": html, "charset": "utf-8" });
+            email_create.insert(
+                "htmlBody".into(),
+                json!([{ "partId": "html", "type": "text/html" }]),
+            );
+        }
+
+        email_create.insert("bodyValues".into(), body_values);
+
+        if !self.attachments.is_empty() {
+            email_create.insert(
+                "attachments".into(),
+                json!(
+                    self.attachments
+                        .iter()
+                        .map(|a| json!({
+                            "blobId": a.blob_id,
+                            "type": a.content_type,
+                            "name": a.name,
+                            "disposition": "attachment",
+                            "size": a.size,
+                        }))
+                        .collect::<Vec<_>>()
+                ),
+            );
+        }
+    }
+}
+
 /// Resolved context for a compose operation
 struct ComposeContext {
     account_id: String,
@@ -693,12 +750,12 @@ impl JmapClient {
             })
     }
 
-    #[instrument(skip(self, body, params))]
+    #[instrument(skip(self, message_body, params))]
     pub async fn send_email(
         &self,
         to: Vec<EmailAddress>,
         subject: &str,
-        body: &str,
+        message_body: MessageBody,
         in_reply_to: Option<&str>,
         params: ComposeParams<'_>,
     ) -> Result<String> {
@@ -739,14 +796,7 @@ impl JmapClient {
             );
         }
         email_create.insert("subject".into(), json!(subject));
-        email_create.insert(
-            "bodyValues".into(),
-            json!({ "body": { "value": body, "charset": "utf-8" } }),
-        );
-        email_create.insert(
-            "textBody".into(),
-            json!([{ "partId": "body", "type": "text/plain" }]),
-        );
+        message_body.apply_to_email(&mut email_create);
         if let Some(reply_id) = in_reply_to {
             email_create.insert("inReplyTo".into(), json!([reply_id]));
         }
@@ -846,12 +896,57 @@ impl JmapClient {
         Ok(bytes.to_vec())
     }
 
+    /// Upload binary data as a JMAP blob, returning the blob ID
+    #[instrument(skip(self, data))]
+    pub async fn upload_blob(&self, data: &[u8], content_type: &str) -> Result<UploadedAttachment> {
+        let session = self.session()?;
+        let account_id = session
+            .primary_account_id()
+            .ok_or_else(|| Error::Config("No primary account".into()))?;
+
+        let url = session.upload_url.replace("{accountId}", account_id);
+
+        debug!(url = %url, content_type = %content_type, size = data.len(), "Uploading blob");
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.token)
+            .header("Content-Type", content_type)
+            .body(data.to_vec())
+            .send()
+            .await?;
+
+        match resp.status().as_u16() {
+            401 => return Err(Error::InvalidToken("Token expired or invalid".into())),
+            429 => return Err(Error::RateLimited),
+            500..=599 => return Err(Error::Server(format!("Server error: {}", resp.status()))),
+            _ => {}
+        }
+
+        #[derive(Deserialize)]
+        struct UploadResponse {
+            #[serde(rename = "blobId")]
+            blob_id: String,
+            size: u64,
+        }
+
+        let upload: UploadResponse = resp.json().await?;
+        debug!(blob_id = %upload.blob_id, size = upload.size, "Blob uploaded");
+
+        Ok(UploadedAttachment {
+            blob_id: upload.blob_id,
+            name: String::new(),
+            content_type: content_type.to_string(),
+            size: upload.size,
+        })
+    }
+
     /// Send a reply to an existing email with proper threading headers
-    #[instrument(skip(self, body, params))]
+    #[instrument(skip(self, message_body, params))]
     pub async fn reply_email(
         &self,
         original: &Email,
-        body: &str,
+        message_body: MessageBody,
         reply_all: bool,
         params: ComposeParams<'_>,
     ) -> Result<String> {
@@ -947,14 +1042,7 @@ impl JmapClient {
             );
         }
         email_create.insert("subject".into(), json!(subject));
-        email_create.insert(
-            "bodyValues".into(),
-            json!({ "body": { "value": body, "charset": "utf-8" } }),
-        );
-        email_create.insert(
-            "textBody".into(),
-            json!([{ "partId": "body", "type": "text/plain" }]),
-        );
+        message_body.apply_to_email(&mut email_create);
 
         // Threading headers
         if let Some(ref msg_id) = original.message_id {
@@ -972,12 +1060,12 @@ impl JmapClient {
     }
 
     /// Forward an email with proper attribution
-    #[instrument(skip(self, body, params))]
+    #[instrument(skip(self, message_body, params))]
     pub async fn forward_email(
         &self,
         original: &Email,
         to: Vec<EmailAddress>,
-        body: &str,
+        message_body: MessageBody,
         params: ComposeParams<'_>,
     ) -> Result<String> {
         let ctx = self.prepare_compose(params.from, params.draft).await?;
@@ -1016,14 +1104,28 @@ impl JmapClient {
 
         let date = original.received_at.as_deref().unwrap_or("unknown date");
 
-        let full_body = format!(
-            "{}\n\n---------- Forwarded message ---------\nFrom: {}\nDate: {}\nSubject: {}\n\n{}",
-            body,
+        let fwd_attribution = format!(
+            "\n\n---------- Forwarded message ---------\nFrom: {}\nDate: {}\nSubject: {}\n\n{}",
             sender,
             date,
             original.subject.as_deref().unwrap_or(""),
             original_body
         );
+
+        let full_body = MessageBody {
+            text: format!("{}{}", message_body.text, fwd_attribution),
+            html: message_body.html.map(|h| {
+                format!(
+                    "{}<br><br><hr><b>---------- Forwarded message ---------</b><br>From: {}<br>Date: {}<br>Subject: {}<br><br>{}",
+                    h,
+                    sender,
+                    date,
+                    original.subject.as_deref().unwrap_or(""),
+                    original_body
+                )
+            }),
+            attachments: message_body.attachments,
+        };
 
         let mut email_create: HashMap<String, Value> = HashMap::new();
         ctx.apply_to_email(&mut email_create);
@@ -1060,14 +1162,7 @@ impl JmapClient {
             );
         }
         email_create.insert("subject".into(), json!(subject));
-        email_create.insert(
-            "bodyValues".into(),
-            json!({ "body": { "value": full_body, "charset": "utf-8" } }),
-        );
-        email_create.insert(
-            "textBody".into(),
-            json!([{ "partId": "body", "type": "text/plain" }]),
-        );
+        full_body.apply_to_email(&mut email_create);
 
         let responses = self.request(ctx.build_method_calls(email_create)).await?;
         let email_id = Self::parse_email_create_response(&responses)?;

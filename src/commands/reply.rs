@@ -1,9 +1,9 @@
-use crate::jmap::{ComposeParams, authenticated_client};
+use crate::jmap::{ComposeParams, MessageBody, authenticated_client};
 use crate::models::Output;
 
 pub async fn reply(
     email_id: &str,
-    body: &str,
+    message_body: MessageBody,
     reply_all: bool,
     params: ComposeParams<'_>,
 ) -> anyhow::Result<()> {
@@ -13,7 +13,7 @@ pub async fn reply(
     let original = client.get_email(email_id).await?;
 
     let new_email_id = client
-        .reply_email(&original, body, reply_all, params)
+        .reply_email(&original, message_body, reply_all, params)
         .await?;
 
     #[derive(serde::Serialize)]

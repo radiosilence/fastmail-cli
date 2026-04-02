@@ -11,7 +11,54 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 use models::Output;
 use std::io;
+use std::path::Path;
 use tracing_subscriber::EnvFilter;
+
+/// Resolve HTML content from --html-body or --html-file, and upload any attachments
+async fn build_message_body(
+    body: String,
+    html_body: Option<String>,
+    html_file: Option<String>,
+    attachments: Vec<String>,
+) -> anyhow::Result<jmap::MessageBody> {
+    let html = match (html_body, html_file) {
+        (Some(h), _) => Some(h),
+        (_, Some(path)) => Some(
+            tokio::fs::read_to_string(&path)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to read HTML file '{}': {}", path, e))?,
+        ),
+        _ => None,
+    };
+
+    let uploaded = if attachments.is_empty() {
+        vec![]
+    } else {
+        let client = jmap::authenticated_client().await?;
+        let mut uploaded = Vec::with_capacity(attachments.len());
+        for path_str in &attachments {
+            let path = Path::new(path_str);
+            let data = tokio::fs::read(path)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to read attachment '{}': {}", path_str, e))?;
+            let filename = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("attachment");
+            let content_type = util::mime_from_filename(filename);
+            let mut att = client.upload_blob(&data, &content_type).await?;
+            att.name = filename.to_string();
+            uploaded.push(att);
+        }
+        uploaded
+    };
+
+    Ok(jmap::MessageBody {
+        text: body,
+        html,
+        attachments: uploaded,
+    })
+}
 
 #[derive(Parser)]
 #[command(name = "fastmail-cli")]
@@ -126,6 +173,18 @@ enum Commands {
         #[arg(long)]
         body: String,
 
+        /// HTML body (creates multipart/alternative with plain text)
+        #[arg(long, conflicts_with = "html_file")]
+        html_body: Option<String>,
+
+        /// Path to HTML file for email body (creates multipart/alternative with plain text)
+        #[arg(long, conflicts_with = "html_body")]
+        html_file: Option<String>,
+
+        /// File attachment(s) — can be specified multiple times
+        #[arg(long)]
+        attachment: Vec<String>,
+
         /// CC recipient(s), comma-separated
         #[arg(long)]
         cc: Option<String>,
@@ -204,6 +263,18 @@ enum Commands {
         #[arg(long)]
         body: String,
 
+        /// HTML reply body (creates multipart/alternative with plain text)
+        #[arg(long, conflicts_with = "html_file")]
+        html_body: Option<String>,
+
+        /// Path to HTML file for reply body (creates multipart/alternative with plain text)
+        #[arg(long, conflicts_with = "html_body")]
+        html_file: Option<String>,
+
+        /// File attachment(s) — can be specified multiple times
+        #[arg(long)]
+        attachment: Vec<String>,
+
         /// Reply to all recipients
         #[arg(long)]
         all: bool,
@@ -237,6 +308,18 @@ enum Commands {
         /// Message to include before forwarded content
         #[arg(long, default_value = "")]
         body: String,
+
+        /// HTML message to include before forwarded content (creates multipart/alternative)
+        #[arg(long, conflicts_with = "html_file")]
+        html_body: Option<String>,
+
+        /// Path to HTML file for message before forwarded content
+        #[arg(long, conflicts_with = "html_body")]
+        html_file: Option<String>,
+
+        /// File attachment(s) — can be specified multiple times
+        #[arg(long)]
+        attachment: Vec<String>,
 
         /// CC recipient(s), comma-separated
         #[arg(long)]
@@ -416,27 +499,35 @@ async fn main() {
             to,
             subject,
             body,
+            html_body,
+            html_file,
+            attachment,
             cc,
             bcc,
             reply_to,
             from,
             draft,
         } => {
-            commands::send(
-                &to,
-                &subject,
-                &body,
-                reply_to.as_deref(),
-                jmap::ComposeParams {
-                    cc: cc.as_deref().map(util::parse_addresses).unwrap_or_default(),
-                    bcc: bcc
-                        .as_deref()
-                        .map(util::parse_addresses)
-                        .unwrap_or_default(),
-                    from: from.as_deref(),
-                    draft,
-                },
-            )
+            async {
+                let message_body =
+                    build_message_body(body, html_body, html_file, attachment).await?;
+                commands::send(
+                    &to,
+                    &subject,
+                    message_body,
+                    reply_to.as_deref(),
+                    jmap::ComposeParams {
+                        cc: cc.as_deref().map(util::parse_addresses).unwrap_or_default(),
+                        bcc: bcc
+                            .as_deref()
+                            .map(util::parse_addresses)
+                            .unwrap_or_default(),
+                        from: from.as_deref(),
+                        draft,
+                    },
+                )
+                .await
+            }
             .await
         }
 
@@ -470,26 +561,34 @@ async fn main() {
         Commands::Reply {
             email_id,
             body,
+            html_body,
+            html_file,
+            attachment,
             all,
             cc,
             bcc,
             from,
             draft,
         } => {
-            commands::reply(
-                &email_id,
-                &body,
-                all,
-                jmap::ComposeParams {
-                    cc: cc.as_deref().map(util::parse_addresses).unwrap_or_default(),
-                    bcc: bcc
-                        .as_deref()
-                        .map(util::parse_addresses)
-                        .unwrap_or_default(),
-                    from: from.as_deref(),
-                    draft,
-                },
-            )
+            async {
+                let message_body =
+                    build_message_body(body, html_body, html_file, attachment).await?;
+                commands::reply(
+                    &email_id,
+                    message_body,
+                    all,
+                    jmap::ComposeParams {
+                        cc: cc.as_deref().map(util::parse_addresses).unwrap_or_default(),
+                        bcc: bcc
+                            .as_deref()
+                            .map(util::parse_addresses)
+                            .unwrap_or_default(),
+                        from: from.as_deref(),
+                        draft,
+                    },
+                )
+                .await
+            }
             .await
         }
 
@@ -497,25 +596,33 @@ async fn main() {
             email_id,
             to,
             body,
+            html_body,
+            html_file,
+            attachment,
             cc,
             bcc,
             from,
             draft,
         } => {
-            commands::forward(
-                &email_id,
-                &to,
-                &body,
-                jmap::ComposeParams {
-                    cc: cc.as_deref().map(util::parse_addresses).unwrap_or_default(),
-                    bcc: bcc
-                        .as_deref()
-                        .map(util::parse_addresses)
-                        .unwrap_or_default(),
-                    from: from.as_deref(),
-                    draft,
-                },
-            )
+            async {
+                let message_body =
+                    build_message_body(body, html_body, html_file, attachment).await?;
+                commands::forward(
+                    &email_id,
+                    &to,
+                    message_body,
+                    jmap::ComposeParams {
+                        cc: cc.as_deref().map(util::parse_addresses).unwrap_or_default(),
+                        bcc: bcc
+                            .as_deref()
+                            .map(util::parse_addresses)
+                            .unwrap_or_default(),
+                        from: from.as_deref(),
+                        draft,
+                    },
+                )
+                .await
+            }
             .await
         }
 

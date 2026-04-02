@@ -1,11 +1,11 @@
-use crate::jmap::{ComposeParams, authenticated_client};
+use crate::jmap::{ComposeParams, MessageBody, authenticated_client};
 use crate::models::Output;
 use crate::util::parse_addresses;
 
 pub async fn forward(
     email_id: &str,
     to: &str,
-    body: &str,
+    message_body: MessageBody,
     params: ComposeParams<'_>,
 ) -> anyhow::Result<()> {
     let client = authenticated_client().await?;
@@ -14,7 +14,7 @@ pub async fn forward(
     let original = client.get_email(email_id).await?;
 
     let new_email_id = client
-        .forward_email(&original, parse_addresses(to), body, params)
+        .forward_email(&original, parse_addresses(to), message_body, params)
         .await?;
 
     #[derive(serde::Serialize)]

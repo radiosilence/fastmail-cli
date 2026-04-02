@@ -1,11 +1,11 @@
-use crate::jmap::{ComposeParams, authenticated_client};
+use crate::jmap::{ComposeParams, MessageBody, authenticated_client};
 use crate::models::Output;
 use crate::util::parse_addresses;
 
 pub async fn send(
     to: &str,
     subject: &str,
-    body: &str,
+    message_body: MessageBody,
     reply_to: Option<&str>,
     params: ComposeParams<'_>,
 ) -> anyhow::Result<()> {
@@ -13,7 +13,7 @@ pub async fn send(
     let draft = params.draft;
 
     let email_id = client
-        .send_email(parse_addresses(to), subject, body, reply_to, params)
+        .send_email(parse_addresses(to), subject, message_body, reply_to, params)
         .await?;
 
     #[derive(serde::Serialize)]
