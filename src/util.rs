@@ -290,6 +290,63 @@ pub fn resolve_html(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn test_resolve_html_inline() {
+        let result = resolve_html(Some("<h1>Hi</h1>".into()), None).unwrap();
+        assert_eq!(result, Some("<h1>Hi</h1>".into()));
+    }
+
+    #[test]
+    fn test_resolve_html_file() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "<p>from file</p>").unwrap();
+        let result = resolve_html(None, Some(tmp.path().to_str().unwrap().into())).unwrap();
+        assert_eq!(result, Some("<p>from file</p>".into()));
+    }
+
+    #[test]
+    fn test_resolve_html_none() {
+        let result = resolve_html(None, None).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_resolve_html_missing_file() {
+        let result = resolve_html(None, Some("/nonexistent/file.html".into()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_attachment_success() {
+        let mut tmp = tempfile::Builder::new().suffix(".pdf").tempfile().unwrap();
+        write!(tmp, "fake pdf").unwrap();
+        let att = load_attachment(tmp.path().to_str().unwrap()).unwrap();
+        assert_eq!(
+            att.filename,
+            tmp.path().file_name().unwrap().to_str().unwrap()
+        );
+        assert_eq!(att.content_type, "application/pdf");
+        assert_eq!(att.data, b"fake pdf");
+    }
+
+    #[test]
+    fn test_load_attachment_missing_file() {
+        let result = load_attachment("/nonexistent/file.txt");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_attachment_mime_inference() {
+        let mut tmp = tempfile::Builder::new().suffix(".xlsx").tempfile().unwrap();
+        write!(tmp, "data").unwrap();
+        let att = load_attachment(tmp.path().to_str().unwrap()).unwrap();
+        assert_eq!(
+            att.content_type,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        );
+    }
 
     #[test]
     fn test_parse_single_email() {

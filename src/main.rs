@@ -485,18 +485,21 @@ async fn main() {
             html_body,
             html_file,
             attachments,
-        } => match build_compose_params(
-            cc.as_deref(),
-            bcc.as_deref(),
-            from.as_deref(),
-            draft,
-            html_body,
-            html_file,
-            &attachments,
-        ) {
-            Ok(params) => commands::send(&to, &subject, &body, reply_to.as_deref(), params).await,
-            Err(e) => Err(e),
-        },
+        } => {
+            async {
+                let params = build_compose_params(
+                    cc.as_deref(),
+                    bcc.as_deref(),
+                    from.as_deref(),
+                    draft,
+                    html_body,
+                    html_file,
+                    &attachments,
+                )?;
+                commands::send(&to, &subject, &body, reply_to.as_deref(), params).await
+            }
+            .await
+        }
 
         Commands::Move { email_id, to } => commands::move_email(&email_id, &to).await,
 
@@ -536,18 +539,21 @@ async fn main() {
             html_body,
             html_file,
             attachments,
-        } => match build_compose_params(
-            cc.as_deref(),
-            bcc.as_deref(),
-            from.as_deref(),
-            draft,
-            html_body,
-            html_file,
-            &attachments,
-        ) {
-            Ok(params) => commands::reply(&email_id, &body, all, params).await,
-            Err(e) => Err(e),
-        },
+        } => {
+            async {
+                let params = build_compose_params(
+                    cc.as_deref(),
+                    bcc.as_deref(),
+                    from.as_deref(),
+                    draft,
+                    html_body,
+                    html_file,
+                    &attachments,
+                )?;
+                commands::reply(&email_id, &body, all, params).await
+            }
+            .await
+        }
 
         Commands::Forward {
             email_id,
@@ -560,18 +566,21 @@ async fn main() {
             html_body,
             html_file,
             attachments,
-        } => match build_compose_params(
-            cc.as_deref(),
-            bcc.as_deref(),
-            from.as_deref(),
-            draft,
-            html_body,
-            html_file,
-            &attachments,
-        ) {
-            Ok(params) => commands::forward(&email_id, &to, &body, params).await,
-            Err(e) => Err(e),
-        },
+        } => {
+            async {
+                let params = build_compose_params(
+                    cc.as_deref(),
+                    bcc.as_deref(),
+                    from.as_deref(),
+                    draft,
+                    html_body,
+                    html_file,
+                    &attachments,
+                )?;
+                commands::forward(&email_id, &to, &body, params).await
+            }
+            .await
+        }
 
         Commands::Completions { shell } => {
             generate(

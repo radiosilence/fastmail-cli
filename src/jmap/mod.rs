@@ -974,10 +974,14 @@ impl JmapClient {
             .await?;
 
         match resp.status().as_u16() {
+            200..=299 => {}
             401 => return Err(Error::InvalidToken("Token expired or invalid".into())),
             429 => return Err(Error::RateLimited),
             500..=599 => return Err(Error::Server(format!("Server error: {}", resp.status()))),
-            _ => {}
+            code => {
+                let text = resp.text().await.unwrap_or_default();
+                return Err(Error::Server(format!("Upload failed ({}): {}", code, text)));
+            }
         }
 
         let body: Value = resp.json().await?;
