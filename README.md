@@ -8,7 +8,7 @@ CLI for Fastmail's JMAP API. Read, search, send, and manage emails from your ter
 | --------------------- | ---------------------------------------------------------------------- |
 | **Email**             | List, search, read, send, reply, forward, threads, identity selection, HTML bodies, file attachments |
 | **Mailboxes**         | List folders, move emails, mark spam/read                              |
-| **Contacts**          | Search contacts via CardDAV                                            |
+| **Contacts**          | Search, create, update, delete contacts via CardDAV                    |
 | **Attachments**       | Download files, extract text, resize images                            |
 | **Text Extraction**   | 56 formats via [kreuzberg](https://github.com/kreuzberg-dev/kreuzberg) |
 | **Image Resizing**    | `--max-size` to resize images on download                              |
@@ -280,7 +280,7 @@ fastmail-cli completions fish > ~/.config/fish/completions/fastmail-cli.fish
 
 ### Contacts
 
-Search your Fastmail contacts via CardDAV. Requires an app password (API tokens don't work for CardDAV).
+CRUD operations for Fastmail contacts via CardDAV. Requires an app password (API tokens don't work for CardDAV).
 
 ```bash
 # Set credentials
@@ -292,6 +292,15 @@ fastmail-cli contacts list
 
 # Search by name, email, or organization
 fastmail-cli contacts search "alice"
+
+# Create a new contact
+fastmail-cli contacts create --name "Jane Doe" --email "jane@example.com" --organization "Acme Corp"
+
+# Update an existing contact (only provided fields are changed)
+fastmail-cli contacts update CONTACT_ID --organization "New Corp" --title "CEO"
+
+# Delete a contact (requires -y confirmation)
+fastmail-cli contacts delete CONTACT_ID -y
 ```
 
 Generate an app password at [Fastmail Settings > Privacy & Security > Integrations > App passwords](https://app.fastmail.com/settings/security/devicekeys).

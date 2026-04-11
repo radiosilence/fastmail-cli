@@ -557,6 +557,146 @@ impl MutationRoot {
             }),
         }
     }
+
+    /// Create a new contact via CardDAV. Requires FASTMAIL_USERNAME and FASTMAIL_APP_PASSWORD.
+    async fn create_contact(
+        &self,
+        #[graphql(desc = "Full name")] name: String,
+        #[graphql(desc = "Email address")] email: Option<String>,
+        #[graphql(desc = "Phone number")] phone: Option<String>,
+        #[graphql(desc = "Organization/company")] organization: Option<String>,
+        #[graphql(desc = "Job title")] title: Option<String>,
+        #[graphql(desc = "Notes")] notes: Option<String>,
+    ) -> Result<GqlContact> {
+        let (client, emails, phones) = build_carddav_context(email, phone)?;
+
+        let contact = client
+            .create_contact(&crate::carddav::ContactFields {
+                name: Some(&name),
+                emails: Some(&emails),
+                phones: Some(&phones),
+                organization: organization.as_deref(),
+                title: title.as_deref(),
+                notes: notes.as_deref(),
+            })
+            .await?;
+        Ok(GqlContact::from(contact))
+    }
+
+    /// Update an existing contact via CardDAV. Only provided fields are changed; others are preserved.
+    async fn update_contact(
+        &self,
+        #[graphql(desc = "Contact ID (UID from the vCard)")] id: String,
+        #[graphql(desc = "New full name")] name: Option<String>,
+        #[graphql(desc = "New email address (replaces existing)")] email: Option<String>,
+        #[graphql(desc = "New phone number (replaces existing)")] phone: Option<String>,
+        #[graphql(desc = "New organization/company")] organization: Option<String>,
+        #[graphql(desc = "New job title")] title: Option<String>,
+        #[graphql(desc = "New notes")] notes: Option<String>,
+    ) -> Result<GqlContact> {
+        let (client, emails, phones) = build_carddav_context(email, phone)?;
+
+        let emails_ref = if emails.is_empty() {
+            None
+        } else {
+            Some(emails.as_slice())
+        };
+        let phones_ref = if phones.is_empty() {
+            None
+        } else {
+            Some(phones.as_slice())
+        };
+
+        let contact = client
+            .update_contact(
+                &id,
+                &crate::carddav::ContactFields {
+                    name: name.as_deref(),
+                    emails: emails_ref,
+                    phones: phones_ref,
+                    organization: organization.as_deref(),
+                    title: title.as_deref(),
+                    notes: notes.as_deref(),
+                },
+            )
+            .await?;
+        Ok(GqlContact::from(contact))
+    }
+
+    /// Delete a contact via CardDAV. Cannot be undone!
+    async fn delete_contact(
+        &self,
+        #[graphql(desc = "Contact ID (UID from the vCard)")] id: String,
+    ) -> Result<GqlStatus> {
+        let config = crate::config::Config::load()?;
+        let username = config.get_username().map_err(|_| {
+            async_graphql::Error::new("Username not configured. Set FASTMAIL_USERNAME env var.")
+        })?;
+        let app_password = config.get_app_password().map_err(|_| {
+            async_graphql::Error::new(
+                "App password not configured. Set FASTMAIL_APP_PASSWORD env var.",
+            )
+        })?;
+
+        let client = crate::carddav::CardDavClient::new(username, app_password);
+        match client.delete_contact(&id).await {
+            Ok(()) => Ok(GqlStatus {
+                success: true,
+                message: Some(format!("Contact {id} deleted.")),
+                error: None,
+            }),
+            Err(e) => Ok(GqlStatus {
+                success: false,
+                message: None,
+                error: Some(e.to_string()),
+            }),
+        }
+    }
+}
+
+// ============ CardDAV helpers ============
+
+fn build_carddav_context(
+    email: Option<String>,
+    phone: Option<String>,
+) -> async_graphql::Result<(
+    crate::carddav::CardDavClient,
+    Vec<crate::carddav::ContactEmail>,
+    Vec<crate::carddav::ContactPhone>,
+)> {
+    let config = crate::config::Config::load()?;
+    let username = config.get_username().map_err(|_| {
+        async_graphql::Error::new("Username not configured. Set FASTMAIL_USERNAME env var.")
+    })?;
+    let app_password = config.get_app_password().map_err(|_| {
+        async_graphql::Error::new("App password not configured. Set FASTMAIL_APP_PASSWORD env var.")
+    })?;
+
+    let client = crate::carddav::CardDavClient::new(username, app_password);
+
+    let emails: Vec<crate::carddav::ContactEmail> = email
+        .map(|e| {
+            e.split(',')
+                .map(|addr| crate::carddav::ContactEmail {
+                    email: addr.trim().to_string(),
+                    label: None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let phones: Vec<crate::carddav::ContactPhone> = phone
+        .map(|p| {
+            p.split(',')
+                .map(|num| crate::carddav::ContactPhone {
+                    number: num.trim().to_string(),
+                    label: None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok((client, emails, phones))
 }
 
 // ============ Formatting helpers (preview only) ============
