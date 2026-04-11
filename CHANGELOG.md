@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **HTML email body**: `--html-body` (inline) and `--html-file` (from file) flags on send, reply, and forward. JMAP assembles multipart/alternative automatically when both text and HTML are provided.
+- **File attachments**: `--attachment` / `-a` flag (repeatable) on send, reply, and forward. Files are uploaded as blobs and attached via JMAP's `bodyStructure` with proper multipart/mixed MIME tree.
+- **`upload_blob` JMAP method**: POST raw bytes to Fastmail's upload endpoint, returns a `blobId` for use in email composition.
+- **GraphQL `html_body` parameter**: `sendEmail`, `replyToEmail`, and `forwardEmail` mutations accept optional HTML body content. Previews indicate when HTML is included.
+
+### Changed
+
+- **Refactored body construction**: `create_and_submit_email` now handles plain text, text+HTML (multipart/alternative), and attachments (multipart/mixed with nested alternative) in a single code path. Eliminated duplicated body/cc/bcc logic across compose methods.
+- `bodyValues` keys changed from `"body"` to `"textBody"` / `"htmlBody"` for clarity.
+- `mime_from_filename` in util.rs is now public (used by `load_attachment`).
+
 ## [2.0.1] - 2026-03-26
 
 ### Fixed

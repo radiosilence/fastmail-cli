@@ -24,6 +24,9 @@ impl MutationRoot {
         #[graphql(desc = "CC recipients, comma-separated")] cc: Option<String>,
         #[graphql(desc = "BCC recipients (hidden), comma-separated")] bcc: Option<String>,
         #[graphql(desc = "Send from a specific identity/email address")] from: Option<String>,
+        #[graphql(desc = "HTML body content (alternative to plain text)")] html_body: Option<
+            String,
+        >,
         #[graphql(desc = "Token from PREVIEW response — required for CONFIRM/DRAFT")]
         confirmation_token: Option<String>,
     ) -> Result<GqlComposeResult> {
@@ -33,12 +36,15 @@ impl MutationRoot {
         let token = super::types::confirmation_token(&[&to, &subject, &body]);
 
         if matches!(action, SendAction::Preview) {
+            let mut preview =
+                format_send_preview(&to_addrs, &cc_addrs, &bcc_addrs, &subject, &body);
+            if html_body.is_some() {
+                preview.push_str("\n[HTML body included]");
+            }
             return Ok(GqlComposeResult {
                 success: true,
                 email_id: None,
-                preview: Some(format_send_preview(
-                    &to_addrs, &cc_addrs, &bcc_addrs, &subject, &body,
-                )),
+                preview: Some(preview),
                 confirmation_token: Some(token),
                 error: None,
             });
@@ -72,6 +78,8 @@ impl MutationRoot {
                     bcc: bcc_addrs,
                     from: from.as_deref(),
                     draft,
+                    html_body,
+                    attachments: vec![],
                 },
             )
             .await
@@ -105,6 +113,9 @@ impl MutationRoot {
         #[graphql(desc = "CC recipients, comma-separated")] cc: Option<String>,
         #[graphql(desc = "BCC recipients, comma-separated")] bcc: Option<String>,
         #[graphql(desc = "Send from a specific identity/email address")] from: Option<String>,
+        #[graphql(desc = "HTML body content (alternative to plain text)")] html_body: Option<
+            String,
+        >,
         #[graphql(desc = "Token from PREVIEW response — required for CONFIRM/DRAFT")]
         confirmation_token: Option<String>,
     ) -> Result<GqlComposeResult> {
@@ -136,26 +147,30 @@ impl MutationRoot {
                 .and_then(|v| v.first())
                 .cloned()
                 .unwrap_or_else(|| "(none)".to_string());
+            let mut preview = format!(
+                "REPLY PREVIEW:\nTo: {}\nCC: {}\nBCC: {}\nSubject: {}\nIn-Reply-To: {}\n\n--- Your Reply ---\n{}",
+                format_addrs(&to_addrs),
+                if cc_addrs.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    format_addrs(&cc_addrs)
+                },
+                if bcc_addrs.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    format_addrs(&bcc_addrs)
+                },
+                subject,
+                in_reply_to,
+                body
+            );
+            if html_body.is_some() {
+                preview.push_str("\n[HTML body included]");
+            }
             return Ok(GqlComposeResult {
                 success: true,
                 email_id: None,
-                preview: Some(format!(
-                    "REPLY PREVIEW:\nTo: {}\nCC: {}\nBCC: {}\nSubject: {}\nIn-Reply-To: {}\n\n--- Your Reply ---\n{}",
-                    format_addrs(&to_addrs),
-                    if cc_addrs.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        format_addrs(&cc_addrs)
-                    },
-                    if bcc_addrs.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        format_addrs(&bcc_addrs)
-                    },
-                    subject,
-                    in_reply_to,
-                    body
-                )),
+                preview: Some(preview),
                 confirmation_token: Some(token),
                 error: None,
             });
@@ -184,6 +199,8 @@ impl MutationRoot {
                     bcc: bcc_addrs,
                     from: from.as_deref(),
                     draft,
+                    html_body,
+                    attachments: vec![],
                 },
             )
             .await
@@ -217,6 +234,9 @@ impl MutationRoot {
         #[graphql(desc = "CC recipients, comma-separated")] cc: Option<String>,
         #[graphql(desc = "BCC recipients, comma-separated")] bcc: Option<String>,
         #[graphql(desc = "Send from a specific identity/email address")] from: Option<String>,
+        #[graphql(desc = "HTML body content (alternative to plain text)")] html_body: Option<
+            String,
+        >,
         #[graphql(desc = "Token from PREVIEW response — required for CONFIRM/DRAFT")]
         confirmation_token: Option<String>,
     ) -> Result<GqlComposeResult> {
@@ -244,30 +264,34 @@ impl MutationRoot {
             let original_body = original.text_content().unwrap_or("");
             let sender = format_addrs(&original.from.clone().unwrap_or_default());
 
+            let mut preview = format!(
+                "FORWARD PREVIEW:\nTo: {}\nCC: {}\nBCC: {}\nSubject: {}\nForwarding from: {}\n\n--- Your Message ---\n{}\n\n--- Forwarded ---\nFrom: {}\nDate: {}\nSubject: {}\n\n{}",
+                format_addrs(&to_addrs),
+                if cc_addrs.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    format_addrs(&cc_addrs)
+                },
+                if bcc_addrs.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    format_addrs(&bcc_addrs)
+                },
+                subject,
+                sender,
+                body_str,
+                sender,
+                original.received_at.as_deref().unwrap_or("unknown"),
+                original.subject.as_deref().unwrap_or(""),
+                original_body,
+            );
+            if html_body.is_some() {
+                preview.push_str("\n[HTML body included]");
+            }
             return Ok(GqlComposeResult {
                 success: true,
                 email_id: None,
-                preview: Some(format!(
-                    "FORWARD PREVIEW:\nTo: {}\nCC: {}\nBCC: {}\nSubject: {}\nForwarding from: {}\n\n--- Your Message ---\n{}\n\n--- Forwarded ---\nFrom: {}\nDate: {}\nSubject: {}\n\n{}",
-                    format_addrs(&to_addrs),
-                    if cc_addrs.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        format_addrs(&cc_addrs)
-                    },
-                    if bcc_addrs.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        format_addrs(&bcc_addrs)
-                    },
-                    subject,
-                    sender,
-                    body_str,
-                    sender,
-                    original.received_at.as_deref().unwrap_or("unknown"),
-                    original.subject.as_deref().unwrap_or(""),
-                    original_body,
-                )),
+                preview: Some(preview),
                 confirmation_token: Some(token),
                 error: None,
             });
@@ -296,6 +320,8 @@ impl MutationRoot {
                     bcc: bcc_addrs,
                     from: from.as_deref(),
                     draft,
+                    html_body,
+                    attachments: vec![],
                 },
             )
             .await

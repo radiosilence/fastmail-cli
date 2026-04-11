@@ -6,7 +6,7 @@ CLI for Fastmail's JMAP API. Read, search, send, and manage emails from your ter
 
 | Feature               | Description                                                            |
 | --------------------- | ---------------------------------------------------------------------- |
-| **Email**             | List, search, read, send, reply, forward, threads, identity selection  |
+| **Email**             | List, search, read, send, reply, forward, threads, identity selection, HTML bodies, file attachments |
 | **Mailboxes**         | List folders, move emails, mark spam/read                              |
 | **Contacts**          | Search contacts via CardDAV                                            |
 | **Attachments**       | Download files, extract text, resize images                            |
@@ -158,6 +158,26 @@ fastmail-cli send \
   --from "alias@yourdomain.com" \
   --subject "Hello" \
   --body "Message"
+
+# HTML email body (inline or from file)
+fastmail-cli send \
+  --to "alice@example.com" \
+  --subject "Newsletter" \
+  --body "Plain text fallback" \
+  --html-body "<h1>Hello</h1><p>Rich content here</p>"
+
+fastmail-cli send \
+  --to "alice@example.com" \
+  --subject "Report" \
+  --body "See attached" \
+  --html-file ./email.html
+
+# File attachments (repeatable)
+fastmail-cli send \
+  --to "alice@example.com" \
+  --subject "Documents" \
+  --body "Please review" \
+  -a report.pdf -a data.xlsx
 ```
 
 ### Move Email

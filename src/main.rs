@@ -13,6 +13,31 @@ use models::Output;
 use std::io;
 use tracing_subscriber::EnvFilter;
 
+/// Build ComposeParams with resolved HTML and loaded attachments.
+fn build_compose_params<'a>(
+    cc: Option<&'a str>,
+    bcc: Option<&'a str>,
+    from: Option<&'a str>,
+    draft: bool,
+    html_body: Option<String>,
+    html_file: Option<String>,
+    attachment_paths: &[String],
+) -> anyhow::Result<jmap::ComposeParams<'a>> {
+    let resolved_html = util::resolve_html(html_body, html_file)?;
+    let attachments: Vec<jmap::AttachmentData> = attachment_paths
+        .iter()
+        .map(|p| util::load_attachment(p))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(jmap::ComposeParams {
+        cc: cc.map(util::parse_addresses).unwrap_or_default(),
+        bcc: bcc.map(util::parse_addresses).unwrap_or_default(),
+        from,
+        draft,
+        html_body: resolved_html,
+        attachments,
+    })
+}
+
 #[derive(Parser)]
 #[command(name = "fastmail-cli")]
 #[command(version, about = "CLI for Fastmail's JMAP API", long_about = None)]
@@ -145,6 +170,18 @@ enum Commands {
         /// Save as draft instead of sending
         #[arg(long)]
         draft: bool,
+
+        /// HTML body content
+        #[arg(long, conflicts_with = "html_file")]
+        html_body: Option<String>,
+
+        /// Path to HTML file for email body
+        #[arg(long, conflicts_with = "html_body")]
+        html_file: Option<String>,
+
+        /// File attachment (repeatable)
+        #[arg(long = "attachment", short = 'a', action = clap::ArgAction::Append)]
+        attachments: Vec<String>,
     },
 
     /// Move email to a mailbox
@@ -223,6 +260,18 @@ enum Commands {
         /// Save as draft instead of sending
         #[arg(long)]
         draft: bool,
+
+        /// HTML body content
+        #[arg(long, conflicts_with = "html_file")]
+        html_body: Option<String>,
+
+        /// Path to HTML file for email body
+        #[arg(long, conflicts_with = "html_body")]
+        html_file: Option<String>,
+
+        /// File attachment (repeatable)
+        #[arg(long = "attachment", short = 'a', action = clap::ArgAction::Append)]
+        attachments: Vec<String>,
     },
 
     /// Forward an email
@@ -253,6 +302,18 @@ enum Commands {
         /// Save as draft instead of sending
         #[arg(long)]
         draft: bool,
+
+        /// HTML body content
+        #[arg(long, conflicts_with = "html_file")]
+        html_body: Option<String>,
+
+        /// Path to HTML file for email body
+        #[arg(long, conflicts_with = "html_body")]
+        html_file: Option<String>,
+
+        /// File attachment (repeatable)
+        #[arg(long = "attachment", short = 'a', action = clap::ArgAction::Append)]
+        attachments: Vec<String>,
     },
 
     /// Generate shell completions
@@ -421,24 +482,21 @@ async fn main() {
             reply_to,
             from,
             draft,
-        } => {
-            commands::send(
-                &to,
-                &subject,
-                &body,
-                reply_to.as_deref(),
-                jmap::ComposeParams {
-                    cc: cc.as_deref().map(util::parse_addresses).unwrap_or_default(),
-                    bcc: bcc
-                        .as_deref()
-                        .map(util::parse_addresses)
-                        .unwrap_or_default(),
-                    from: from.as_deref(),
-                    draft,
-                },
-            )
-            .await
-        }
+            html_body,
+            html_file,
+            attachments,
+        } => match build_compose_params(
+            cc.as_deref(),
+            bcc.as_deref(),
+            from.as_deref(),
+            draft,
+            html_body,
+            html_file,
+            &attachments,
+        ) {
+            Ok(params) => commands::send(&to, &subject, &body, reply_to.as_deref(), params).await,
+            Err(e) => Err(e),
+        },
 
         Commands::Move { email_id, to } => commands::move_email(&email_id, &to).await,
 
@@ -475,23 +533,21 @@ async fn main() {
             bcc,
             from,
             draft,
-        } => {
-            commands::reply(
-                &email_id,
-                &body,
-                all,
-                jmap::ComposeParams {
-                    cc: cc.as_deref().map(util::parse_addresses).unwrap_or_default(),
-                    bcc: bcc
-                        .as_deref()
-                        .map(util::parse_addresses)
-                        .unwrap_or_default(),
-                    from: from.as_deref(),
-                    draft,
-                },
-            )
-            .await
-        }
+            html_body,
+            html_file,
+            attachments,
+        } => match build_compose_params(
+            cc.as_deref(),
+            bcc.as_deref(),
+            from.as_deref(),
+            draft,
+            html_body,
+            html_file,
+            &attachments,
+        ) {
+            Ok(params) => commands::reply(&email_id, &body, all, params).await,
+            Err(e) => Err(e),
+        },
 
         Commands::Forward {
             email_id,
@@ -501,23 +557,21 @@ async fn main() {
             bcc,
             from,
             draft,
-        } => {
-            commands::forward(
-                &email_id,
-                &to,
-                &body,
-                jmap::ComposeParams {
-                    cc: cc.as_deref().map(util::parse_addresses).unwrap_or_default(),
-                    bcc: bcc
-                        .as_deref()
-                        .map(util::parse_addresses)
-                        .unwrap_or_default(),
-                    from: from.as_deref(),
-                    draft,
-                },
-            )
-            .await
-        }
+            html_body,
+            html_file,
+            attachments,
+        } => match build_compose_params(
+            cc.as_deref(),
+            bcc.as_deref(),
+            from.as_deref(),
+            draft,
+            html_body,
+            html_file,
+            &attachments,
+        ) {
+            Ok(params) => commands::forward(&email_id, &to, &body, params).await,
+            Err(e) => Err(e),
+        },
 
         Commands::Completions { shell } => {
             generate(

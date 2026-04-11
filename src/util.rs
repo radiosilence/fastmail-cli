@@ -1,3 +1,4 @@
+use crate::jmap::AttachmentData;
 use crate::models::EmailAddress;
 use std::path::Path;
 
@@ -76,7 +77,7 @@ fn is_image_extension(filename: &str) -> bool {
 }
 
 /// Infer MIME type from filename extension for documents
-fn mime_from_filename(filename: &str) -> String {
+pub fn mime_from_filename(filename: &str) -> String {
     let ext = Path::new(filename)
         .extension()
         .and_then(|e| e.to_str())
@@ -250,6 +251,40 @@ pub fn resize_image(
         .map_err(|e| format!("Failed to encode image: {}", e))?;
 
     Ok((output, "image/jpeg".to_string()))
+}
+
+/// Load a file from disk as an attachment, inferring MIME type from extension.
+pub fn load_attachment(path: &str) -> anyhow::Result<AttachmentData> {
+    let p = Path::new(path);
+    let filename = p
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("attachment")
+        .to_string();
+    let content_type = mime_from_filename(&filename);
+    let data = std::fs::read(p)
+        .map_err(|e| anyhow::anyhow!("Failed to read attachment '{}': {}", path, e))?;
+    Ok(AttachmentData {
+        filename,
+        content_type,
+        data,
+    })
+}
+
+/// Resolve HTML body from either inline string or file path.
+pub fn resolve_html(
+    html_body: Option<String>,
+    html_file: Option<String>,
+) -> anyhow::Result<Option<String>> {
+    if let Some(html) = html_body {
+        return Ok(Some(html));
+    }
+    if let Some(path) = html_file {
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("Failed to read HTML file '{}': {}", path, e))?;
+        return Ok(Some(content));
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
