@@ -50,8 +50,9 @@ struct Cli {
 enum Commands {
     /// Authenticate with Fastmail API token
     Auth {
-        /// API token from Fastmail settings
-        token: String,
+        /// API token from Fastmail settings. If omitted, the token is read from
+        /// stdin so it doesn't appear in `ps`, shell history, or the environment.
+        token: Option<String>,
     },
 
     /// List resources
@@ -487,7 +488,16 @@ async fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Auth { token } => commands::auth(&token).await,
+        Commands::Auth { token } => {
+            let resolved = match token {
+                Some(t) => Ok(t),
+                None => commands::read_token_from_stdin(),
+            };
+            match resolved {
+                Ok(t) => commands::auth(&t).await,
+                Err(e) => Err(e),
+            }
+        }
 
         Commands::List(cmd) => match cmd {
             ListCommands::Mailboxes => commands::list_mailboxes().await,
