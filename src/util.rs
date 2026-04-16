@@ -253,6 +253,79 @@ pub fn resize_image(
     Ok((output, "image/jpeg".to_string()))
 }
 
+/// Sanitize an attachment filename so it's safe to use as a path component.
+///
+/// Email senders control `attachment.name`, so an unsanitized value can contain
+/// `../` segments, absolute paths, NUL bytes, or Windows-reserved names. This
+/// returns only the final path component, stripped of separators and control
+/// characters, with Windows-reserved stems replaced. Returns `fallback` if the
+/// input is empty or entirely composed of unsafe characters.
+pub fn sanitize_filename(raw: &str, fallback: &str) -> String {
+    // Split on both forward and backslash — Windows-style names from
+    // cross-platform clients show up on Unix where only `/` is a separator.
+    let base = raw.rsplit(['/', '\\']).next().unwrap_or("");
+
+    let filtered: String = base
+        .chars()
+        .filter(|c| !c.is_control() && *c != '/' && *c != '\\')
+        .collect();
+
+    let trimmed = filtered.trim_matches(|c: char| c.is_whitespace() || c == '.');
+
+    if trimmed.is_empty() || is_windows_reserved_stem(trimmed) {
+        return fallback.to_string();
+    }
+
+    // Cap at 200 chars so we leave headroom below the 255-byte filename limit
+    // present on most filesystems, while preserving the extension.
+    const MAX_LEN: usize = 200;
+    if trimmed.len() <= MAX_LEN {
+        return trimmed.to_string();
+    }
+    match Path::new(trimmed).extension().and_then(|e| e.to_str()) {
+        Some(ext) if ext.len() < 15 => {
+            let stem_len = MAX_LEN - ext.len() - 1;
+            let stem: String = trimmed.chars().take(stem_len).collect();
+            format!("{}.{}", stem, ext)
+        }
+        _ => trimmed.chars().take(MAX_LEN).collect(),
+    }
+}
+
+fn is_windows_reserved_stem(name: &str) -> bool {
+    let stem = Path::new(name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_uppercase());
+    matches!(
+        stem.as_deref(),
+        Some(
+            "CON"
+                | "PRN"
+                | "AUX"
+                | "NUL"
+                | "COM1"
+                | "COM2"
+                | "COM3"
+                | "COM4"
+                | "COM5"
+                | "COM6"
+                | "COM7"
+                | "COM8"
+                | "COM9"
+                | "LPT1"
+                | "LPT2"
+                | "LPT3"
+                | "LPT4"
+                | "LPT5"
+                | "LPT6"
+                | "LPT7"
+                | "LPT8"
+                | "LPT9"
+        )
+    )
+}
+
 /// Load a file from disk as an attachment, inferring MIME type from extension.
 pub fn load_attachment(path: &str) -> anyhow::Result<AttachmentData> {
     let p = Path::new(path);
@@ -402,5 +475,63 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].email, "bare@example.com");
         assert!(result[0].name.is_none());
+    }
+
+    #[test]
+    fn test_sanitize_filename_strips_path_traversal() {
+        assert_eq!(sanitize_filename("../../etc/passwd", "fb"), "passwd");
+        assert_eq!(sanitize_filename("../../../../foo.txt", "fb"), "foo.txt");
+    }
+
+    #[test]
+    fn test_sanitize_filename_strips_absolute_path() {
+        assert_eq!(sanitize_filename("/etc/passwd", "fb"), "passwd");
+        assert_eq!(sanitize_filename("/tmp/evil.sh", "fb"), "evil.sh");
+    }
+
+    #[test]
+    fn test_sanitize_filename_rejects_nul_bytes() {
+        assert_eq!(sanitize_filename("foo\0bar.txt", "fb"), "foobar.txt");
+    }
+
+    #[test]
+    fn test_sanitize_filename_rejects_windows_reserved() {
+        assert_eq!(sanitize_filename("CON", "fb"), "fb");
+        assert_eq!(sanitize_filename("nul.txt", "fb"), "fb");
+        assert_eq!(sanitize_filename("com1", "fb"), "fb");
+        assert_eq!(sanitize_filename("LPT9.log", "fb"), "fb");
+    }
+
+    #[test]
+    fn test_sanitize_filename_trims_dots_and_whitespace() {
+        assert_eq!(sanitize_filename("   .hidden.txt  ", "fb"), "hidden.txt");
+        assert_eq!(sanitize_filename("file.", "fb"), "file");
+        assert_eq!(sanitize_filename("...", "fb"), "fb");
+    }
+
+    #[test]
+    fn test_sanitize_filename_empty_returns_fallback() {
+        assert_eq!(sanitize_filename("", "fallback.bin"), "fallback.bin");
+        assert_eq!(sanitize_filename("   ", "fallback.bin"), "fallback.bin");
+    }
+
+    #[test]
+    fn test_sanitize_filename_preserves_normal_names() {
+        assert_eq!(sanitize_filename("report.pdf", "fb"), "report.pdf");
+        assert_eq!(sanitize_filename("My Photo.jpg", "fb"), "My Photo.jpg");
+    }
+
+    #[test]
+    fn test_sanitize_filename_strips_backslash_path() {
+        // Windows-style separators in attachment names from cross-platform clients
+        assert_eq!(sanitize_filename("foo\\bar\\baz.txt", "fb"), "baz.txt");
+    }
+
+    #[test]
+    fn test_sanitize_filename_truncates_long_names_with_extension() {
+        let long = format!("{}.pdf", "a".repeat(300));
+        let result = sanitize_filename(&long, "fb");
+        assert!(result.len() <= 200);
+        assert!(result.ends_with(".pdf"));
     }
 }
