@@ -5,8 +5,13 @@ pub enum Error {
     #[error("Authentication required. Run `fastmail-cli auth <token>` first.")]
     NotAuthenticated,
 
+    /// Authentication was rejected by the server.
+    ///
+    /// The inner value is a `&'static str` by design — using a static literal
+    /// ensures no call site can accidentally pass the token itself or another
+    /// secret into this variant where it would then surface in error output.
     #[error("Invalid API token: {0}")]
-    InvalidToken(String),
+    InvalidToken(&'static str),
 
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),

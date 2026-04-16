@@ -247,6 +247,41 @@ struct JmapResponse {
     method_responses: Vec<Value>,
 }
 
+/// Substitute `{placeholder}` tokens in a URL template in a single pass.
+///
+/// Unlike chaining `str::replace`, this never re-scans an already-substituted
+/// value, so a variable value that contains another template marker cannot
+/// bleed into a later replacement.
+fn apply_url_template(tmpl: &str, vars: &[(&str, &str)]) -> String {
+    let mut result = String::with_capacity(tmpl.len());
+    let mut rest = tmpl;
+    while let Some(open) = rest.find('{') {
+        result.push_str(&rest[..open]);
+        let after_open = &rest[open + 1..];
+        if let Some(close) = after_open.find('}') {
+            let key = &after_open[..close];
+            match vars.iter().find(|(k, _)| *k == key) {
+                Some((_, v)) => result.push_str(v),
+                None => {
+                    // Unknown placeholder — preserve literally so a downstream
+                    // system that recognises it still can.
+                    result.push('{');
+                    result.push_str(key);
+                    result.push('}');
+                }
+            }
+            rest = &after_open[close + 1..];
+        } else {
+            // Unterminated — emit the remainder verbatim and stop.
+            result.push('{');
+            result.push_str(after_open);
+            return result;
+        }
+    }
+    result.push_str(rest);
+    result
+}
+
 fn pick_identity(identities: Vec<Identity>, from: Option<&str>) -> Result<Identity> {
     match from {
         Some(email) => identities
@@ -284,7 +319,7 @@ impl JmapClient {
             .await?;
 
         match resp.status().as_u16() {
-            401 => return Err(Error::InvalidToken("Authentication failed".into())),
+            401 => return Err(Error::InvalidToken("Authentication failed")),
             429 => return Err(Error::RateLimited),
             500..=599 => return Err(Error::Server(format!("Server error: {}", resp.status()))),
             _ => {}
@@ -342,7 +377,7 @@ impl JmapClient {
             .await?;
 
         match resp.status().as_u16() {
-            401 => return Err(Error::InvalidToken("Token expired or invalid".into())),
+            401 => return Err(Error::InvalidToken("Token expired or invalid")),
             429 => return Err(Error::RateLimited),
             500..=599 => return Err(Error::Server(format!("Server error: {}", resp.status()))),
             _ => {}
@@ -951,12 +986,18 @@ impl JmapClient {
         let session = self.session()?;
 
         // downloadUrl template: https://api.fastmail.com/jmap/download/{accountId}/{blobId}/{name}?accept={type}
-        let url = session
-            .download_url
-            .replace("{accountId}", account_id)
-            .replace("{blobId}", blob_id)
-            .replace("{name}", "attachment")
-            .replace("{type}", "application/octet-stream");
+        //
+        // Single-pass substitution — chained .replace() calls could recursively
+        // replace a value that happened to contain another template marker.
+        let url = apply_url_template(
+            &session.download_url,
+            &[
+                ("accountId", account_id),
+                ("blobId", blob_id),
+                ("name", "attachment"),
+                ("type", "application/octet-stream"),
+            ],
+        );
 
         debug!(url = %url, "Downloading blob");
         let resp = self
@@ -967,7 +1008,7 @@ impl JmapClient {
             .await?;
 
         match resp.status().as_u16() {
-            401 => return Err(Error::InvalidToken("Token expired or invalid".into())),
+            401 => return Err(Error::InvalidToken("Token expired or invalid")),
             404 => return Err(Error::Config(format!("Blob not found: {}", blob_id))),
             429 => return Err(Error::RateLimited),
             500..=599 => return Err(Error::Server(format!("Server error: {}", resp.status()))),
@@ -984,7 +1025,7 @@ impl JmapClient {
         let account_id = self.account_id()?;
         let session = self.session()?;
 
-        let url = session.upload_url.replace("{accountId}", account_id);
+        let url = apply_url_template(&session.upload_url, &[("accountId", account_id)]);
 
         debug!(url = %url, content_type = %content_type, size = data.len(), "Uploading blob");
         let resp = self
@@ -998,7 +1039,7 @@ impl JmapClient {
 
         match resp.status().as_u16() {
             200..=299 => {}
-            401 => return Err(Error::InvalidToken("Token expired or invalid".into())),
+            401 => return Err(Error::InvalidToken("Token expired or invalid")),
             429 => return Err(Error::RateLimited),
             500..=599 => return Err(Error::Server(format!("Server error: {}", resp.status()))),
             code => {
@@ -1379,6 +1420,40 @@ mod tests {
             event_source_url: None,
             state: None,
         }
+    }
+
+    #[test]
+    fn test_apply_url_template_basic() {
+        let result = apply_url_template(
+            "https://api.example.com/{a}/{b}",
+            &[("a", "hello"), ("b", "world")],
+        );
+        assert_eq!(result, "https://api.example.com/hello/world");
+    }
+
+    #[test]
+    fn test_apply_url_template_no_cascade() {
+        // A value that contains another template marker must not be re-substituted.
+        let result = apply_url_template("https://x/{a}/{b}", &[("a", "{b}"), ("b", "LEAKED")]);
+        assert_eq!(result, "https://x/{b}/LEAKED");
+    }
+
+    #[test]
+    fn test_apply_url_template_unknown_placeholder_preserved() {
+        let result = apply_url_template("/{known}/{other}", &[("known", "X")]);
+        assert_eq!(result, "/X/{other}");
+    }
+
+    #[test]
+    fn test_apply_url_template_no_placeholders() {
+        let result = apply_url_template("https://api.example.com/v1", &[]);
+        assert_eq!(result, "https://api.example.com/v1");
+    }
+
+    #[test]
+    fn test_apply_url_template_unterminated_brace() {
+        let result = apply_url_template("/path/{unterminated", &[]);
+        assert_eq!(result, "/path/{unterminated");
     }
 
     #[test]
