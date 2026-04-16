@@ -292,6 +292,69 @@ fn pick_identity(identities: Vec<Identity>, from: Option<&str>) -> Result<Identi
     }
 }
 
+/// Build reply To/CC lists from an original email, expanding reply-all if
+/// requested and filtering out the sending identity.
+///
+/// Returns `(to, cc)` where:
+/// - `to` always starts with `original.from`. When `reply_all` is set, the
+///   original `To` recipients are appended (minus `my_email` if provided).
+/// - `cc` starts with the caller-supplied `extra_cc`. When `reply_all` is
+///   set, the original `Cc` recipients are appended (minus `my_email`).
+///
+/// Both lists are deduplicated by lowercase email, and anything already in
+/// `to` is stripped from `cc` — so an overlap between `extra_cc` and
+/// reply-all-expanded `to` never produces a duplicate delivery.
+///
+/// `my_email` is optional: pass `None` for the preview path before an
+/// identity has been resolved. In that case the "filter me out" step is
+/// skipped, so the resulting preview may list the user's own address —
+/// still a safer failure mode than the old preview, which silently
+/// under-reported recipients.
+pub fn expand_reply_recipients(
+    original: &Email,
+    reply_all: bool,
+    my_email: Option<&str>,
+    extra_cc: Vec<EmailAddress>,
+) -> (Vec<EmailAddress>, Vec<EmailAddress>) {
+    let me_lower = my_email.map(str::to_lowercase);
+    let is_me = |addr: &EmailAddress| -> bool {
+        me_lower
+            .as_deref()
+            .is_some_and(|m| addr.email.eq_ignore_ascii_case(m))
+    };
+
+    let mut to_addrs: Vec<EmailAddress> = original.from.clone().unwrap_or_default();
+    if reply_all && let Some(ref orig_to) = original.to {
+        for addr in orig_to {
+            if !is_me(addr) {
+                to_addrs.push(addr.clone());
+            }
+        }
+    }
+
+    let mut cc_addrs = extra_cc;
+    if reply_all && let Some(ref orig_cc) = original.cc {
+        for addr in orig_cc {
+            if !is_me(addr) {
+                cc_addrs.push(addr.clone());
+            }
+        }
+    }
+
+    dedup_by_email(&mut to_addrs);
+    let to_lower: std::collections::HashSet<String> =
+        to_addrs.iter().map(|a| a.email.to_lowercase()).collect();
+    cc_addrs.retain(|c| !to_lower.contains(&c.email.to_lowercase()));
+    dedup_by_email(&mut cc_addrs);
+
+    (to_addrs, cc_addrs)
+}
+
+fn dedup_by_email(addrs: &mut Vec<EmailAddress>) {
+    let mut seen = std::collections::HashSet::<String>::new();
+    addrs.retain(|a| seen.insert(a.email.to_lowercase()));
+}
+
 impl JmapClient {
     pub fn new(token: String) -> Self {
         let client = Client::builder()
@@ -757,6 +820,14 @@ impl JmapClient {
         pick_identity(identities, from)
     }
 
+    /// Return the email address that would be used as the sender for a reply/
+    /// send/forward — i.e. the resolved identity's email. Returns `None` if
+    /// identity resolution fails, so callers (notably the MCP preview path)
+    /// can still produce a useful preview without erroring out.
+    pub async fn resolve_my_email(&self, from: Option<&str>) -> Option<String> {
+        self.resolve_identity(from).await.ok().map(|i| i.email)
+    }
+
     async fn prepare_compose(&mut self, from: Option<&str>, draft: bool) -> Result<ComposeContext> {
         if !draft {
             self.require_capability("urn:ietf:params:jmap:submission", "Email sending")?;
@@ -1055,47 +1126,25 @@ impl JmapClient {
             .ok_or_else(|| Error::Server("Upload response missing blobId".into()))
     }
 
-    /// Send a reply to an existing email with proper threading headers
+    /// Send a reply to an existing email with proper threading headers.
+    ///
+    /// The caller is responsible for computing `to` and `params.cc` — usually
+    /// by calling [`expand_reply_recipients`] after resolving the sending
+    /// identity with [`JmapClient::resolve_my_email`]. Keeping the expansion
+    /// on the caller side means the MCP preview path and the send path use
+    /// exactly the same recipient lists, so the preview cannot under-report
+    /// or diverge from what will actually be sent.
     #[instrument(skip(self, body, params))]
     pub async fn reply_email(
         &mut self,
         original: &Email,
         body: &str,
-        reply_all: bool,
+        to: Vec<EmailAddress>,
         params: ComposeParams<'_>,
     ) -> Result<String> {
         let ctx = self.prepare_compose(params.from, params.draft).await?;
-
-        let my_email = ctx
-            .identity
-            .as_ref()
-            .map(|i| i.email.to_lowercase())
-            .or_else(|| params.from.map(|f| f.to_lowercase()))
-            .unwrap_or_default();
-
-        // Build To: reply to sender, or if reply_all, include original recipients
-        let mut to_addrs: Vec<EmailAddress> = original.from.clone().unwrap_or_default();
-
-        if reply_all {
-            // Add original To recipients (except ourselves)
-            if let Some(ref orig_to) = original.to {
-                for addr in orig_to {
-                    if my_email.is_empty() || addr.email.to_lowercase() != my_email {
-                        to_addrs.push(addr.clone());
-                    }
-                }
-            }
-        }
-
-        // Build CC: include original CC recipients (if reply_all) plus any new CC
-        let mut cc_addrs = params.cc;
-        if reply_all && let Some(ref orig_cc) = original.cc {
-            for addr in orig_cc {
-                if my_email.is_empty() || addr.email.to_lowercase() != my_email {
-                    cc_addrs.push(addr.clone());
-                }
-            }
-        }
+        let to_addrs = to;
+        let cc_addrs = params.cc;
 
         // Build subject with Re: prefix if not already present
         let subject = if original
@@ -1525,6 +1574,148 @@ mod tests {
             text_signature: None,
             may_delete: true,
         }
+    }
+
+    fn addr(email: &str) -> EmailAddress {
+        EmailAddress {
+            name: None,
+            email: email.to_string(),
+        }
+    }
+
+    fn reply_fixture(from: Vec<&str>, to: Vec<&str>, cc: Vec<&str>) -> Email {
+        let mut email = Email {
+            id: "test".into(),
+            blob_id: None,
+            thread_id: None,
+            mailbox_ids: HashMap::new(),
+            keywords: HashMap::new(),
+            size: 0,
+            received_at: None,
+            message_id: None,
+            in_reply_to: None,
+            references: None,
+            from: None,
+            to: None,
+            cc: None,
+            bcc: None,
+            reply_to: None,
+            subject: None,
+            sent_at: None,
+            preview: None,
+            has_attachment: false,
+            text_body: None,
+            html_body: None,
+            attachments: None,
+            body_values: None,
+        };
+        email.from = Some(from.iter().map(|e| addr(e)).collect());
+        email.to = Some(to.iter().map(|e| addr(e)).collect());
+        email.cc = Some(cc.iter().map(|e| addr(e)).collect());
+        email
+    }
+
+    fn emails(addrs: &[EmailAddress]) -> Vec<String> {
+        addrs.iter().map(|a| a.email.clone()).collect()
+    }
+
+    #[test]
+    fn test_expand_reply_plain_does_not_expand() {
+        let original = reply_fixture(
+            vec!["sender@x"],
+            vec!["recip1@x", "recip2@x"],
+            vec!["cc1@x"],
+        );
+        let (to, cc) =
+            expand_reply_recipients(&original, false, Some("me@x"), vec![addr("user@x")]);
+        assert_eq!(emails(&to), vec!["sender@x"]);
+        assert_eq!(emails(&cc), vec!["user@x"]);
+    }
+
+    #[test]
+    fn test_expand_reply_all_adds_original_recipients() {
+        let original = reply_fixture(
+            vec!["sender@x"],
+            vec!["recip1@x", "recip2@x"],
+            vec!["cc1@x"],
+        );
+        let (to, cc) = expand_reply_recipients(&original, true, Some("me@x"), vec![]);
+        assert_eq!(emails(&to), vec!["sender@x", "recip1@x", "recip2@x"]);
+        assert_eq!(emails(&cc), vec!["cc1@x"]);
+    }
+
+    #[test]
+    fn test_expand_reply_all_filters_me_from_to() {
+        let original = reply_fixture(
+            vec!["sender@x"],
+            vec!["recip1@x", "me@x", "recip2@x"],
+            vec![],
+        );
+        let (to, _) = expand_reply_recipients(&original, true, Some("me@x"), vec![]);
+        assert_eq!(emails(&to), vec!["sender@x", "recip1@x", "recip2@x"]);
+    }
+
+    #[test]
+    fn test_expand_reply_all_filters_me_from_cc() {
+        let original = reply_fixture(vec!["sender@x"], vec![], vec!["cc1@x", "me@x", "cc2@x"]);
+        let (_, cc) = expand_reply_recipients(&original, true, Some("me@x"), vec![]);
+        assert_eq!(emails(&cc), vec!["cc1@x", "cc2@x"]);
+    }
+
+    #[test]
+    fn test_expand_reply_all_case_insensitive_me() {
+        let original = reply_fixture(vec!["sender@x"], vec!["ME@X"], vec!["me@X"]);
+        let (to, cc) = expand_reply_recipients(&original, true, Some("me@x"), vec![]);
+        assert_eq!(emails(&to), vec!["sender@x"]);
+        assert_eq!(emails(&cc), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_expand_reply_dedupes_overlapping_user_cc_and_reply_all_to() {
+        // The exact duplicate-send scenario from the bug report: user notices
+        // preview is missing recipients, adds them as cc to "fix" the preview;
+        // send path expands reply-all into To AND those addresses appear in CC.
+        let original = reply_fixture(
+            vec!["paul@x"],
+            vec!["sher@x", "dylan@x", "anne@x", "leon@x"],
+            vec![],
+        );
+        let user_cc = vec![addr("sher@x"), addr("anne@x"), addr("leon@x")];
+        let (to, cc) = expand_reply_recipients(&original, true, Some("dylan@x"), user_cc);
+        // Dylan filtered out; rest in To.
+        assert_eq!(emails(&to), vec!["paul@x", "sher@x", "anne@x", "leon@x"]);
+        // Nothing in CC — all user-supplied addresses were already in To.
+        assert_eq!(emails(&cc), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_expand_reply_dedupes_duplicates_in_original() {
+        // Unusual but possible: original.from address also appears in
+        // original.to (e.g. sender CC'd themselves).
+        let original = reply_fixture(vec!["x@x"], vec!["x@x", "y@x"], vec![]);
+        let (to, _) = expand_reply_recipients(&original, true, None, vec![]);
+        assert_eq!(emails(&to), vec!["x@x", "y@x"]);
+    }
+
+    #[test]
+    fn test_expand_reply_without_my_email_still_dedupes() {
+        // Preview path when identity resolution fails: no "me" filter, but
+        // dedup should still run.
+        let original = reply_fixture(vec!["sender@x"], vec!["a@x", "a@x"], vec![]);
+        let (to, _) = expand_reply_recipients(&original, true, None, vec![]);
+        assert_eq!(emails(&to), vec!["sender@x", "a@x"]);
+    }
+
+    #[test]
+    fn test_expand_reply_preserves_to_order() {
+        let original = reply_fixture(
+            vec!["first@x"],
+            vec!["second@x", "third@x"],
+            vec!["fourth@x", "fifth@x"],
+        );
+        let (to, cc) = expand_reply_recipients(&original, true, None, vec![]);
+        assert_eq!(emails(&to), vec!["first@x", "second@x", "third@x"]);
+        assert_eq!(emails(&cc), vec!["fourth@x", "fifth@x"]);
     }
 
     #[test]

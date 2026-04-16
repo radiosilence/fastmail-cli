@@ -127,7 +127,7 @@ impl MutationRoot {
 
         let original = client.get_email(&email_id).await?;
         let reply_all = all.unwrap_or(false);
-        let cc_addrs = cc.as_deref().map(parse_addresses).unwrap_or_default();
+        let extra_cc = cc.as_deref().map(parse_addresses).unwrap_or_default();
         let bcc_addrs = bcc.as_deref().map(parse_addresses).unwrap_or_default();
 
         let subject = if original
@@ -140,7 +140,17 @@ impl MutationRoot {
             format!("Re: {}", original.subject.as_deref().unwrap_or(""))
         };
 
-        let to_addrs: Vec<EmailAddress> = original.from.clone().unwrap_or_default();
+        // Compute the final recipient lists once, up front. Both PREVIEW
+        // (for display) and CONFIRM/DRAFT (for the actual send) use these
+        // exact values — preview and send can't diverge because they share
+        // the same variables, not the same code path.
+        let my_email = client.resolve_my_email(from.as_deref()).await;
+        let (to_addrs, cc_addrs) = crate::jmap::expand_reply_recipients(
+            &original,
+            reply_all,
+            my_email.as_deref(),
+            extra_cc,
+        );
 
         if matches!(action, SendAction::Preview) {
             let nonce = super::types::issue_nonce(nonce_store, &params).await;
@@ -196,7 +206,7 @@ impl MutationRoot {
             .reply_email(
                 &original,
                 &body,
-                reply_all,
+                to_addrs,
                 crate::jmap::ComposeParams {
                     cc: cc_addrs,
                     bcc: bcc_addrs,
