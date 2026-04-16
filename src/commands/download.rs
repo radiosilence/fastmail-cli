@@ -1,6 +1,10 @@
 use crate::jmap::authenticated_client;
 use crate::models::Output;
-use crate::util::{extract_text, infer_image_mime, is_image, parse_size, resize_image};
+use crate::util::{
+    extract_text, infer_image_mime, is_image, parse_size, resize_image, sanitize_filename,
+};
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::Path;
 
 pub async fn download_attachment(
@@ -30,10 +34,9 @@ pub async fn download_attachment(
                 None => continue,
             };
 
-            let filename = attachment
-                .name
-                .clone()
-                .unwrap_or_else(|| format!("{}.bin", blob_id));
+            let fallback = format!("{}.bin", blob_id);
+            let raw_name = attachment.name.as_deref().unwrap_or("");
+            let filename = sanitize_filename(raw_name, &fallback);
 
             let content_type = attachment.content_type.clone().unwrap_or_default();
             let bytes = client.download_blob(blob_id).await?;
@@ -62,10 +65,9 @@ pub async fn download_attachment(
             None => continue,
         };
 
-        let filename = attachment
-            .name
-            .clone()
-            .unwrap_or_else(|| format!("{}.bin", blob_id));
+        let fallback = format!("{}.bin", blob_id);
+        let raw_name = attachment.name.as_deref().unwrap_or("");
+        let filename = sanitize_filename(raw_name, &fallback);
 
         let content_type = attachment
             .content_type
@@ -110,7 +112,17 @@ pub async fn download_attachment(
         };
 
         let path = Path::new(out_dir).join(&final_filename);
-        std::fs::write(&path, &final_bytes)?;
+        // create_new(true) uses O_EXCL/CREATE_NEW — fails if the target exists,
+        // including through a symlink. Prevents silent overwrite and TOCTOU
+        // attacks where an attacker pre-creates a symlink at the target path.
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to write attachment to {}: {}", path.display(), e)
+            })?;
+        file.write_all(&final_bytes)?;
 
         downloaded.push(path.to_string_lossy().to_string());
     }
