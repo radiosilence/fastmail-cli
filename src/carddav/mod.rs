@@ -2,6 +2,7 @@
 //!
 //! Uses raw HTTP with reqwest since CardDAV is just WebDAV with vCard.
 
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument};
@@ -9,6 +10,21 @@ use tracing::{debug, instrument};
 use crate::error::{Error, Result};
 
 const CARDDAV_BASE: &str = "https://carddav.fastmail.com";
+
+// Per RFC 3986, these chars need escaping when interpolating into a URL path
+// segment. `/` is the segment delimiter and must be escaped to stay in-segment.
+const PATH_SEGMENT: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'{')
+    .add(b'}')
+    .add(b'/')
+    .add(b'%');
 
 /// A contact parsed from vCard
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,7 +95,8 @@ impl CardDavClient {
     /// Discover address books for the user
     #[instrument(skip(self))]
     pub async fn list_addressbooks(&self) -> Result<Vec<AddressBook>> {
-        let url = format!("{}/dav/addressbooks/user/{}/", CARDDAV_BASE, self.username);
+        let encoded_user = utf8_percent_encode(&self.username, PATH_SEGMENT);
+        let url = format!("{}/dav/addressbooks/user/{}/", CARDDAV_BASE, encoded_user);
 
         let body = r#"<?xml version="1.0" encoding="utf-8"?>
 <d:propfind xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
@@ -224,7 +241,7 @@ impl CardDavClient {
             }
         }
 
-        contacts.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        contacts.sort_by_key(|c| c.name.to_lowercase());
         Ok(contacts)
     }
 
