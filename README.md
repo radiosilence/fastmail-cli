@@ -37,13 +37,19 @@ cargo install --git https://github.com/radiosilence/fastmail-cli
 ### Authentication
 
 1. Generate an API token at [Fastmail Settings > Privacy & Security > Integrations > API tokens](https://app.fastmail.com/settings/security/tokens)
-2. Auth with the CLI:
+2. Auth with the CLI — the token is read from stdin so it stays out of shell history, `ps`, and the process environment:
 
 ```bash
-fastmail-cli auth YOUR_TOKEN
+# interactive — paste the token at the prompt
+fastmail-cli auth
+
+# non-interactive — pipe from a password manager, file, or env var
+echo "$FASTMAIL_TOKEN" | fastmail-cli auth
 ```
 
-Token is stored in `~/.config/fastmail-cli/config.toml` with 0600 permissions.
+The positional form `fastmail-cli auth YOUR_TOKEN` still works for backward compatibility, but the stdin form is preferred.
+
+Token is stored in `~/.config/fastmail-cli/config.toml` with `0600` permissions (directory `0700`). The file is written atomically via rename, and the path is refused if it's a symlink.
 
 ### Configuration
 
