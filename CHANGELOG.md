@@ -2,6 +2,10 @@
 
 ## [2.2.1] - 2026-04-18
 
+### Fixed
+
+- **Reply-all preview divergence (B1)** — The MCP `replyToEmail` mutation's PREVIEW path never consulted `reply_all` when building recipients, so calling it with `all: true` showed only the original sender in `To` and whatever the user explicitly passed as `cc`. Meanwhile the send path in `reply_email` expanded reply-all correctly. This had two knock-on effects: (1) the preview lied about who would actually receive the email, and (2) a user who "fixed" the under-reported preview by passing missing recipients as explicit `cc` could produce a duplicate-send, because those same addresses would also be expanded into `To` by the send path at CONFIRM time. Extracted `jmap::expand_reply_recipients` as a shared pure function used by both preview and send; the function now also deduplicates by lowercase email and strips from `Cc` anything already present in `To`, closing the duplicate-send window regardless of how the paths evolve. 9 unit tests cover reply-all expansion, me-filtering (case-insensitive), dedup, and the exact overlap scenario from the bug report.
+
 ### Security
 
 - **Attachment path traversal (C1)** — `fastmail-cli download` wrote attachments to `Path::new(out_dir).join(attachment.name)`, where `attachment.name` is chosen by the email sender. A name of `../../etc/cron.d/pwn` escaped the output directory via relative traversal; an absolute name like `/etc/cron.d/pwn` replaced the base path outright because `Path::join` discards the base when the joined segment is absolute. A malicious email could write arbitrary files on any recipient who ran the `download` subcommand. Filenames are now run through `util::sanitize_filename`, which strips path separators, NUL/control bytes, and Windows-reserved stems (CON/PRN/NUL/COM1-9/LPT1-9). Writes use `OpenOptions::create_new(true)`, so silent overwrites and symlink-pre-placement attacks at the target path are also refused.
