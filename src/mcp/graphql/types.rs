@@ -478,14 +478,54 @@ pub struct GqlComposeResult {
     pub error: Option<String>,
 }
 
-/// Generate a confirmation token from email parameters (stateless preview guard)
-pub fn confirmation_token(parts: &[&str]) -> String {
+/// Server-side store of issued but unused confirmation nonces.
+///
+/// PREVIEW issues a random UUID paired with a fingerprint of the compose
+/// params. CONFIRM/DRAFT must supply a nonce that's still in the store and
+/// whose stored fingerprint matches the current params — this prevents
+/// skipping PREVIEW and prevents reusing a nonce for different params.
+pub type NonceStore = tokio::sync::Mutex<std::collections::HashMap<String, String>>;
+
+/// Fingerprint the compose params so we can detect param tampering between
+/// PREVIEW and CONFIRM. This is a non-cryptographic hash — it only needs to
+/// detect accidental drift, not defeat an attacker who already controls the
+/// process.
+pub fn params_fingerprint(parts: &[&str]) -> String {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     for part in parts {
         part.hash(&mut hasher);
     }
     format!("{:016x}", hasher.finish())
+}
+
+/// Issue a new one-shot confirmation nonce for the given params.
+pub async fn issue_nonce(store: &NonceStore, parts: &[&str]) -> String {
+    let nonce = uuid::Uuid::new_v4().to_string();
+    let fingerprint = params_fingerprint(parts);
+    store.lock().await.insert(nonce.clone(), fingerprint);
+    nonce
+}
+
+/// Consume a nonce, returning Ok(()) if it was issued for the given params.
+/// The nonce is always removed on consumption, even on mismatch, so a bad
+/// CONFIRM forces the caller back to PREVIEW.
+pub async fn consume_nonce(
+    store: &NonceStore,
+    nonce: Option<&str>,
+    parts: &[&str],
+) -> std::result::Result<(), &'static str> {
+    let nonce =
+        nonce.ok_or("Missing confirmation_token. Use action=PREVIEW first to obtain one.")?;
+    let stored = store
+        .lock()
+        .await
+        .remove(nonce)
+        .ok_or("Invalid or already-used confirmation_token. Re-run PREVIEW.")?;
+    if stored != params_fingerprint(parts) {
+        return Err("Params changed between PREVIEW and CONFIRM. Re-run PREVIEW.");
+    }
+    Ok(())
 }
 
 #[derive(SimpleObject)]

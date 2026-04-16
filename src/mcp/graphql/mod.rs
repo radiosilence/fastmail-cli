@@ -17,9 +17,11 @@ use query::QueryRoot;
 
 pub type FastmailSchema = Schema<QueryRoot, MutationRoot, async_graphql::EmptySubscription>;
 
-/// Build the GraphQL schema with the JMAP client injected as context data.
+/// Build the GraphQL schema with the JMAP client and the preview-nonce store
+/// injected as context data.
 pub fn build_schema(client: Mutex<JmapClient>) -> FastmailSchema {
     Schema::build(QueryRoot, MutationRoot, async_graphql::EmptySubscription)
         .data(client)
+        .data(types::NonceStore::default())
         .finish()
 }

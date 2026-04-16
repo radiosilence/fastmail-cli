@@ -33,9 +33,11 @@ impl MutationRoot {
         let to_addrs = parse_addresses(&to);
         let cc_addrs = cc.as_deref().map(parse_addresses).unwrap_or_default();
         let bcc_addrs = bcc.as_deref().map(parse_addresses).unwrap_or_default();
-        let token = super::types::confirmation_token(&[&to, &subject, &body]);
+        let nonce_store = ctx.data::<super::types::NonceStore>()?;
+        let params = [to.as_str(), subject.as_str(), body.as_str()];
 
         if matches!(action, SendAction::Preview) {
+            let nonce = super::types::issue_nonce(nonce_store, &params).await;
             let mut preview =
                 format_send_preview(&to_addrs, &cc_addrs, &bcc_addrs, &subject, &body);
             if html_body.is_some() {
@@ -45,21 +47,20 @@ impl MutationRoot {
                 success: true,
                 email_id: None,
                 preview: Some(preview),
-                confirmation_token: Some(token),
+                confirmation_token: Some(nonce),
                 error: None,
             });
         }
 
-        if confirmation_token.as_deref() != Some(&token) {
+        if let Err(msg) =
+            super::types::consume_nonce(nonce_store, confirmation_token.as_deref(), &params).await
+        {
             return Ok(GqlComposeResult {
                 success: false,
                 email_id: None,
                 preview: None,
                 confirmation_token: None,
-                error: Some(
-                    "Missing or invalid confirmation_token. Use action=PREVIEW first to get the token."
-                        .to_string(),
-                ),
+                error: Some(msg.to_string()),
             });
         }
 
@@ -119,7 +120,8 @@ impl MutationRoot {
         #[graphql(desc = "Token from PREVIEW response — required for CONFIRM/DRAFT")]
         confirmation_token: Option<String>,
     ) -> Result<GqlComposeResult> {
-        let token = super::types::confirmation_token(&[&email_id, &body]);
+        let nonce_store = ctx.data::<super::types::NonceStore>()?;
+        let params = [email_id.as_str(), body.as_str()];
         let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
         let mut client = client.lock().await;
 
@@ -141,6 +143,7 @@ impl MutationRoot {
         let to_addrs: Vec<EmailAddress> = original.from.clone().unwrap_or_default();
 
         if matches!(action, SendAction::Preview) {
+            let nonce = super::types::issue_nonce(nonce_store, &params).await;
             let in_reply_to = original
                 .message_id
                 .as_ref()
@@ -171,20 +174,20 @@ impl MutationRoot {
                 success: true,
                 email_id: None,
                 preview: Some(preview),
-                confirmation_token: Some(token),
+                confirmation_token: Some(nonce),
                 error: None,
             });
         }
 
-        if confirmation_token.as_deref() != Some(&token) {
+        if let Err(msg) =
+            super::types::consume_nonce(nonce_store, confirmation_token.as_deref(), &params).await
+        {
             return Ok(GqlComposeResult {
                 success: false,
                 email_id: None,
                 preview: None,
                 confirmation_token: None,
-                error: Some(
-                    "Missing or invalid confirmation_token. Use action=PREVIEW first.".to_string(),
-                ),
+                error: Some(msg.to_string()),
             });
         }
 
@@ -241,7 +244,8 @@ impl MutationRoot {
         confirmation_token: Option<String>,
     ) -> Result<GqlComposeResult> {
         let body_str = body.as_deref().unwrap_or("");
-        let token = super::types::confirmation_token(&[&email_id, &to, body_str]);
+        let nonce_store = ctx.data::<super::types::NonceStore>()?;
+        let params = [email_id.as_str(), to.as_str(), body_str];
         let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
         let mut client = client.lock().await;
 
@@ -261,6 +265,7 @@ impl MutationRoot {
         };
 
         if matches!(action, SendAction::Preview) {
+            let nonce = super::types::issue_nonce(nonce_store, &params).await;
             let original_body = original.text_content().unwrap_or("");
             let sender = format_addrs(&original.from.clone().unwrap_or_default());
 
@@ -292,20 +297,20 @@ impl MutationRoot {
                 success: true,
                 email_id: None,
                 preview: Some(preview),
-                confirmation_token: Some(token),
+                confirmation_token: Some(nonce),
                 error: None,
             });
         }
 
-        if confirmation_token.as_deref() != Some(&token) {
+        if let Err(msg) =
+            super::types::consume_nonce(nonce_store, confirmation_token.as_deref(), &params).await
+        {
             return Ok(GqlComposeResult {
                 success: false,
                 email_id: None,
                 preview: None,
                 confirmation_token: None,
-                error: Some(
-                    "Missing or invalid confirmation_token. Use action=PREVIEW first.".to_string(),
-                ),
+                error: Some(msg.to_string()),
             });
         }
 
