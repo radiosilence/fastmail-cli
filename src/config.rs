@@ -1,7 +1,8 @@
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Config {
@@ -50,24 +51,37 @@ impl Config {
 
     pub fn save(&self) -> Result<()> {
         let dir = Self::config_dir()?;
-        fs::create_dir_all(&dir)?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
-        }
+        create_private_dir(&dir)?;
 
         let path = Self::config_path()?;
+
+        // Refuse to write through a symlink — an attacker or mistaken user
+        // could redirect the token file elsewhere. symlink_metadata inspects
+        // the link itself, not its target.
+        if let Ok(md) = fs::symlink_metadata(&path)
+            && md.file_type().is_symlink()
+        {
+            return Err(Error::Config(format!(
+                "Refusing to write config: {} is a symlink",
+                path.display()
+            )));
+        }
+
         let content = toml::to_string_pretty(self)
             .map_err(|e| Error::Config(format!("Failed to serialize config: {}", e)))?;
-        fs::write(&path, content)?;
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-        }
+        // Write to a sibling temp file with 0o600, then rename atomically over
+        // the target. This closes the TOCTOU window between writing the token
+        // and tightening permissions.
+        let tmp_path = path.with_extension("toml.tmp");
+        let _ = fs::remove_file(&tmp_path);
+        write_private_file(&tmp_path, content.as_bytes()).inspect_err(|_| {
+            let _ = fs::remove_file(&tmp_path);
+        })?;
+        fs::rename(&tmp_path, &path).map_err(|e| {
+            let _ = fs::remove_file(&tmp_path);
+            Error::Config(format!("Failed to install config file: {}", e))
+        })?;
 
         Ok(())
     }
@@ -105,6 +119,47 @@ impl Config {
             .clone()
             .ok_or_else(|| Error::Config("App password not set in [contacts] config.".into()))
     }
+}
+
+#[cfg(unix)]
+fn create_private_dir(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    // DirBuilder::mode applies to newly-created directories only. Following up
+    // with set_permissions tightens the mode if the directory already existed.
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn create_private_dir(dir: &Path) -> Result<()> {
+    fs::create_dir_all(dir)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(contents)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(contents)?;
+    Ok(())
 }
 
 #[cfg(test)]
