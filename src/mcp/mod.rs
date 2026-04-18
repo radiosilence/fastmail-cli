@@ -39,6 +39,7 @@ pub struct GraphqlRequest {
 #[derive(Clone)]
 pub struct FastmailMcp {
     schema: Arc<FastmailSchema>,
+    #[allow(dead_code)] // referenced by #[tool_handler] macro expansion
     tool_router: ToolRouter<Self>,
 }
 
@@ -109,17 +110,14 @@ impl FastmailMcp {
 #[tool_handler]
 impl ServerHandler for FastmailMcp {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: rmcp::model::ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation {
-                name: "fastmail-cli".to_string(),
-                title: Some("Fastmail MCP Server".to_string()),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                icons: None,
-                website_url: Some("https://github.com/radiosilence/fastmail-cli".to_string()),
-            },
-            instructions: Some(
+        let server_info = Implementation::new("fastmail-cli", env!("CARGO_PKG_VERSION"))
+            .with_title("Fastmail MCP Server")
+            .with_website_url("https://github.com/radiosilence/fastmail-cli");
+
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_protocol_version(rmcp::model::ProtocolVersion::V_2024_11_05)
+            .with_server_info(server_info)
+            .with_instructions(
                 "Fastmail MCP Server — GraphQL interface for email operations.\n\n\
                 ## Getting Started\n\
                 1. Call `schema_sdl` to get the full GraphQL schema\n\
@@ -145,10 +143,8 @@ impl ServerHandler for FastmailMcp {
                 ## Safety Rules\n\
                 - NEVER send without showing preview first\n\
                 - NEVER confirm send without explicit user approval\n\
-                - mark_as_spam affects future filtering — always preview first"
-                    .to_string(),
-            ),
-        }
+                - mark_as_spam affects future filtering — always preview first",
+            )
     }
 }
 
