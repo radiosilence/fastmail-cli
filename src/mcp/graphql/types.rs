@@ -478,13 +478,52 @@ pub struct GqlComposeResult {
     pub error: Option<String>,
 }
 
+/// A pending confirmation nonce: fingerprint of the compose params, plus
+/// the monotonic instant it was issued at so we can expire it.
+pub struct Nonce {
+    pub fingerprint: String,
+    pub issued_at: std::time::Instant,
+}
+
 /// Server-side store of issued but unused confirmation nonces.
 ///
 /// PREVIEW issues a random UUID paired with a fingerprint of the compose
 /// params. CONFIRM/DRAFT must supply a nonce that's still in the store and
 /// whose stored fingerprint matches the current params — this prevents
 /// skipping PREVIEW and prevents reusing a nonce for different params.
-pub type NonceStore = tokio::sync::Mutex<std::collections::HashMap<String, String>>;
+///
+/// The store is bounded by `NONCE_CAP` (oldest entries evicted) and entries
+/// older than `NONCE_TTL` are swept on every issue and treated as invalid
+/// on consume, so a misbehaving client that previews without confirming
+/// cannot grow the map without limit.
+pub type NonceStore = tokio::sync::Mutex<std::collections::HashMap<String, Nonce>>;
+
+/// Hard cap on outstanding nonces. A compose preview without a confirm is
+/// user intent — capacity for hundreds of drafts is plenty for a single
+/// MCP session.
+const NONCE_CAP: usize = 256;
+
+/// How long a PREVIEW'd nonce stays valid. Chosen to outlive a human writing
+/// an email but expire well before the MCP process restarts.
+const NONCE_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Drop entries older than TTL, then if still over cap drop the oldest.
+fn evict(map: &mut std::collections::HashMap<String, Nonce>) {
+    let now = std::time::Instant::now();
+    map.retain(|_, n| now.duration_since(n.issued_at) < NONCE_TTL);
+    while map.len() >= NONCE_CAP {
+        let oldest = map
+            .iter()
+            .min_by_key(|(_, n)| n.issued_at)
+            .map(|(k, _)| k.clone());
+        match oldest {
+            Some(k) => {
+                map.remove(&k);
+            }
+            None => break,
+        }
+    }
+}
 
 /// Fingerprint the compose params so we can detect param tampering between
 /// PREVIEW and CONFIRM. This is a non-cryptographic hash — it only needs to
@@ -502,14 +541,19 @@ pub fn params_fingerprint(parts: &[&str]) -> String {
 /// Issue a new one-shot confirmation nonce for the given params.
 pub async fn issue_nonce(store: &NonceStore, parts: &[&str]) -> String {
     let nonce = uuid::Uuid::new_v4().to_string();
-    let fingerprint = params_fingerprint(parts);
-    store.lock().await.insert(nonce.clone(), fingerprint);
+    let entry = Nonce {
+        fingerprint: params_fingerprint(parts),
+        issued_at: std::time::Instant::now(),
+    };
+    let mut map = store.lock().await;
+    evict(&mut map);
+    map.insert(nonce.clone(), entry);
     nonce
 }
 
 /// Consume a nonce, returning Ok(()) if it was issued for the given params.
-/// The nonce is always removed on consumption, even on mismatch, so a bad
-/// CONFIRM forces the caller back to PREVIEW.
+/// The nonce is always removed on consumption, even on mismatch or expiry,
+/// so a bad CONFIRM forces the caller back to PREVIEW.
 pub async fn consume_nonce(
     store: &NonceStore,
     nonce: Option<&str>,
@@ -517,12 +561,15 @@ pub async fn consume_nonce(
 ) -> std::result::Result<(), &'static str> {
     let nonce =
         nonce.ok_or("Missing confirmation_token. Use action=PREVIEW first to obtain one.")?;
-    let stored = store
+    let entry = store
         .lock()
         .await
         .remove(nonce)
         .ok_or("Invalid or already-used confirmation_token. Re-run PREVIEW.")?;
-    if stored != params_fingerprint(parts) {
+    if std::time::Instant::now().duration_since(entry.issued_at) >= NONCE_TTL {
+        return Err("confirmation_token expired. Re-run PREVIEW.");
+    }
+    if entry.fingerprint != params_fingerprint(parts) {
         return Err("Params changed between PREVIEW and CONFIRM. Re-run PREVIEW.");
     }
     Ok(())
@@ -550,5 +597,121 @@ impl GqlThread {
     }
     async fn total(&self) -> usize {
         self.total
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::Mutex;
+
+    fn fresh_store() -> NonceStore {
+        Mutex::new(std::collections::HashMap::new())
+    }
+
+    #[tokio::test]
+    async fn issue_then_consume_with_matching_params_ok() {
+        let store = fresh_store();
+        let parts = ["to@example.com", "subject", "body"];
+        let nonce = issue_nonce(&store, &parts).await;
+        assert!(consume_nonce(&store, Some(&nonce), &parts).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn consume_rejects_missing_nonce() {
+        let store = fresh_store();
+        let err = consume_nonce(&store, None, &["x"]).await.unwrap_err();
+        assert!(err.contains("Missing"));
+    }
+
+    #[tokio::test]
+    async fn consume_rejects_reused_nonce() {
+        let store = fresh_store();
+        let parts = ["x"];
+        let nonce = issue_nonce(&store, &parts).await;
+        consume_nonce(&store, Some(&nonce), &parts).await.unwrap();
+        let err = consume_nonce(&store, Some(&nonce), &parts)
+            .await
+            .unwrap_err();
+        assert!(err.contains("Invalid or already-used"));
+    }
+
+    #[tokio::test]
+    async fn consume_rejects_tampered_params() {
+        let store = fresh_store();
+        let nonce = issue_nonce(&store, &["preview"]).await;
+        let err = consume_nonce(&store, Some(&nonce), &["tampered"])
+            .await
+            .unwrap_err();
+        assert!(err.contains("Params changed"));
+    }
+
+    #[tokio::test]
+    async fn consume_rejects_expired_nonce() {
+        let store = fresh_store();
+        let parts = ["x"];
+        let nonce = uuid::Uuid::new_v4().to_string();
+        store.lock().await.insert(
+            nonce.clone(),
+            Nonce {
+                fingerprint: params_fingerprint(&parts),
+                issued_at: std::time::Instant::now()
+                    - NONCE_TTL
+                    - std::time::Duration::from_secs(1),
+            },
+        );
+        let err = consume_nonce(&store, Some(&nonce), &parts)
+            .await
+            .unwrap_err();
+        assert!(err.contains("expired"));
+    }
+
+    #[tokio::test]
+    async fn issue_evicts_oldest_when_at_cap() {
+        let store = fresh_store();
+        let base = std::time::Instant::now() - std::time::Duration::from_secs(60);
+        let oldest_nonce = "oldest".to_string();
+        {
+            let mut map = store.lock().await;
+            map.insert(
+                oldest_nonce.clone(),
+                Nonce {
+                    fingerprint: params_fingerprint(&["oldest"]),
+                    issued_at: base,
+                },
+            );
+            for i in 1..NONCE_CAP {
+                map.insert(
+                    format!("n{i}"),
+                    Nonce {
+                        fingerprint: params_fingerprint(&["x"]),
+                        issued_at: base + std::time::Duration::from_millis(i as u64),
+                    },
+                );
+            }
+            assert_eq!(map.len(), NONCE_CAP);
+        }
+        let new_nonce = issue_nonce(&store, &["new"]).await;
+        let map = store.lock().await;
+        assert_eq!(map.len(), NONCE_CAP);
+        assert!(!map.contains_key(&oldest_nonce), "oldest should be evicted");
+        assert!(map.contains_key(&new_nonce), "new nonce should be present");
+    }
+
+    #[tokio::test]
+    async fn issue_sweeps_expired_entries() {
+        let store = fresh_store();
+        let expired = "expired".to_string();
+        store.lock().await.insert(
+            expired.clone(),
+            Nonce {
+                fingerprint: params_fingerprint(&["old"]),
+                issued_at: std::time::Instant::now()
+                    - NONCE_TTL
+                    - std::time::Duration::from_secs(1),
+            },
+        );
+        issue_nonce(&store, &["new"]).await;
+        assert!(!store.lock().await.contains_key(&expired));
     }
 }
