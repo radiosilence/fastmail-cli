@@ -20,7 +20,7 @@ image = { version = "0.25", default-features = false, features = [
   "png",
   "webp"
 ] }
-kreuzberg = { version = "~4.4", features = [
+kreuzberg = { version = "~4.8", features = [
   "archives",
   "bundled-pdfium",
   "email",
