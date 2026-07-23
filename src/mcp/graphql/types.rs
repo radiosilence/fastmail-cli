@@ -247,7 +247,7 @@ impl GqlAttachment {
     /// Fetch the actual attachment content. Images are resized and base64-encoded,
     /// documents have text extracted. Only fetched when this field is included in the query.
     async fn content(&self, ctx: &Context<'_>) -> Result<GqlAttachmentContent> {
-        let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let client = client.lock().await;
 
         let content_type = self

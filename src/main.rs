@@ -1,15 +1,7 @@
-mod carddav;
-mod commands;
-mod config;
-mod error;
-mod jmap;
-mod mcp;
-mod models;
-pub mod util;
-
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
-use models::Output;
+use fastmail_cli::models::Output;
+use fastmail_cli::{commands, jmap, mcp, util};
 use std::io;
 use tracing_subscriber::EnvFilter;
 
@@ -333,7 +325,14 @@ enum Commands {
     Contacts(ContactsCommands),
 
     /// Run as MCP (Model Context Protocol) server for Claude integration
-    Mcp,
+    Mcp {
+        /// Serve over streamable HTTP on this address (e.g. 127.0.0.1:8080)
+        /// instead of stdio. In HTTP mode the Fastmail token is read from the
+        /// `X-Fastmail-Token` header per request; over stdio it comes from
+        /// config as usual.
+        #[arg(long, value_name = "ADDR")]
+        http: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -744,7 +743,10 @@ async fn main() {
             }
         },
 
-        Commands::Mcp => mcp::run_server().await,
+        Commands::Mcp { http } => match http {
+            Some(addr) => mcp::run_http_server(&addr).await,
+            None => mcp::run_server().await,
+        },
     };
 
     if let Err(e) = result {
