@@ -259,10 +259,17 @@ pub async fn run_http_server(addr: &str) -> anyhow::Result<()> {
 
     // One shared instance (shared schema + client cache) cloned into each session.
     let template = FastmailMcp::hosted();
+    // Disable rmcp's DNS-rebinding Host allowlist: this transport is designed to
+    // run behind a trusted reverse proxy (see the note above), which forwards an
+    // internal Host (e.g. the service name) that the default allowlist
+    // (localhost/127.0.0.1/::1) would reject with 403. Rebinding protection
+    // guards browsers hitting a localhost MCP directly — irrelevant for a
+    // proxied, non-browser-facing backend; the proxy is the security boundary.
+    let config = StreamableHttpServerConfig::default().disable_allowed_hosts();
     let service = StreamableHttpService::new(
         move || Ok(template.clone()),
         Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default(),
+        config,
     );
 
     let router = axum::Router::new().nest_service("/mcp", service);
