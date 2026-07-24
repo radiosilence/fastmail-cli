@@ -207,12 +207,46 @@ impl ServerHandler for FastmailMcp {
                 # List mailboxes\n\
                 { mailboxes { id name role unreadEmails totalEmails } }\n\n\
                 # List emails in inbox\n\
-                { emails(mailbox: \"INBOX\", limit: 10) { id subject from { email name } receivedAt preview isUnread } }\n\n\
+                { emails(filter: { inMailbox: \"INBOX\" }, first: 10) {\n\
+                    nodes { id subject from { email name } receivedAt preview isUnread } } }\n\n\
                 # Get full email\n\
                 { email(id: \"abc123\") { id subject from { email name } to { email name } textBody } }\n\n\
                 # Search emails\n\
-                { searchEmails(query: \"invoice\", after: \"2024-01-01\") { id subject from { email } receivedAt } }\n\
+                { emails(filter: { text: \"invoice\", after: \"2024-01-01\" }, first: 10) {\n\
+                    nodes { id subject from { email } receivedAt } } }\n\
                 ```\n\n\
+                ## Filters compose\n\
+                `EmailFilter` is a tree, not a flat argument list. Fields on one\n\
+                filter object are AND-ed; `and`/`or`/`not` nest arbitrarily. The\n\
+                same input works on `Mailbox.emails`, where it is AND-ed with the\n\
+                mailbox. `inMailbox` accepts a folder name or role.\n\
+                ```graphql\n\
+                { emails(\n\
+                    filter: {\n\
+                      unread: true\n\
+                      or:  [{ from: \"alice@example.com\" }, { from: \"bob@example.com\" }]\n\
+                      not: [{ inMailbox: \"Archive\" }]\n\
+                    }\n\
+                    sort: [{ property: SIZE, ascending: false }]\n\
+                    first: 20\n\
+                  ) { totalCount nodes { subject size } } }\n\
+                ```\n\n\
+                ## Pagination and counts\n\
+                Email lists are connections. Cursors are zero-based positions, so\n\
+                `after: \"24\"` resumes at item 25. Page size is capped at 100.\n\
+                ```graphql\n\
+                { emails(first: 25, after: \"24\") {\n\
+                    totalCount\n\
+                    pageInfo { hasNextPage endCursor }\n\
+                    edges { cursor node { subject } } } }\n\
+                ```\n\
+                `totalCount` is only computed when you select it, and selecting it\n\
+                **alone** fetches no emails — use that to answer \"how many?\"\n\
+                cheaply instead of listing and counting:\n\
+                ```graphql\n\
+                { emails(filter: { unread: true, from: \"alerts@example.com\" }) { totalCount } }\n\
+                ```\n\
+                Use `collapseThreads: true` for a conversation view (one email per thread).\n\n\
                 ## Ask for everything in one query\n\
                 The graph is fully nested and every field below a list is fetched\n\
                 lazily and batched, so ask for what you actually need in a single\n\
@@ -220,18 +254,18 @@ impl ServerHandler for FastmailMcp {
                 one extra API call, not 25.\n\
                 ```graphql\n\
                 # Bodies + attachment text for a whole folder, in one round trip\n\
-                { emails(mailbox: \"INBOX\", limit: 10) {\n\
+                { emails(filter: { inMailbox: \"INBOX\" }, first: 10) { nodes {\n\
                     subject from { email }\n\
                     textBody\n\
                     attachments { name contentType content { textContent base64Content } }\n\
-                } }\n\n\
+                } } }\n\n\
                 # Walk the graph: folder → emails → conversation → mailboxes\n\
                 { mailbox(name: \"INBOX\") { name children { name }\n\
-                    emails(limit: 5) {\n\
+                    emails(first: 5) { nodes {\n\
                       subject\n\
                       thread { total emails { subject textBody } }\n\
                       mailboxes { name role }\n\
-                    } } }\n\
+                    } } } }\n\
                 ```\n\
                 Nesting is bounded (max depth 15, plus a query-complexity cap), so\n\
                 keep fan-out reasonable — very wide + very deep queries are rejected.\n\n\

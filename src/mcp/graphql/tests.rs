@@ -106,7 +106,20 @@ async fn mock_server(count: usize) -> MockServer {
                     "totalEmails": 10, "unreadEmails": 2,
                     "totalThreads": 8, "unreadThreads": 2, "sortOrder": 0
                 }] }),
-                "Email/query" => json!({ "ids": ids }),
+                "Email/query" => {
+                    let position =
+                        args.get("position").and_then(Value::as_u64).unwrap_or(0) as usize;
+                    let limit = args
+                        .get("limit")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(ids.len() as u64) as usize;
+                    let window: Vec<&String> = ids.iter().skip(position).take(limit).collect();
+                    let mut payload = json!({ "ids": window, "position": position });
+                    if args.get("calculateTotal").and_then(Value::as_bool) == Some(true) {
+                        payload["total"] = json!(ids.len());
+                    }
+                    payload
+                }
                 "Email/get" => {
                     // A back-reference (`#ids`) means this is the list fetch;
                     // an explicit `ids` array means a targeted (batched) fetch.
@@ -161,7 +174,7 @@ async fn run(server: &MockServer, query: &str) -> async_graphql::Response {
 #[tokio::test]
 async fn listing_without_bodies_makes_no_extra_fetch() {
     let server = mock_server(5).await;
-    let resp = run(&server, "{ emails(mailbox: \"INBOX\") { id subject } }").await;
+    let resp = run(&server, "{ emails { nodes { id subject } } }").await;
     assert!(resp.errors.is_empty(), "{:?}", resp.errors);
 
     let calls = calls(&server).await;
@@ -181,7 +194,7 @@ async fn listing_without_bodies_makes_no_extra_fetch() {
 #[tokio::test]
 async fn bodies_across_a_list_collapse_into_one_batched_fetch() {
     let server = mock_server(5).await;
-    let resp = run(&server, "{ emails(mailbox: \"INBOX\") { id textBody } }").await;
+    let resp = run(&server, "{ emails { nodes { id textBody } } }").await;
     assert!(resp.errors.is_empty(), "{:?}", resp.errors);
 
     let calls = calls(&server).await;
@@ -200,7 +213,7 @@ async fn body_and_attachments_together_share_one_fetch() {
     let server = mock_server(3).await;
     let resp = run(
         &server,
-        "{ emails(mailbox: \"INBOX\") { textBody htmlBody attachments { name } } }",
+        "{ emails { nodes { textBody htmlBody attachments { name } } } }",
     )
     .await;
     assert!(resp.errors.is_empty(), "{:?}", resp.errors);
@@ -239,7 +252,7 @@ async fn mailbox_nests_into_emails_and_back() {
     let server = mock_server(2).await;
     let resp = run(
         &server,
-        "{ mailbox(name: \"INBOX\") { name emails(limit: 2) { subject mailboxes { name role } } } }",
+        "{ mailbox(name: \"INBOX\") { name emails(first: 2) { nodes { subject mailboxes { name role } } } } }",
     )
     .await;
     assert!(resp.errors.is_empty(), "{:?}", resp.errors);
@@ -247,8 +260,11 @@ async fn mailbox_nests_into_emails_and_back() {
     let data = resp.data.into_json().unwrap();
     let mailbox = &data["mailbox"];
     assert_eq!(mailbox["name"], "Inbox");
-    assert_eq!(mailbox["emails"].as_array().unwrap().len(), 2);
-    assert_eq!(mailbox["emails"][0]["mailboxes"][0]["role"], "inbox");
+    assert_eq!(mailbox["emails"]["nodes"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        mailbox["emails"]["nodes"][0]["mailboxes"][0]["role"],
+        "inbox"
+    );
 
     // The mailbox loader plus the client's own cache mean the whole query costs
     // one Mailbox/get, however many emails reference it.
@@ -319,8 +335,8 @@ async fn depth_limit_leaves_realistic_queries_alone() {
     let server = mock_server(1).await;
     let resp = run(
         &server,
-        "{ mailbox(name: \"INBOX\") { emails(limit: 1) { thread { emails { \
-            attachments { name content { size } } } } } } }",
+        "{ mailbox(name: \"INBOX\") { emails(first: 1) { nodes { thread { emails { \
+            attachments { name content { size } } } } } } } }",
     )
     .await;
     assert!(resp.errors.is_empty(), "{:?}", resp.errors);
@@ -330,8 +346,8 @@ async fn depth_limit_leaves_realistic_queries_alone() {
 async fn complexity_limit_rejects_excessive_fan_out() {
     let server = mock_server(1).await;
     // 100 emails × their threads × those threads' emails and attachments.
-    let query = "{ emails(mailbox: \"INBOX\", limit: 100) { \
-                    thread { emails { attachments { name content { size } } } } } }";
+    let query = "{ emails(first: 100) { nodes { \
+                    thread { emails { attachments { name content { size } } } } } } }";
     let resp = run(&server, query).await;
     assert!(
         resp.errors
@@ -358,4 +374,284 @@ fn schema_exposes_the_nested_edges() {
         !sdl.contains("EmailSummary"),
         "EmailSummary should be folded into Email"
     );
+}
+
+// ============ Connections, filters, pagination ============
+
+/// The JMAP `filter` argument sent for the first `Email/query` in a request.
+async fn sent_filter(server: &MockServer) -> Value {
+    for req in server.received_requests().await.unwrap_or_default() {
+        let body: Value = match serde_json::from_slice(&req.body) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        for mc in body["methodCalls"].as_array().into_iter().flatten() {
+            if mc.get(0).and_then(Value::as_str) == Some("Email/query") {
+                return mc[1]["filter"].clone();
+            }
+        }
+    }
+    Value::Null
+}
+
+/// Every `Email/query` argument object sent, in order.
+async fn query_args(server: &MockServer) -> Vec<Value> {
+    let mut out = Vec::new();
+    for req in server.received_requests().await.unwrap_or_default() {
+        let body: Value = match serde_json::from_slice(&req.body) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        for mc in body["methodCalls"].as_array().into_iter().flatten() {
+            if mc.get(0).and_then(Value::as_str) == Some("Email/query") {
+                out.push(mc[1].clone());
+            }
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn or_filter_reaches_jmap_as_a_filter_operator() {
+    let server = mock_server(3).await;
+    let resp = run(
+        &server,
+        r#"{ emails(filter: { unread: true,
+                              or: [{ from: "a@b.com" }, { from: "c@d.com" }] })
+              { nodes { id } } }"#,
+    )
+    .await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+
+    assert_eq!(
+        sent_filter(&server).await,
+        json!({
+            "operator": "AND",
+            "conditions": [
+                { "notKeyword": "$seen" },
+                { "operator": "OR", "conditions": [
+                    { "from": "a@b.com" }, { "from": "c@d.com" }] }
+            ]
+        }),
+        "the filter tree must survive into JMAP, not be flattened"
+    );
+}
+
+#[tokio::test]
+async fn mailbox_names_in_filters_resolve_to_ids() {
+    let server = mock_server(3).await;
+    let resp = run(
+        &server,
+        r#"{ emails(filter: { inMailbox: "INBOX", subject: "x" }) { nodes { id } } }"#,
+    )
+    .await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+    assert_eq!(sent_filter(&server).await["inMailbox"], "mb1");
+}
+
+#[tokio::test]
+async fn unknown_mailbox_in_a_filter_is_an_error() {
+    let server = mock_server(1).await;
+    let resp = run(
+        &server,
+        r#"{ emails(filter: { inMailbox: "Nope" }) { nodes { id } } }"#,
+    )
+    .await;
+    assert!(
+        resp.errors.iter().any(|e| e.message.contains("Nope")),
+        "expected an unknown-mailbox error, got {:?}",
+        resp.errors
+    );
+}
+
+#[tokio::test]
+async fn mailbox_emails_are_scoped_to_that_mailbox() {
+    let server = mock_server(3).await;
+    let resp = run(
+        &server,
+        r#"{ mailbox(name: "INBOX") { emails(filter: { unread: true }) { nodes { id } } } }"#,
+    )
+    .await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+
+    assert_eq!(
+        sent_filter(&server).await,
+        json!({
+            "operator": "AND",
+            "conditions": [{ "notKeyword": "$seen" }, { "inMailbox": "mb1" }]
+        }),
+        "the caller's filter must be ANDed with the mailbox constraint"
+    );
+}
+
+#[tokio::test]
+async fn sort_is_passed_through() {
+    let server = mock_server(2).await;
+    let resp = run(
+        &server,
+        "{ emails(sort: [{ property: SUBJECT, ascending: true }]) { nodes { id } } }",
+    )
+    .await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+    assert_eq!(
+        query_args(&server).await[0]["sort"],
+        json!([{ "property": "subject", "isAscending": true }])
+    );
+}
+
+#[tokio::test]
+async fn cursors_are_positions_and_paginate_forward() {
+    let server = mock_server(10).await;
+    let resp = run(
+        &server,
+        "{ emails(first: 3) { edges { cursor node { id } } pageInfo { hasNextPage endCursor } } }",
+    )
+    .await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+
+    let data = resp.data.into_json().unwrap();
+    let edges = data["emails"]["edges"].as_array().unwrap();
+    assert_eq!(edges.len(), 3);
+    assert_eq!(edges[0]["cursor"], "0");
+    assert_eq!(edges[0]["node"]["id"], "e0");
+    assert_eq!(edges[2]["cursor"], "2");
+    assert_eq!(data["emails"]["pageInfo"]["hasNextPage"], true);
+
+    // Resume from the cursor and confirm we get the next window, not a repeat.
+    let server2 = mock_server(10).await;
+    let resp = run(
+        &server2,
+        "{ emails(first: 3, after: \"2\") { edges { cursor node { id } } \
+            pageInfo { hasPreviousPage } } }",
+    )
+    .await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+    let data = resp.data.into_json().unwrap();
+    let edges = data["emails"]["edges"].as_array().unwrap();
+    assert_eq!(edges[0]["cursor"], "3");
+    assert_eq!(edges[0]["node"]["id"], "e3");
+    assert_eq!(data["emails"]["pageInfo"]["hasPreviousPage"], true);
+}
+
+#[tokio::test]
+async fn last_paginates_backward_from_the_end() {
+    let server = mock_server(10).await;
+    let resp = run(
+        &server,
+        "{ emails(last: 2) { edges { cursor node { id } } } }",
+    )
+    .await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+
+    let data = resp.data.into_json().unwrap();
+    let edges = data["emails"]["edges"].as_array().unwrap();
+    assert_eq!(edges.len(), 2);
+    assert_eq!(edges[0]["node"]["id"], "e8");
+    assert_eq!(edges[1]["node"]["id"], "e9");
+    assert_eq!(edges[1]["cursor"], "9");
+}
+
+#[tokio::test]
+async fn total_count_is_only_computed_when_selected() {
+    let server = mock_server(7).await;
+    let resp = run(&server, "{ emails(first: 2) { nodes { id } } }").await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+    assert_eq!(
+        query_args(&server).await[0]["calculateTotal"],
+        json!(false),
+        "a query that doesn't select totalCount must not pay for it"
+    );
+
+    let server = mock_server(7).await;
+    let resp = run(&server, "{ emails(first: 2) { totalCount nodes { id } } }").await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+    assert_eq!(query_args(&server).await[0]["calculateTotal"], json!(true));
+    assert_eq!(resp.data.into_json().unwrap()["emails"]["totalCount"], 7);
+}
+
+#[tokio::test]
+async fn counting_alone_fetches_no_emails() {
+    let server = mock_server(7).await;
+    let resp = run(
+        &server,
+        r#"{ emails(filter: { unread: true }) { totalCount } }"#,
+    )
+    .await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+    assert_eq!(resp.data.into_json().unwrap()["emails"]["totalCount"], 7);
+
+    let gets = calls(&server)
+        .await
+        .into_iter()
+        .filter(|c| c.method == "Email/get")
+        .count();
+    assert_eq!(gets, 0, "asking only for a count must not fetch any email");
+}
+
+#[tokio::test]
+async fn page_size_is_capped() {
+    let server = mock_server(3).await;
+    let resp = run(&server, "{ emails(first: 5000) { nodes { id } } }").await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+    assert_eq!(query_args(&server).await[0]["limit"], json!(100));
+}
+
+#[tokio::test]
+async fn collapse_threads_reaches_jmap() {
+    let server = mock_server(3).await;
+    let resp = run(
+        &server,
+        "{ emails(collapseThreads: true) { nodes { id } } }",
+    )
+    .await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+    assert_eq!(query_args(&server).await[0]["collapseThreads"], json!(true));
+}
+
+#[tokio::test]
+async fn results_keep_the_sort_order_jmap_returned() {
+    let server = mock_server(5).await;
+    let resp = run(&server, "{ emails(first: 5) { nodes { id } } }").await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+
+    let data = resp.data.into_json().unwrap();
+    let ids: Vec<&str> = data["emails"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["id"].as_str().unwrap())
+        .collect();
+    // `Email/get` makes no ordering promise, so this asserts we re-apply the
+    // order from `Email/query` rather than trusting the response.
+    assert_eq!(ids, ["e0", "e1", "e2", "e3", "e4"]);
+}
+
+#[tokio::test]
+async fn deprecated_search_emails_still_works() {
+    let server = mock_server(3).await;
+    let resp = run(
+        &server,
+        r#"{ searchEmails(query: "invoice", unread: true) { nodes { id } } }"#,
+    )
+    .await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+    assert_eq!(
+        sent_filter(&server).await,
+        json!({ "text": "invoice", "notKeyword": "$seen" })
+    );
+}
+
+#[tokio::test]
+async fn bodies_batch_across_a_connection_page() {
+    let server = mock_server(8).await;
+    let resp = run(&server, "{ emails(first: 8) { nodes { id textBody } } }").await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+
+    let detail: Vec<Call> = calls(&server)
+        .await
+        .into_iter()
+        .filter(|c| c.method == "Email/get" && c.properties.contains(&"textBody".to_string()))
+        .collect();
+    assert_eq!(detail.len(), 1, "one batched detail fetch for the page");
+    assert_eq!(detail[0].ids.len(), 8);
 }

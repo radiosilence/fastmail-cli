@@ -13,17 +13,19 @@ use std::borrow::Cow;
 
 use async_graphql::{Context, Enum, Object, Result, SimpleObject};
 
+use super::connection::{EmailConnection, PageArgs, emails_connection, page_complexity};
+use super::filter::{EmailFilter, EmailSort};
 use super::loaders::{Blobs, Emails, Mailboxes, Threads, to_gql_error};
 use crate::carddav::{Contact, ContactEmail, ContactPhone};
 use crate::models::{Email, EmailAddress, Identity, Mailbox, MaskedEmail};
 
-/// Default page size for nested email lists, and the multiplier used when
-/// costing an unbounded nested list for the complexity limit.
-pub(crate) const DEFAULT_LIMIT: u32 = 25;
-pub(crate) const MAX_LIMIT: u32 = 100;
+/// Page size used when a connection field names no `first`/`last`.
+pub(crate) const DEFAULT_PAGE: u32 = 25;
+/// Hard cap on a single page, and the figure nested lists are costed at.
+pub(crate) const MAX_PAGE: u32 = 100;
 
-pub(crate) fn clamp_limit(limit: Option<u32>) -> u32 {
-    limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT)
+pub(crate) fn clamp_page(size: Option<u32>) -> u32 {
+    size.unwrap_or(DEFAULT_PAGE).min(MAX_PAGE)
 }
 
 // ============ Output Types ============
@@ -39,6 +41,7 @@ impl From<Mailbox> for GqlMailbox {
 }
 
 #[Object(name = "Mailbox")]
+#[allow(clippy::too_many_arguments)]
 impl GqlMailbox {
     async fn id(&self) -> &str {
         &self.0.id
@@ -94,20 +97,41 @@ impl GqlMailbox {
             .collect())
     }
 
-    /// Emails in this mailbox, newest first. Bodies and attachments on the
-    /// returned emails are resolved lazily and in one batch.
-    #[graphql(complexity = "clamp_limit(limit) as usize * child_complexity")]
+    /// Emails in this mailbox, newest first by default.
+    ///
+    /// Accepts the same `filter` and `sort` as the top-level `emails` query,
+    /// implicitly scoped to this mailbox. Bodies and attachments on the results
+    /// are resolved lazily and in one batch.
+    #[graphql(complexity = "page_complexity(first, last, child_complexity)")]
     async fn emails(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "Maximum number of emails to return (default 25, max 100)")] limit: Option<
-            u32,
+        #[graphql(desc = "Narrow the results. Combined with this mailbox via AND.")] filter: Option<
+            EmailFilter,
         >,
-    ) -> Result<Vec<GqlEmail>> {
-        let client = ctx.data::<super::SharedClient>()?;
-        let client = client.lock().await;
-        let emails = client.list_emails(&self.0.id, clamp_limit(limit)).await?;
-        Ok(emails.into_iter().map(GqlEmail::summary).collect())
+        #[graphql(desc = "Sort order, most significant first. Defaults to newest first.")]
+        sort: Option<Vec<EmailSort>>,
+        #[graphql(desc = "Return one email per conversation instead of every message.")]
+        collapse_threads: Option<bool>,
+        after: Option<String>,
+        before: Option<String>,
+        first: Option<i32>,
+        last: Option<i32>,
+    ) -> Result<EmailConnection> {
+        emails_connection(
+            ctx,
+            PageArgs {
+                after,
+                before,
+                first,
+                last,
+            },
+            filter,
+            sort,
+            Some(serde_json::json!({ "inMailbox": self.0.id })),
+            collapse_threads.unwrap_or(false),
+        )
+        .await
     }
 }
 

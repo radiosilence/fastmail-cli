@@ -24,6 +24,29 @@
   size). The graph now contains cycles by design, so unbounded queries are
   rejected during validation, before any API call is made.
 
+- **Composable `EmailFilter`.** Filters are now a tree mirroring JMAP's
+  `FilterOperator` (RFC 8620 §5.5) instead of a flat argument list: scalar
+  fields on one filter are AND-ed, and `and` / `or` / `not` nest arbitrarily, so
+  a single query can express "unread, from either address, but not in Archive".
+  Mailbox names and roles are resolved to IDs at every depth of the tree in one
+  `Mailbox/get`. The same input type is accepted everywhere emails appear —
+  on `Mailbox.emails` it is AND-ed with the mailbox.
+- **Sorting** via `sort: [EmailSort!]`, over `receivedAt`, `sentAt`, `size`,
+  `subject`, `from` and `to`, with tie-breakers. Previously hardcoded to
+  newest-first.
+- **Relay connections with pagination.** Email lists return `EmailConnection`
+  with `edges`/`nodes`, `pageInfo` and `totalCount`. Cursors are the zero-based
+  position in the result set rather than opaque blobs, so `after: "24"` resumes
+  at item 25 — legibility matters more than opacity when the client composing
+  the follow-up query is a language model. Both directions work (`first`/`after`
+  and `last`/`before`); page size is capped at 100.
+- **Counts without fetching.** `totalCount` maps to JMAP's `calculateTotal`,
+  which costs the server real work, so it is requested only when the field is
+  selected. A query selecting *only* `totalCount` issues one `Email/query` and
+  fetches no emails at all — `{ emails(filter: {unread: true}) { totalCount } }`
+  answers "how many?" without transferring a single message.
+- **`collapseThreads`** on every email list, for a conversation view.
+
 ### Changed
 
 - **`emails` and `searchEmails` return `Email` instead of `EmailSummary`.**
@@ -32,10 +55,21 @@
   fields under the same names, so existing queries are unaffected; the extra
   fields simply resolve lazily now. The `EmailSummary` type is gone from the
   schema.
+- **`emails(mailbox:, limit:)` is now `emails(filter:, sort:, first:, after:, …)`**
+  returning a connection. `searchEmails` is deprecated — it remains as a shim
+  that maps each of its flat arguments onto one leaf of an `EmailFilter`, and
+  also returns a connection.
 - List and search results now also carry `blobId`, `sentAt`, `bcc` and `replyTo`
   without a second fetch.
 - `thread(emailId:)` returns emails with attachment metadata, which it
   previously omitted.
+
+### Fixed
+
+- **List results now preserve the requested sort order.** `Email/get` makes no
+  ordering guarantee, but the results were returned in whatever order the server
+  sent them; they are now re-ordered to match the `Email/query` result. Affects
+  the `list` and `search` CLI commands as well as GraphQL.
 
 ### Docs
 

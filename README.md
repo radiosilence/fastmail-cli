@@ -480,15 +480,17 @@ Mailbox ──emails──▶ Email ──attachments──▶ Attachment ──
 ```graphql
 # Bodies and attachment content for a whole folder — one query, 3 API calls
 {
-  emails(mailbox: "INBOX", limit: 25) {
-    subject
-    from { name email }
-    textBody
-    attachments {
-      name
-      contentType
-      size
-      content { textContent base64Content }
+  emails(filter: { inMailbox: "INBOX" }, first: 25) {
+    nodes {
+      subject
+      from { name email }
+      textBody
+      attachments {
+        name
+        contentType
+        size
+        content { textContent base64Content }
+      }
     }
   }
 }
@@ -498,13 +500,71 @@ Mailbox ──emails──▶ Email ──attachments──▶ Attachment ──
   mailbox(name: "INBOX") {
     name
     children { name unreadEmails }
-    emails(limit: 5) {
-      subject
-      thread { total emails { subject textBody } }
-      mailboxes { name role }
+    emails(first: 5) {
+      nodes {
+        subject
+        thread { total emails { subject textBody } }
+        mailboxes { name role }
+      }
     }
   }
 }
+```
+
+### Composable filters
+
+`EmailFilter` mirrors JMAP's filter tree (RFC 8620 §5.5) rather than flattening
+it into scalar arguments. Fields on one filter object are AND-ed; `and` / `or` /
+`not` nest arbitrarily. The same input type is accepted everywhere emails
+appear, including `Mailbox.emails`, where it's AND-ed with the mailbox.
+
+```graphql
+# Unread, from either sender, not in Archive, biggest first
+{
+  emails(
+    filter: {
+      unread: true
+      or:  [{ from: "alice@example.com" }, { from: "bob@example.com" }]
+      not: [{ inMailbox: "Archive" }]
+    }
+    sort: [{ property: SIZE, ascending: false }]
+    first: 20
+  ) {
+    totalCount
+    nodes { subject size }
+  }
+}
+```
+
+Mailbox names and roles are resolved to IDs at every depth of the tree in a
+single `Mailbox/get`. `collapseThreads: true` returns one email per
+conversation, for a threaded view.
+
+### Pagination
+
+Email lists are Relay connections with `edges`/`nodes`, `pageInfo`, and
+`totalCount`. Cursors are the zero-based position in the result set, so they're
+legible rather than opaque — `after: "24"` resumes at item 25, which matters
+when the client composing the follow-up query is a language model.
+
+```graphql
+{
+  emails(first: 25, after: "24") {
+    totalCount
+    pageInfo { hasNextPage endCursor }
+    edges { cursor node { subject } }
+  }
+}
+```
+
+`totalCount` maps to JMAP's `calculateTotal`, which costs the server real work,
+so it's only requested when the field is actually selected. The same look-ahead
+means a query selecting **only** `totalCount` performs one `Email/query` and
+fetches no emails at all:
+
+```graphql
+# "How many unread from this sender?" — one call, zero emails transferred
+{ emails(filter: { unread: true, from: "alerts@example.com" }) { totalCount } }
 ```
 
 ### Lazy fields and batching
@@ -514,8 +574,9 @@ Nothing below a list is fetched eagerly, and every lazy field goes through a
 elements run concurrently, and their fetches collapse into **one batched API
 call** rather than one per element.
 
-| Selection on `emails(limit: 25)` | JMAP calls |
-| -------------------------------- | ---------- |
+| Selection on `emails(first: 25) { nodes { … } }` | JMAP calls |
+| ----------------------------------------------- | ---------- |
+| `{ totalCount }` alone | 1 (`Email/query`, no emails fetched) |
 | `{ subject from { email } }` | 2 (`Email/query` + `Email/get`) |
 | `{ subject textBody }` | 3 (+1 batched `Email/get` for all 25 bodies) |
 | `{ subject textBody attachments { name } }` | 3 (same batch covers both) |

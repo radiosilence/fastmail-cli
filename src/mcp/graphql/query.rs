@@ -2,6 +2,8 @@
 
 use async_graphql::{Context, Object, Result};
 
+use super::connection::{EmailConnection, PageArgs, emails_connection, page_complexity};
+use super::filter::{EmailFilter, EmailSort};
 use super::loaders::{Emails, to_gql_error};
 use super::types::*;
 
@@ -42,25 +44,46 @@ impl QueryRoot {
         }
     }
 
-    /// List emails in a specific mailbox/folder. Bodies, attachments and threads
-    /// on the results resolve lazily, batched across the whole list.
-    #[graphql(complexity = "clamp_limit(limit) as usize * child_complexity")]
+    /// Query emails with a composable filter, sorting and pagination.
+    ///
+    /// The filter is a tree: scalar fields on one filter object are AND-ed, and
+    /// `and` / `or` / `not` nest arbitrarily, so a single query can express
+    /// things like "unread, from either address, but not in Archive". Bodies,
+    /// attachments and threads on the results resolve lazily and batched.
+    ///
+    /// Cursors are zero-based positions, so `after: "24"` resumes at item 25.
+    /// Select `totalCount` for the full match count — it is only computed when
+    /// you ask for it.
+    #[graphql(complexity = "page_complexity(first, last, child_complexity)")]
     async fn emails(
         &self,
         ctx: &Context<'_>,
-        #[graphql(
-            desc = "Mailbox name (e.g., 'INBOX', 'Sent') or role (e.g., 'inbox', 'sent', 'drafts')"
-        )]
-        mailbox: String,
-        #[graphql(desc = "Maximum number of emails to return (default 25, max 100)")] limit: Option<
-            u32,
+        #[graphql(desc = "Which emails to match. Omit to match everything.")] filter: Option<
+            EmailFilter,
         >,
-    ) -> Result<Vec<GqlEmail>> {
-        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let mut client = client.lock().await;
-        let mb = client.find_mailbox(&mailbox).await?;
-        let emails = client.list_emails(&mb.id, clamp_limit(limit)).await?;
-        Ok(emails.into_iter().map(GqlEmail::summary).collect())
+        #[graphql(desc = "Sort order, most significant first. Defaults to newest first.")]
+        sort: Option<Vec<EmailSort>>,
+        #[graphql(desc = "Return one email per conversation instead of every message.")]
+        collapse_threads: Option<bool>,
+        after: Option<String>,
+        before: Option<String>,
+        first: Option<i32>,
+        last: Option<i32>,
+    ) -> Result<EmailConnection> {
+        emails_connection(
+            ctx,
+            PageArgs {
+                after,
+                before,
+                first,
+                last,
+            },
+            filter,
+            sort,
+            None,
+            collapse_threads.unwrap_or(false),
+        )
+        .await
     }
 
     /// Get a specific email by ID, with full content. Select
@@ -98,9 +121,16 @@ impl QueryRoot {
         GqlThread::load(ctx, thread_id).await
     }
 
-    /// Search emails with flexible filters. Bodies, attachments and threads on
-    /// the results resolve lazily, batched across the whole result set.
-    #[graphql(complexity = "clamp_limit(limit) as usize * child_complexity")]
+    /// Search emails with flat filters.
+    ///
+    /// Superseded by `emails(filter: ...)`, which composes with `and`/`or`/`not`,
+    /// sorts, and paginates. Kept as a shim: every argument here maps onto one
+    /// leaf of an `EmailFilter`.
+    #[graphql(
+        deprecation = "Use `emails(filter: {...})` — it composes with and/or/not, sorts, and paginates.",
+        complexity = "page_complexity(first, None, child_complexity)"
+    )]
+    #[allow(clippy::too_many_arguments)]
     async fn search_emails(
         &self,
         ctx: &Context<'_>,
@@ -119,40 +149,39 @@ impl QueryRoot {
         #[graphql(desc = "Emails after this date (YYYY-MM-DD or ISO 8601)")] after: Option<String>,
         #[graphql(desc = "Only unread emails")] unread: Option<bool>,
         #[graphql(desc = "Only flagged/starred emails")] flagged: Option<bool>,
-        #[graphql(desc = "Maximum number of results (default 25, max 100)")] limit: Option<u32>,
-    ) -> Result<Vec<GqlEmail>> {
-        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let mut client = client.lock().await;
-        let limit = clamp_limit(limit);
-
-        let filter = crate::commands::SearchFilter {
+        #[graphql(desc = "Maximum number of results (default 25, max 100)")] first: Option<i32>,
+    ) -> Result<EmailConnection> {
+        let filter = EmailFilter {
             text: query,
             from,
             to,
             cc,
-            bcc: None,
             subject,
             body,
-            mailbox: None,
-            has_attachment: has_attachment.unwrap_or(false),
-            min_size: None,
-            max_size: None,
+            in_mailbox: mailbox,
+            has_attachment,
             before,
             after,
-            unread: unread.unwrap_or(false),
-            flagged: flagged.unwrap_or(false),
+            // The old arguments were `false`-means-unset, so only constrain on true.
+            unread: unread.filter(|u| *u),
+            flagged: flagged.filter(|f| *f),
+            ..Default::default()
         };
 
-        let mailbox_id = if let Some(ref name) = mailbox {
-            client.find_mailbox(name).await.ok().map(|m| m.id)
-        } else {
-            None
-        };
-
-        let emails = client
-            .search_emails_filtered(&filter, mailbox_id.as_deref(), limit)
-            .await?;
-        Ok(emails.into_iter().map(GqlEmail::summary).collect())
+        emails_connection(
+            ctx,
+            PageArgs {
+                after: None,
+                before: None,
+                first,
+                last: None,
+            },
+            Some(filter),
+            None,
+            None,
+            false,
+        )
+        .await
     }
 
     /// List attachment metadata for an email. Select `content` on each attachment to fetch data.
