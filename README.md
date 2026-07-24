@@ -405,6 +405,25 @@ Configure in Claude Desktop's `claude_desktop_config.json`:
 
 Username and app password are optional - only needed for contact search (CardDAV requires app password, API tokens don't work).
 
+### HTTP transport (hosted / multi-tenant)
+
+For remote hosting, the server can run over streamable HTTP instead of stdio:
+
+```bash
+fastmail-cli mcp --http 127.0.0.1:8080   # serves at /mcp
+```
+
+In this mode **no token is baked in**. Each request must carry its Fastmail
+token in the `X-Fastmail-Token` header, injected by a trusted upstream after it
+has authenticated the caller. Authenticated JMAP clients are cached per token,
+so the JMAP session handshake runs once per distinct token rather than per call.
+
+This is the seam the hosted OAuth service builds on: it terminates the user's
+OAuth session, looks up their Fastmail token from encrypted storage, and sets the
+header before the request reaches this transport. Do **not** expose `--http`
+directly to the internet without such an auth layer in front — the header is
+trusted unconditionally.
+
 The MCP server exposes **2 tools** via a GraphQL interface:
 
 - **`schema_sdl`** — returns the full GraphQL schema (SDL) so the LLM can discover all available operations

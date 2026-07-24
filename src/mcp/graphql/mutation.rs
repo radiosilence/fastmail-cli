@@ -65,7 +65,7 @@ impl MutationRoot {
         }
 
         let draft = matches!(action, SendAction::Draft);
-        let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let mut client = client.lock().await;
 
         match client
@@ -122,7 +122,7 @@ impl MutationRoot {
     ) -> Result<GqlComposeResult> {
         let nonce_store = ctx.data::<super::types::NonceStore>()?;
         let params = [email_id.as_str(), body.as_str()];
-        let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let mut client = client.lock().await;
 
         let original = client.get_email(&email_id).await?;
@@ -256,7 +256,7 @@ impl MutationRoot {
         let body_str = body.as_deref().unwrap_or("");
         let nonce_store = ctx.data::<super::types::NonceStore>()?;
         let params = [email_id.as_str(), to.as_str(), body_str];
-        let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let mut client = client.lock().await;
 
         let original = client.get_email(&email_id).await?;
@@ -366,7 +366,7 @@ impl MutationRoot {
         #[graphql(desc = "Target mailbox name (e.g., 'Archive', 'Trash') or role")]
         target_mailbox: String,
     ) -> Result<GqlStatus> {
-        let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let mut client = client.lock().await;
 
         let email = client.get_email(&email_id).await?;
@@ -399,7 +399,7 @@ impl MutationRoot {
             bool,
         >,
     ) -> Result<GqlStatus> {
-        let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let client = client.lock().await;
         let read = read.unwrap_or(true);
 
@@ -438,7 +438,7 @@ impl MutationRoot {
         #[graphql(desc = "The email ID")] email_id: String,
         #[graphql(desc = "PREVIEW first, then CONFIRM")] action: SpamAction,
     ) -> Result<GqlStatus> {
-        let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let mut client = client.lock().await;
 
         let email = client.get_email(&email_id).await?;
@@ -486,7 +486,7 @@ impl MutationRoot {
         #[graphql(desc = "A note to remember what this is for")] description: Option<String>,
         #[graphql(desc = "Custom prefix for the email address")] prefix: Option<String>,
     ) -> Result<GqlMaskedEmail> {
-        let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let client = client.lock().await;
         let masked = client
             .create_masked_email(
@@ -504,7 +504,7 @@ impl MutationRoot {
         ctx: &Context<'_>,
         #[graphql(desc = "The masked email ID")] id: String,
     ) -> Result<GqlStatus> {
-        let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let client = client.lock().await;
         match client
             .update_masked_email(&id, Some("enabled"), None, None)
@@ -529,7 +529,7 @@ impl MutationRoot {
         ctx: &Context<'_>,
         #[graphql(desc = "The masked email ID")] id: String,
     ) -> Result<GqlStatus> {
-        let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let client = client.lock().await;
         match client
             .update_masked_email(&id, Some("disabled"), None, None)
@@ -554,7 +554,7 @@ impl MutationRoot {
         ctx: &Context<'_>,
         #[graphql(desc = "The masked email ID")] id: String,
     ) -> Result<GqlStatus> {
-        let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let client = client.lock().await;
         match client
             .update_masked_email(&id, Some("deleted"), None, None)

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Streamable HTTP transport for the MCP server** (`fastmail-cli mcp --http <addr>`): serves MCP at `/mcp` over HTTP instead of stdio, for remote/multi-tenant hosting. The Fastmail token is resolved **per request** from the `X-Fastmail-Token` header (set by a trusted upstream) rather than baked in at startup; stdio mode is unchanged and still uses the config/env token. Authenticated JMAP clients are cached per token. This is the seam the hosted OAuth service (`fastmail-mcp-service`) builds on — the raw HTTP transport trusts the header unconditionally and must sit behind an auth layer.
+- **Library crate**: the crate now exposes a `lib.rs` surface (JMAP client, GraphQL layer, MCP server) so a hosted service can link the machinery directly instead of shelling out to the binary. The CLI binary is unchanged.
+
 ### Changed
 
 - Dependency updates via `cargo update` (Cargo.lock only).

@@ -11,7 +11,7 @@ pub struct QueryRoot;
 impl QueryRoot {
     /// List all mailboxes (folders) with unread counts. Start here to discover available folders.
     async fn mailboxes(&self, ctx: &Context<'_>) -> Result<Vec<GqlMailbox>> {
-        let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let mut client = client.lock().await;
         let mut mailboxes = client.list_mailboxes().await?;
         mailboxes.sort_by(|a, b| match (&a.role, &b.role) {
@@ -34,7 +34,7 @@ impl QueryRoot {
             u32,
         >,
     ) -> Result<Vec<GqlEmailSummary>> {
-        let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let mut client = client.lock().await;
         let limit = limit.unwrap_or(25).min(100);
         let mb = client.find_mailbox(&mailbox).await?;
@@ -49,7 +49,7 @@ impl QueryRoot {
         ctx: &Context<'_>,
         #[graphql(desc = "The email ID (from emails or searchEmails queries)")] id: String,
     ) -> Result<Option<GqlEmail>> {
-        let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let client = client.lock().await;
         match client.get_email(&id).await {
             Ok(email) => Ok(Some(GqlEmail(email))),
@@ -65,7 +65,7 @@ impl QueryRoot {
         ctx: &Context<'_>,
         #[graphql(desc = "Any email ID in the thread")] email_id: String,
     ) -> Result<GqlThread> {
-        let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let client = client.lock().await;
         let mut emails = client.get_thread(&email_id).await?;
         emails.sort_by(|a, b| a.received_at.cmp(&b.received_at));
@@ -94,7 +94,7 @@ impl QueryRoot {
         #[graphql(desc = "Only flagged/starred emails")] flagged: Option<bool>,
         #[graphql(desc = "Maximum number of results (default 25, max 100)")] limit: Option<u32>,
     ) -> Result<Vec<GqlEmailSummary>> {
-        let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let mut client = client.lock().await;
         let limit = limit.unwrap_or(25).min(100);
 
@@ -134,7 +134,7 @@ impl QueryRoot {
         ctx: &Context<'_>,
         #[graphql(desc = "The email ID")] email_id: String,
     ) -> Result<Vec<GqlAttachment>> {
-        let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let client = client.lock().await;
         let email = client.get_email(&email_id).await?;
         Ok(GqlEmail(email).make_attachments())
@@ -147,7 +147,7 @@ impl QueryRoot {
         #[graphql(desc = "The email ID the attachment belongs to")] email_id: String,
         #[graphql(desc = "The blob ID of the attachment (from attachments query)")] blob_id: String,
     ) -> Result<Option<GqlAttachment>> {
-        let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let client = client.lock().await;
         let email = client.get_email(&email_id).await?;
         Ok(GqlEmail(email)
@@ -158,7 +158,7 @@ impl QueryRoot {
 
     /// List all sender identities on the account. Includes signatures and default reply-to/bcc.
     async fn identities(&self, ctx: &Context<'_>) -> Result<Vec<GqlIdentity>> {
-        let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let client = client.lock().await;
         let identities = client.list_identities().await?;
         Ok(identities.into_iter().map(GqlIdentity::from).collect())
@@ -166,7 +166,7 @@ impl QueryRoot {
 
     /// List all masked email addresses.
     async fn masked_emails(&self, ctx: &Context<'_>) -> Result<Vec<GqlMaskedEmail>> {
-        let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let client = client.lock().await;
         let mut masked = client.list_masked_emails().await?;
         masked.sort_by(|a, b| {

@@ -4,13 +4,16 @@
 //! - `schema_sdl` — returns the full GraphQL SDL for introspection
 //! - `graphql` — executes a GraphQL query/mutation
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use rmcp::{
-    ErrorData as McpError, ServerHandler,
+    ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo},
-    schemars, tool, tool_handler, tool_router,
+    schemars,
+    service::RequestContext,
+    tool, tool_handler, tool_router,
 };
 use tokio::sync::Mutex;
 
@@ -21,7 +24,28 @@ type ToolResult = std::result::Result<CallToolResult, McpError>;
 
 pub mod graphql;
 
-use graphql::FastmailSchema;
+use graphql::{FastmailSchema, SharedClient};
+
+/// Header carrying the per-request Fastmail API token in HTTP transport mode.
+/// A trusted upstream (the hosted service, after authenticating the user) sets
+/// this before proxying the request. Over stdio it is absent and the config
+/// token is used instead.
+pub const TOKEN_HEADER: &str = "x-fastmail-token";
+
+/// Cache of authenticated JMAP clients keyed by Fastmail token, so we don't
+/// re-run the JMAP session handshake on every tool call. Shared across sessions.
+type ClientCache = Arc<Mutex<HashMap<String, SharedClient>>>;
+
+/// Prefer the per-request `X-Fastmail-Token` header (HTTP), else fall back to
+/// the configured default (stdio). Pure so it can be unit-tested without a live
+/// [`RequestContext`].
+fn resolve_token(parts: Option<&http::request::Parts>, default: Option<&str>) -> Option<String> {
+    parts
+        .and_then(|p| p.headers.get(TOKEN_HEADER))
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .or_else(|| default.map(str::to_owned))
+}
 
 // ============ Request Types ============
 
@@ -39,24 +63,65 @@ pub struct GraphqlRequest {
 #[derive(Clone)]
 pub struct FastmailMcp {
     schema: Arc<FastmailSchema>,
+    clients: ClientCache,
+    /// Fallback token for stdio mode (loaded from config). `None` in hosted
+    /// HTTP mode, where the token must arrive per request via [`TOKEN_HEADER`].
+    default_token: Option<String>,
     #[allow(dead_code)] // referenced by #[tool_handler] macro expansion
     tool_router: ToolRouter<Self>,
 }
 
 impl FastmailMcp {
-    pub async fn new() -> anyhow::Result<Self> {
+    fn build(default_token: Option<String>) -> Self {
+        Self {
+            schema: Arc::new(graphql::build_schema()),
+            clients: Arc::new(Mutex::new(HashMap::new())),
+            default_token,
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    /// Construct for stdio use: requires a token in config/env, used for every
+    /// request. Errors if no token is configured.
+    pub fn new() -> anyhow::Result<Self> {
         let config = Config::load()?;
         let token = config.get_token()?;
+        Ok(Self::build(Some(token)))
+    }
 
-        let mut client = JmapClient::new(token);
+    /// Construct for hosted HTTP use: no default token. Each request must carry
+    /// its own via [`TOKEN_HEADER`], injected by the trusted upstream service.
+    pub fn hosted() -> Self {
+        Self::build(None)
+    }
+
+    /// Resolve the Fastmail token for this request: the per-request header if
+    /// present (HTTP), otherwise the configured default (stdio).
+    fn resolve_token(&self, ctx: &RequestContext<RoleServer>) -> Option<String> {
+        let header = ctx.extensions.get::<http::request::Parts>();
+        resolve_token(header, self.default_token.as_deref())
+    }
+
+    /// Get or lazily create an authenticated JMAP client for `token`, caching it
+    /// for reuse. The JMAP session handshake runs once per distinct token.
+    async fn client_for(&self, token: &str) -> anyhow::Result<SharedClient> {
+        if let Some(existing) = self.clients.lock().await.get(token) {
+            return Ok(existing.clone());
+        }
+        // Authenticate outside the cache lock so concurrent callers for other
+        // tokens aren't blocked on this network round-trip.
+        let mut client = JmapClient::new(token.to_string());
         client.authenticate().await?;
+        let shared: SharedClient = Arc::new(Mutex::new(client));
 
-        let schema = Arc::new(graphql::build_schema(Mutex::new(client)));
-
-        Ok(Self {
-            schema,
-            tool_router: Self::tool_router(),
-        })
+        // Re-check under lock: another caller may have inserted meanwhile.
+        Ok(self
+            .clients
+            .lock()
+            .await
+            .entry(token.to_string())
+            .or_insert(shared)
+            .clone())
     }
 
     fn text_result(text: impl Into<String>) -> ToolResult {
@@ -80,8 +145,23 @@ impl FastmailMcp {
     #[tool(
         description = "Execute a GraphQL query or mutation against the Fastmail API. Use `schema_sdl` first to discover the schema. Supports all email operations: listing mailboxes, reading/searching emails, sending/replying/forwarding (with preview/confirm pattern), managing masked emails, downloading attachments, and searching contacts. Pass variables as a JSON string."
     )]
-    async fn graphql(&self, Parameters(req): Parameters<GraphqlRequest>) -> ToolResult {
-        let mut request = async_graphql::Request::new(&req.query);
+    async fn graphql(
+        &self,
+        ctx: RequestContext<RoleServer>,
+        Parameters(req): Parameters<GraphqlRequest>,
+    ) -> ToolResult {
+        let Some(token) = self.resolve_token(&ctx) else {
+            return Self::error_result(
+                "No Fastmail token available. Configure one via `fastmail-cli auth` \
+                 (stdio) or send the X-Fastmail-Token header (HTTP).",
+            );
+        };
+        let client = match self.client_for(&token).await {
+            Ok(client) => client,
+            Err(e) => return Self::error_result(format!("Fastmail authentication failed: {e}")),
+        };
+
+        let mut request = async_graphql::Request::new(&req.query).data(client);
 
         if let Some(ref vars) = req.variables {
             match serde_json::from_str::<serde_json::Value>(vars) {
@@ -148,11 +228,12 @@ impl ServerHandler for FastmailMcp {
     }
 }
 
-/// Run the MCP server with stdio transport
+/// Run the MCP server with stdio transport. The Fastmail token comes from
+/// config/env and is used for every request.
 pub async fn run_server() -> anyhow::Result<()> {
     use rmcp::{ServiceExt, transport::stdio};
 
-    let service = FastmailMcp::new().await?;
+    let service = FastmailMcp::new()?;
     let server = service
         .serve(stdio())
         .await
@@ -164,4 +245,73 @@ pub async fn run_server() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("MCP server error: {}", e))?;
 
     Ok(())
+}
+
+/// Run the MCP server over streamable HTTP on `addr`, mounted at `/mcp`.
+///
+/// No token is baked in: each request must carry its Fastmail token in the
+/// [`TOKEN_HEADER`] header, set by a trusted upstream after authenticating the
+/// user. This is the transport the hosted service puts behind OAuth.
+pub async fn run_http_server(addr: &str) -> anyhow::Result<()> {
+    use rmcp::transport::streamable_http_server::{
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+    };
+
+    // One shared instance (shared schema + client cache) cloned into each session.
+    let template = FastmailMcp::hosted();
+    let service = StreamableHttpService::new(
+        move || Ok(template.clone()),
+        Arc::new(LocalSessionManager::default()),
+        StreamableHttpServerConfig::default(),
+    );
+
+    let router = axum::Router::new().nest_service("/mcp", service);
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!("MCP streamable-HTTP server listening on http://{addr}/mcp");
+    axum::serve(listener, router)
+        .await
+        .map_err(|e| anyhow::anyhow!("MCP HTTP server error: {}", e))?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parts_with(header: Option<&str>) -> http::request::Parts {
+        let mut builder = http::Request::builder();
+        if let Some(token) = header {
+            builder = builder.header(TOKEN_HEADER, token);
+        }
+        builder.body(()).unwrap().into_parts().0
+    }
+
+    #[test]
+    fn header_token_wins_over_default() {
+        let parts = parts_with(Some("header-tok"));
+        let got = resolve_token(Some(&parts), Some("default-tok"));
+        assert_eq!(got.as_deref(), Some("header-tok"));
+    }
+
+    #[test]
+    fn falls_back_to_default_when_no_header() {
+        let parts = parts_with(None);
+        let got = resolve_token(Some(&parts), Some("default-tok"));
+        assert_eq!(got.as_deref(), Some("default-tok"));
+    }
+
+    #[test]
+    fn falls_back_to_default_when_no_parts() {
+        // stdio: no HTTP parts in the request context at all.
+        let got = resolve_token(None, Some("default-tok"));
+        assert_eq!(got.as_deref(), Some("default-tok"));
+    }
+
+    #[test]
+    fn none_when_neither_header_nor_default() {
+        // hosted mode with no upstream-injected token — must refuse.
+        assert_eq!(resolve_token(Some(&parts_with(None)), None), None);
+        assert_eq!(resolve_token(None, None), None);
+    }
 }
