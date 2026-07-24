@@ -17,6 +17,41 @@ CLI for Fastmail's JMAP API. Read, search, send, and manage emails from your ter
 | **Shell Completions** | Bash, Zsh, Fish, PowerShell                                            |
 | **JSON Output**       | All commands output JSON for scripting                                 |
 
+## Compared to Fastmail's official MCP
+
+Fastmail [ships an official MCP server](https://www.fastmail.com/blog/an-mcp-server-for-fastmail/)
+(hosted at `api.fastmail.com/mcp`, OAuth with read/write/send scopes). It's
+zero-setup and covers more of Fastmail's suite — calendar, notes, and org
+directory that `fastmail-cli` doesn't touch. `fastmail-cli` is the self-hosted
+alternative: a CLI *and* an MCP server you run yourself, open source, with
+masked email, attachment text extraction, and spam-filter training the official
+server doesn't offer — plus full custody of the data path.
+
+|                                                            | `fastmail-cli`                     | Fastmail official MCP            |
+| ---------------------------------------------------------- | ---------------------------------- | -------------------------------- |
+| Interface                                                  | CLI **and** MCP (stdio / HTTP)     | MCP only                         |
+| Setup                                                      | install + run the binary           | add URL + OAuth, nothing to run  |
+| Auth                                                       | API token (+ app password for CardDAV) | OAuth: `read` / `write` / `send` |
+| Hosting / data path                                        | your machine or your own server    | Fastmail-hosted                  |
+| Source                                                     | open source (MIT), extensible      | proprietary                      |
+| Email: read / search / threads                             | ✅ (rich search filters)           | ✅                               |
+| Send / reply / forward (preview → confirm/draft)           | ✅                                 | ✅                               |
+| Move / archive / mark read                                 | ✅                                 | ✅                               |
+| Mark as spam (+ trains the filter)                         | ✅                                 | —                                |
+| Masked Email (create / enable / disable / delete)          | ✅                                 | —                                |
+| Attachments: text extraction (56 formats) + image resize   | ✅                                 | —                                |
+| Contacts (create / update / delete / search)               | ✅ (CardDAV)                       | ✅                               |
+| Org directory search                                       | —                                  | ✅                               |
+| Calendar                                                   | —                                  | ✅                               |
+| Notes                                                      | —                                  | ✅                               |
+| Identities / signatures                                    | ✅                                 | ✅                               |
+
+Use Fastmail's for zero maintenance and the wider suite (calendar, notes);
+use `fastmail-cli` for a scriptable CLI, the masked-email / attachment-extraction
+/ spam-training tooling, or to self-host and keep the data path yours.
+(`fastmail-cli`'s column is verified against its GraphQL schema; Fastmail's is
+its current hosted tool set and may grow.)
+
 ## Quick Start
 
 ### Installation

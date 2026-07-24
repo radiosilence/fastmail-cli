@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Docs
+
+- README: comparison table against Fastmail's official MCP server — positions
+  `fastmail-cli` as the self-hosted CLI+MCP alternative (masked email,
+  attachment text extraction, spam training, self-custody) vs the hosted
+  official server (zero-setup, OAuth, and a wider suite: calendar, notes, org
+  directory).
+
 ## [3.0.0] - 2026-07-24
 
 Hosted MCP: `fastmail-cli` can now run as a remote MCP backend behind an OAuth
