@@ -232,14 +232,19 @@ impl ServerHandler for FastmailMcp {
                   ) { totalCount nodes { subject size } } }\n\
                 ```\n\n\
                 ## Pagination and counts\n\
-                Email lists are connections. Cursors are zero-based positions, so\n\
-                `after: \"24\"` resumes at item 25. Page size is capped at 100.\n\
+                Email lists are connections. **Cursors are email IDs** — pass the\n\
+                `endCursor` (or any edge's `cursor`) back as `after`. They stay\n\
+                valid when new mail arrives, unlike a positional cursor. Page\n\
+                size is capped at 100.\n\
                 ```graphql\n\
-                { emails(first: 25, after: \"24\") {\n\
+                { emails(first: 25, after: \"Mabc123\") {\n\
                     totalCount\n\
                     pageInfo { hasNextPage endCursor }\n\
                     edges { cursor node { subject } } } }\n\
                 ```\n\
+                Use `last: N` for the newest-last window, `before:` to page\n\
+                backwards. If a cursor's email is deleted you get an error saying\n\
+                so — restart without `after`/`before`.\n\
                 `totalCount` is only computed when you select it, and selecting it\n\
                 **alone** fetches no emails — use that to answer \"how many?\"\n\
                 cheaply instead of listing and counting:\n\

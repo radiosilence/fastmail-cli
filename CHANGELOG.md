@@ -34,12 +34,25 @@
 - **Sorting** via `sort: [EmailSort!]`, over `receivedAt`, `sentAt`, `size`,
   `subject`, `from` and `to`, with tie-breakers. Previously hardcoded to
   newest-first.
-- **Relay connections with pagination.** Email lists return `EmailConnection`
-  with `edges`/`nodes`, `pageInfo` and `totalCount`. Cursors are the zero-based
-  position in the result set rather than opaque blobs, so `after: "24"` resumes
-  at item 25 — legibility matters more than opacity when the client composing
-  the follow-up query is a language model. Both directions work (`first`/`after`
-  and `last`/`before`); page size is capped at 100.
+- **Relay connections with anchor-based pagination.** Email lists return
+  `EmailConnection` with `edges`/`nodes`, `pageInfo`, `totalCount`, `position`
+  and `queryState`. **Cursors are email IDs**, mapped onto JMAP's `anchor` /
+  `anchorOffset`: a positional cursor shifts every time mail arrives, so page 2
+  would re-show or skip messages, whereas an anchor names a specific message and
+  stays correct. They also stay legible for a model composing the follow-up
+  query — the cursor is an ID it has already seen. `last` without `before`
+  becomes a negative `position`, which JMAP counts from the end, so "the last N"
+  is one call and needs no total. A cursor whose email has been deleted or no
+  longer matches yields a clear "restart pagination" error rather than silently
+  wrong results. Page size is capped at 100; conflicting `first`+`last` or
+  `after`+`before` are rejected.
+- **The full JMAP filter and sort surface.** `EmailFilter` now mirrors
+  `FilterCondition` (RFC 8621 §4.4.1) field for field, adding
+  `inMailboxOtherThan`, `allInThreadHaveKeyword`, `someInThreadHaveKeyword`,
+  `noneInThreadHaveKeyword` and raw `header` matching. `EmailSort` adds the
+  keyword comparators (`hasKeyword`, `allInThreadHaveKeyword`,
+  `someInThreadHaveKeyword`) plus `collation`; comparators that require a
+  `keyword` — and those that reject one — are validated before any API call.
 - **Counts without fetching.** `totalCount` maps to JMAP's `calculateTotal`,
   which costs the server real work, so it is requested only when the field is
   selected. A query selecting *only* `totalCount` issues one `Email/query` and

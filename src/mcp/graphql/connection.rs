@@ -1,10 +1,16 @@
-//! Relay-style connections over JMAP's offset-based `Email/query`.
+//! Relay-style connections over JMAP's `Email/query`.
 //!
-//! JMAP paginates by position, so cursors here are the plain zero-based index
-//! of an item within the result set. That keeps them legible — `after: "24"` is
-//! obvious to a human or an LLM composing a follow-up query — at the cost of the
-//! opacity the Relay spec suggests. Since the client is a language model rather
-//! than a Relay runtime, legibility wins.
+//! Cursors are **email IDs**, mapped onto JMAP's `anchor` / `anchorOffset`
+//! arguments. That falls out of what the API already offers, and it is the
+//! reason pagination here is stable: a positional cursor silently shifts every
+//! time mail arrives, so `after: "24"` would re-show or skip messages between
+//! pages. An anchor names a specific message, so the page after it is the same
+//! page whatever else changed. It stays legible for a model composing the
+//! follow-up query, too — the cursor is just an ID it has already seen.
+//!
+//! Backward pagination uses the same machinery: `last` without `before` becomes
+//! a negative `position`, which JMAP counts from the end, so "the last N" costs
+//! one call and never needs a total.
 
 use std::collections::{HashMap, HashSet};
 
@@ -15,7 +21,7 @@ use serde_json::Value;
 use super::SharedClient;
 use super::filter::{EmailFilter, EmailSort, and_also, sort_to_jmap};
 use super::types::{GqlEmail, clamp_page};
-use crate::jmap::EmailQuery;
+use crate::jmap::{EmailQuery, QueryStart};
 
 /// Connection-level fields beyond the Relay defaults.
 #[derive(SimpleObject)]
@@ -25,9 +31,16 @@ pub struct EmailConnectionFields {
     /// Computing this costs the server extra work, so it is only requested when
     /// you actually select the field — a query that omits it pays nothing.
     pub total_count: Option<u64>,
+    /// Zero-based index of the first returned email within the full result set.
+    pub position: u64,
+    /// Opaque server state for this query. Two pages sharing a `queryState`
+    /// came from the same result set; a change means messages arrived, moved,
+    /// or were deleted in between.
+    pub query_state: Option<String>,
 }
 
-pub type EmailConnection = Connection<usize, GqlEmail, EmailConnectionFields>;
+/// Cursors are email IDs — see the module docs for why.
+pub type EmailConnection = Connection<String, GqlEmail, EmailConnectionFields>;
 
 /// Arguments every email connection accepts.
 pub struct PageArgs {
@@ -42,6 +55,24 @@ pub struct PageArgs {
 pub fn page_complexity(first: Option<i32>, last: Option<i32>, child_complexity: usize) -> usize {
     let requested = first.or(last).map(|n| n.max(0) as u32);
     clamp_page(requested) as usize * child_complexity
+}
+
+/// Turn JMAP's `anchorNotFound` into advice the caller can act on.
+///
+/// An anchor cursor points at a specific message; if that message is deleted or
+/// filtered out before the next page is requested, the anchor no longer exists.
+/// That's the trade for stability, and the recovery is simply to start over.
+fn stale_anchor_hint(e: crate::error::Error) -> async_graphql::Error {
+    if let crate::error::Error::Jmap { ref error_type, .. } = e
+        && error_type == "anchorNotFound"
+    {
+        return async_graphql::Error::new(
+            "The cursor's email is no longer in this result set — it was deleted, \
+             moved, or no longer matches the filter. Restart pagination without \
+             `after`/`before`.",
+        );
+    }
+    e.into()
 }
 
 /// Resolve every mailbox name mentioned in a filter tree to its ID, in one go.
@@ -99,13 +130,24 @@ pub async fn emails_connection(
     constraint: Option<Value>,
     collapse_threads: bool,
 ) -> Result<EmailConnection> {
+    if args.first.is_some() && args.last.is_some() {
+        return Err(async_graphql::Error::new(
+            "Pass `first` or `last`, not both.",
+        ));
+    }
+    if args.after.is_some() && args.before.is_some() {
+        return Err(async_graphql::Error::new(
+            "Pass `after` or `before`, not both.",
+        ));
+    }
+
     let mailboxes = resolve_mailbox_names(ctx, filter.as_ref()).await?;
     let jmap_filter = filter.as_ref().and_then(|f| f.to_jmap(&mailboxes));
     let jmap_filter = match constraint {
         Some(c) => Some(and_also(jmap_filter, c)),
         None => jmap_filter,
     };
-    let jmap_sort = sort_to_jmap(sort.as_deref());
+    let jmap_sort = sort_to_jmap(sort.as_deref()).map_err(async_graphql::Error::new)?;
 
     // Selecting nothing but `totalCount` should not fetch a single email; and
     // `totalCount` is the only thing that makes the server compute the total.
@@ -119,53 +161,43 @@ pub async fn emails_connection(
         args.first,
         args.last,
         |after, before, first, last| async move {
-            let after: Option<usize> = after;
-            let before: Option<usize> = before;
-
-            // Backward pagination needs to know where the end is.
-            let backward = last.is_some();
-            let calculate_total = wants_total || (backward && before.is_none());
-
+            let after: Option<String> = after;
+            let before: Option<String> = before;
             let limit = clamp_page(first.or(last).map(|n| n as u32));
 
-            // Forward: start just past `after`. Backward: end just before
-            // `before` and walk back `limit` items.
-            let start = after.map(|a| a + 1).unwrap_or(0);
+            // Every combination maps onto one JMAP window. `last` without a
+            // `before` is the only one that needs the negative-position form.
+            let start = match (&after, &before, last) {
+                (Some(id), _, _) => QueryStart::Anchor {
+                    id: id.clone(),
+                    offset: 1,
+                },
+                (_, Some(id), _) => QueryStart::Anchor {
+                    id: id.clone(),
+                    offset: -(limit as i64),
+                },
+                (_, _, Some(_)) => QueryStart::Position(-(limit as i64)),
+                _ => QueryStart::Position(0),
+            };
 
             let client = ctx.data::<SharedClient>()?;
             let client = client.lock().await;
 
-            let run = |position: u64, limit: u32, fetch: bool, total: bool| {
-                client.query_emails(EmailQuery {
+            let page = client
+                .query_emails(EmailQuery {
                     filter: jmap_filter.clone().unwrap_or_else(|| serde_json::json!({})),
                     sort: jmap_sort.clone(),
-                    position,
+                    start,
                     limit,
-                    calculate_total: total,
+                    calculate_total: wants_total,
                     collapse_threads,
-                    fetch_summaries: fetch,
+                    fetch_summaries: wants_nodes,
                 })
-            };
-
-            let page = if backward {
-                // Establish the end of the window, then step back from it.
-                let end = match before {
-                    Some(b) => b as u64,
-                    None => run(0, 0, false, true).await?.total.unwrap_or(0),
-                };
-                let start = end.saturating_sub(limit as u64);
-                let take = (end - start) as u32;
-                run(start, take, wants_nodes, wants_total).await?
-            } else {
-                run(start as u64, limit, wants_nodes, calculate_total).await?
-            };
+                .await
+                .map_err(stale_anchor_hint)?;
 
             let first_index = page.position as usize;
-            let count = if wants_nodes {
-                page.emails.len()
-            } else {
-                page.ids.len()
-            };
+            let count = page.ids.len();
 
             let has_previous = first_index > 0;
             let has_next = match page.total {
@@ -179,15 +211,16 @@ pub async fn emails_connection(
                 has_next,
                 EmailConnectionFields {
                     total_count: page.total,
+                    position: page.position,
+                    query_state: page.query_state,
                 },
             );
             conn.edges = page
                 .emails
                 .into_iter()
-                .enumerate()
-                .map(|(i, email)| {
+                .map(|email| {
                     Edge::with_additional_fields(
-                        first_index + i,
+                        email.id.clone(),
                         GqlEmail::summary(email),
                         EmptyFields,
                     )

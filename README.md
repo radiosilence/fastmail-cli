@@ -540,22 +540,49 @@ Mailbox names and roles are resolved to IDs at every depth of the tree in a
 single `Mailbox/get`. `collapseThreads: true` returns one email per
 conversation, for a threaded view.
 
+The filter mirrors JMAP's `FilterCondition` (RFC 8621 §4.4.1) field for field:
+alongside the usual participant/date/size conditions there are
+`inMailboxOtherThan`, `hasKeyword` / `notKeyword`, the thread-wide
+`allInThreadHaveKeyword` / `someInThreadHaveKeyword` / `noneInThreadHaveKeyword`,
+and raw `header` matching (`["List-Id"]` for presence, `["List-Id", "rust-lang"]`
+for a value).
+
+Sorting likewise covers the full comparator set — `receivedAt`, `sentAt`, `size`,
+`subject`, `from`, `to`, plus the keyword-based `hasKeyword`,
+`allInThreadHaveKeyword` and `someInThreadHaveKeyword`, with `collation`. The
+keyword comparators require a `keyword` argument and the others reject one;
+both are caught before any API call.
+
 ### Pagination
 
-Email lists are Relay connections with `edges`/`nodes`, `pageInfo`, and
-`totalCount`. Cursors are the zero-based position in the result set, so they're
-legible rather than opaque — `after: "24"` resumes at item 25, which matters
-when the client composing the follow-up query is a language model.
+Email lists are Relay connections with `edges`/`nodes`, `pageInfo`, `totalCount`,
+`position`, and `queryState`.
+
+**Cursors are email IDs**, mapped onto JMAP's `anchor` / `anchorOffset`. This
+falls out of what the API already offers, and it's what makes pagination stable:
+a positional cursor silently shifts every time mail arrives, so page 2 would
+re-show or skip messages. An anchor names a specific message, so the page after
+it is the same page whatever else changed. It stays legible for a model
+composing the follow-up query too — the cursor is just an ID it has already seen.
 
 ```graphql
 {
-  emails(first: 25, after: "24") {
+  emails(first: 25, after: "Mabc123") {
     totalCount
     pageInfo { hasNextPage endCursor }
     edges { cursor node { subject } }
   }
 }
 ```
+
+`last` without `before` becomes a negative `position`, which JMAP counts from
+the end — "the last N" is one call and never needs a total. `last` with `before`
+anchors backwards from the cursor.
+
+The trade for stability is that a cursor can go stale: if its message is deleted
+or stops matching the filter, JMAP returns `anchorNotFound`. That surfaces as an
+error saying exactly that, and that the fix is to restart pagination. Compare
+`queryState` between pages to detect that the result set moved underneath you.
 
 `totalCount` maps to JMAP's `calculateTotal`, which costs the server real work,
 so it's only requested when the field is actually selected. The same look-ahead

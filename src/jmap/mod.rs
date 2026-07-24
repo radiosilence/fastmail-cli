@@ -264,6 +264,29 @@ struct QueryResponse {
     position: u64,
     #[serde(default)]
     total: Option<u64>,
+    #[serde(default, rename = "queryState")]
+    query_state: Option<String>,
+}
+
+/// Where a query window starts.
+///
+/// JMAP offers two ways to say this, and the anchor form is what makes stable
+/// pagination possible: an index shifts whenever mail arrives, but an anchor is
+/// an ID in the result set, so a cursor built from one still points at the same
+/// message a minute later.
+pub enum QueryStart {
+    /// Zero-based index. Negative counts back from the end, so `-10` is "the
+    /// last ten" without needing to know the total first.
+    Position(i64),
+    /// Start relative to a known ID: offset `1` is the item after it, `-n` the
+    /// `n` items ending just before it.
+    Anchor { id: String, offset: i64 },
+}
+
+impl Default for QueryStart {
+    fn default() -> Self {
+        Self::Position(0)
+    }
 }
 
 /// Parameters for one `Email/query` window.
@@ -272,8 +295,8 @@ pub struct EmailQuery {
     pub filter: Value,
     /// JMAP sort comparators, most significant first.
     pub sort: Vec<Value>,
-    /// Zero-based index of the first result to return.
-    pub position: u64,
+    /// Where the window begins.
+    pub start: QueryStart,
     pub limit: u32,
     /// Ask the server for the total match count. Costs the server extra work,
     /// so only set it when the caller actually needs the number.
@@ -290,7 +313,7 @@ impl EmailQuery {
         Self {
             filter: json!({}),
             sort: vec![json!({ "property": "receivedAt", "isAscending": false })],
-            position: 0,
+            start: QueryStart::Position(0),
             limit,
             calculate_total: false,
             collapse_threads: false,
@@ -378,6 +401,9 @@ pub struct EmailPage {
     pub position: u64,
     /// Total matches, when `calculate_total` was set.
     pub total: Option<u64>,
+    /// Opaque server state string for this query, letting a client tell whether
+    /// the result set has changed since it last looked.
+    pub query_state: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -746,19 +772,23 @@ impl JmapClient {
     pub async fn query_emails(&self, query: EmailQuery) -> Result<EmailPage> {
         let account_id = self.account_id()?;
 
-        let mut method_calls = vec![json!([
-            "Email/query",
-            {
-                "accountId": account_id,
-                "filter": query.filter,
-                "sort": query.sort,
-                "position": query.position,
-                "limit": query.limit,
-                "calculateTotal": query.calculate_total,
-                "collapseThreads": query.collapse_threads
-            },
-            "q0"
-        ])];
+        let mut args = json!({
+            "accountId": account_id,
+            "filter": query.filter,
+            "sort": query.sort,
+            "limit": query.limit,
+            "calculateTotal": query.calculate_total,
+            "collapseThreads": query.collapse_threads
+        });
+        match query.start {
+            QueryStart::Position(p) => args["position"] = json!(p),
+            QueryStart::Anchor { ref id, offset } => {
+                args["anchor"] = json!(id);
+                args["anchorOffset"] = json!(offset);
+            }
+        }
+
+        let mut method_calls = vec![json!(["Email/query", args, "q0"])];
 
         // Chain the summary fetch off the query with a JMAP back-reference, so a
         // page costs one HTTP round trip rather than two. Skipped entirely when
@@ -807,6 +837,7 @@ impl JmapClient {
             ids: query_resp.ids,
             position: query_resp.position,
             total: query_resp.total,
+            query_state: query_resp.query_state,
         })
     }
 
