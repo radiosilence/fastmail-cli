@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Full nesting across the GraphQL graph.** Every logical edge is now
+  traversable, so a client can fetch emails, bodies and attachment content in a
+  single query instead of looping:
+  - `Query.mailbox(name:)` — look up one folder by name or role.
+  - `Mailbox.emails(limit:)`, `Mailbox.parent`, `Mailbox.children` — navigate
+    from a folder into its contents and around the folder tree.
+  - `Email.thread` — the whole conversation from any email.
+  - `Email.mailboxes` — the folders an email lives in, resolved from `mailboxIds`.
+  - `Thread.id`.
+- **DataLoader batching for every lazily-resolved field.** Bodies, attachment
+  metadata, threads, mailboxes and blob downloads are fetched through
+  request-scoped DataLoaders, so resolvers that run concurrently collapse into
+  one batched API call. Selecting `textBody` on a page of 25 emails costs one
+  extra `Email/get` rather than 25 — and repeating an ID within a query is free.
+  Attachment blobs, which have no batch endpoint, are downloaded concurrently
+  instead of one at a time.
+- **Query depth and complexity limits** (depth 15; nested lists priced by page
+  size). The graph now contains cycles by design, so unbounded queries are
+  rejected during validation, before any API call is made.
+
+### Changed
+
+- **`emails` and `searchEmails` return `Email` instead of `EmailSummary`.**
+  `EmailSummary` was a dead end — reaching a body or an attachment meant a
+  separate `email(id:)` round trip per result. `Email` is a superset of its
+  fields under the same names, so existing queries are unaffected; the extra
+  fields simply resolve lazily now. The `EmailSummary` type is gone from the
+  schema.
+- List and search results now also carry `blobId`, `sentAt`, `bcc` and `replyTo`
+  without a second fetch.
+- `thread(emailId:)` returns emails with attachment metadata, which it
+  previously omitted.
+
 ### Docs
 
 - README: comparison table against Fastmail's official MCP server — positions

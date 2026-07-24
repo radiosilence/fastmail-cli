@@ -161,7 +161,7 @@ impl FastmailMcp {
             Err(e) => return Self::error_result(format!("Fastmail authentication failed: {e}")),
         };
 
-        let mut request = async_graphql::Request::new(&req.query).data(client);
+        let mut request = graphql::request(&req.query, client);
 
         if let Some(ref vars) = req.variables {
             match serde_json::from_str::<serde_json::Value>(vars) {
@@ -213,6 +213,28 @@ impl ServerHandler for FastmailMcp {
                 # Search emails\n\
                 { searchEmails(query: \"invoice\", after: \"2024-01-01\") { id subject from { email } receivedAt } }\n\
                 ```\n\n\
+                ## Ask for everything in one query\n\
+                The graph is fully nested and every field below a list is fetched\n\
+                lazily and batched, so ask for what you actually need in a single\n\
+                query instead of looping. Selecting `textBody` on 25 emails costs\n\
+                one extra API call, not 25.\n\
+                ```graphql\n\
+                # Bodies + attachment text for a whole folder, in one round trip\n\
+                { emails(mailbox: \"INBOX\", limit: 10) {\n\
+                    subject from { email }\n\
+                    textBody\n\
+                    attachments { name contentType content { textContent base64Content } }\n\
+                } }\n\n\
+                # Walk the graph: folder → emails → conversation → mailboxes\n\
+                { mailbox(name: \"INBOX\") { name children { name }\n\
+                    emails(limit: 5) {\n\
+                      subject\n\
+                      thread { total emails { subject textBody } }\n\
+                      mailboxes { name role }\n\
+                    } } }\n\
+                ```\n\
+                Nesting is bounded (max depth 15, plus a query-complexity cap), so\n\
+                keep fan-out reasonable — very wide + very deep queries are rejected.\n\n\
                 ## Sending Emails (ALWAYS preview first!)\n\
                 ```graphql\n\
                 # Step 1: Preview\n\

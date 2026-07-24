@@ -2,6 +2,7 @@
 
 use async_graphql::{Context, Object, Result};
 
+use super::loaders::{Emails, to_gql_error};
 use super::types::*;
 
 pub struct QueryRoot;
@@ -22,7 +23,28 @@ impl QueryRoot {
         Ok(mailboxes.into_iter().map(GqlMailbox::from).collect())
     }
 
-    /// List emails in a specific mailbox/folder.
+    /// Look up a single mailbox by name or role. Navigate into it with
+    /// `emails { ... }` or around the tree with `parent` / `children`.
+    async fn mailbox(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(
+            desc = "Mailbox name (e.g., 'INBOX', 'Sent') or role (e.g., 'inbox', 'sent', 'drafts')"
+        )]
+        name: String,
+    ) -> Result<Option<GqlMailbox>> {
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
+        let mut client = client.lock().await;
+        match client.find_mailbox(&name).await {
+            Ok(mb) => Ok(Some(GqlMailbox::from(mb))),
+            Err(crate::error::Error::MailboxNotFound(_)) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// List emails in a specific mailbox/folder. Bodies, attachments and threads
+    /// on the results resolve lazily, batched across the whole list.
+    #[graphql(complexity = "clamp_limit(limit) as usize * child_complexity")]
     async fn emails(
         &self,
         ctx: &Context<'_>,
@@ -33,29 +55,28 @@ impl QueryRoot {
         #[graphql(desc = "Maximum number of emails to return (default 25, max 100)")] limit: Option<
             u32,
         >,
-    ) -> Result<Vec<GqlEmailSummary>> {
+    ) -> Result<Vec<GqlEmail>> {
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let mut client = client.lock().await;
-        let limit = limit.unwrap_or(25).min(100);
         let mb = client.find_mailbox(&mailbox).await?;
-        let emails = client.list_emails(&mb.id, limit).await?;
-        Ok(emails.into_iter().map(Into::into).collect())
+        let emails = client.list_emails(&mb.id, clamp_limit(limit)).await?;
+        Ok(emails.into_iter().map(GqlEmail::summary).collect())
     }
 
-    /// Get full content of a specific email by ID. Includes nested attachments —
-    /// select `attachments { content { ... } }` to download attachment data in the same query.
+    /// Get a specific email by ID, with full content. Select
+    /// `attachments { content { ... } }` to download attachment data in the same
+    /// query, or `thread { emails { ... } }` for the whole conversation.
     async fn email(
         &self,
         ctx: &Context<'_>,
         #[graphql(desc = "The email ID (from emails or searchEmails queries)")] id: String,
     ) -> Result<Option<GqlEmail>> {
-        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let client = client.lock().await;
-        match client.get_email(&id).await {
-            Ok(email) => Ok(Some(GqlEmail(email))),
-            Err(crate::error::Error::EmailNotFound(_)) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+        let loader = ctx.data::<Emails>()?;
+        Ok(loader
+            .load_one(id)
+            .await
+            .map_err(to_gql_error)?
+            .map(GqlEmail::full))
     }
 
     /// Get all emails in a thread/conversation with full content. Returns emails sorted
@@ -65,15 +86,21 @@ impl QueryRoot {
         ctx: &Context<'_>,
         #[graphql(desc = "Any email ID in the thread")] email_id: String,
     ) -> Result<GqlThread> {
-        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let client = client.lock().await;
-        let mut emails = client.get_thread(&email_id).await?;
-        emails.sort_by(|a, b| a.received_at.cmp(&b.received_at));
-        let total = emails.len();
-        Ok(GqlThread { emails, total })
+        let loader = ctx.data::<Emails>()?;
+        let email = loader
+            .load_one(email_id.clone())
+            .await
+            .map_err(to_gql_error)?
+            .ok_or_else(|| async_graphql::Error::new(format!("Email {email_id} not found")))?;
+        let thread_id = email
+            .thread_id
+            .ok_or_else(|| async_graphql::Error::new("Email has no thread ID"))?;
+        GqlThread::load(ctx, thread_id).await
     }
 
-    /// Search emails with flexible filters.
+    /// Search emails with flexible filters. Bodies, attachments and threads on
+    /// the results resolve lazily, batched across the whole result set.
+    #[graphql(complexity = "clamp_limit(limit) as usize * child_complexity")]
     async fn search_emails(
         &self,
         ctx: &Context<'_>,
@@ -93,10 +120,10 @@ impl QueryRoot {
         #[graphql(desc = "Only unread emails")] unread: Option<bool>,
         #[graphql(desc = "Only flagged/starred emails")] flagged: Option<bool>,
         #[graphql(desc = "Maximum number of results (default 25, max 100)")] limit: Option<u32>,
-    ) -> Result<Vec<GqlEmailSummary>> {
+    ) -> Result<Vec<GqlEmail>> {
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let mut client = client.lock().await;
-        let limit = limit.unwrap_or(25).min(100);
+        let limit = clamp_limit(limit);
 
         let filter = crate::commands::SearchFilter {
             text: query,
@@ -125,19 +152,23 @@ impl QueryRoot {
         let emails = client
             .search_emails_filtered(&filter, mailbox_id.as_deref(), limit)
             .await?;
-        Ok(emails.into_iter().map(Into::into).collect())
+        Ok(emails.into_iter().map(GqlEmail::summary).collect())
     }
 
     /// List attachment metadata for an email. Select `content` on each attachment to fetch data.
+    /// Equivalent to `email(id: ...) { attachments { ... } }`.
     async fn attachments(
         &self,
         ctx: &Context<'_>,
         #[graphql(desc = "The email ID")] email_id: String,
     ) -> Result<Vec<GqlAttachment>> {
-        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let client = client.lock().await;
-        let email = client.get_email(&email_id).await?;
-        Ok(GqlEmail(email).make_attachments())
+        let loader = ctx.data::<Emails>()?;
+        let email = loader
+            .load_one(email_id.clone())
+            .await
+            .map_err(to_gql_error)?
+            .ok_or_else(|| async_graphql::Error::new(format!("Email {email_id} not found")))?;
+        Ok(attachments_of(&email))
     }
 
     /// Get a single attachment by blob ID. Select `content` to fetch its data.
@@ -147,11 +178,13 @@ impl QueryRoot {
         #[graphql(desc = "The email ID the attachment belongs to")] email_id: String,
         #[graphql(desc = "The blob ID of the attachment (from attachments query)")] blob_id: String,
     ) -> Result<Option<GqlAttachment>> {
-        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let client = client.lock().await;
-        let email = client.get_email(&email_id).await?;
-        Ok(GqlEmail(email)
-            .make_attachments()
+        let loader = ctx.data::<Emails>()?;
+        let email = loader
+            .load_one(email_id.clone())
+            .await
+            .map_err(to_gql_error)?
+            .ok_or_else(|| async_graphql::Error::new(format!("Email {email_id} not found")))?;
+        Ok(attachments_of(&email)
             .into_iter()
             .find(|a| a.blob_id == blob_id))
     }

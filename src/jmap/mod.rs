@@ -11,6 +11,56 @@ use tracing::{debug, instrument};
 const SESSION_URL: &str = "https://api.fastmail.com/jmap/session";
 const TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Properties fetched for list/search results: everything that is cheap to
+/// serialise. Bodies and attachment metadata are deliberately excluded — those
+/// are pulled on demand, in one batched call, by [`JmapClient::get_emails`].
+pub const EMAIL_SUMMARY_PROPERTIES: &[&str] = &[
+    "id",
+    "blobId",
+    "threadId",
+    "mailboxIds",
+    "keywords",
+    "size",
+    "receivedAt",
+    "sentAt",
+    "from",
+    "to",
+    "cc",
+    "bcc",
+    "replyTo",
+    "subject",
+    "preview",
+    "hasAttachment",
+];
+
+/// The summary set plus bodies, attachment metadata and threading headers —
+/// the expensive fetch.
+pub const EMAIL_FULL_PROPERTIES: &[&str] = &[
+    "id",
+    "blobId",
+    "threadId",
+    "mailboxIds",
+    "keywords",
+    "size",
+    "receivedAt",
+    "sentAt",
+    "messageId",
+    "inReplyTo",
+    "references",
+    "from",
+    "to",
+    "cc",
+    "bcc",
+    "replyTo",
+    "subject",
+    "preview",
+    "hasAttachment",
+    "textBody",
+    "htmlBody",
+    "attachments",
+    "bodyValues",
+];
+
 const DESIRED_CAPABILITIES: &[&str] = &[
     "urn:ietf:params:jmap:core",
     "urn:ietf:params:jmap:mail",
@@ -208,13 +258,6 @@ struct GetResponse<T> {
 }
 
 #[derive(Deserialize)]
-struct GetResponseWithNotFound<T> {
-    list: Vec<T>,
-    #[serde(rename = "notFound")]
-    not_found: Vec<String>,
-}
-
-#[derive(Deserialize)]
 struct EmailSetResponse {
     created: Option<HashMap<String, Value>>,
     #[serde(rename = "notCreated")]
@@ -369,6 +412,34 @@ impl JmapClient {
             available_capabilities: Vec::new(),
             cached_mailboxes: None,
         }
+    }
+
+    /// Build a client that is already "authenticated" against `api_url`, so
+    /// tests can point it at a mock JMAP server without going through the
+    /// hardcoded session endpoint.
+    #[cfg(test)]
+    pub fn with_test_session(api_url: &str) -> Self {
+        let mut client = Self::new("test-token".into());
+        client.available_capabilities =
+            DESIRED_CAPABILITIES.iter().map(|s| s.to_string()).collect();
+        client.session = Some(Session {
+            capabilities: DESIRED_CAPABILITIES
+                .iter()
+                .map(|c| (c.to_string(), json!({})))
+                .collect(),
+            accounts: HashMap::new(),
+            primary_accounts: HashMap::from([(
+                "urn:ietf:params:jmap:mail".to_string(),
+                "acct1".to_string(),
+            )]),
+            username: "test@example.com".into(),
+            api_url: api_url.to_string(),
+            download_url: format!("{api_url}/download/{{blobId}}"),
+            upload_url: format!("{api_url}/upload"),
+            event_source_url: None,
+            state: None,
+        });
+        client
     }
 
     #[instrument(skip(self))]
@@ -572,11 +643,7 @@ impl JmapClient {
                             "name": "Email/query",
                             "path": "/ids"
                         },
-                        "properties": [
-                            "id", "threadId", "mailboxIds", "keywords",
-                            "size", "receivedAt", "from", "to", "cc",
-                            "subject", "preview", "hasAttachment"
-                        ]
+                        "properties": EMAIL_SUMMARY_PROPERTIES
                     },
                     "g0"
                 ]),
@@ -589,8 +656,17 @@ impl JmapClient {
         Ok(resp.list)
     }
 
+    /// Fetch full content — bodies, attachment metadata, threading headers — for
+    /// many emails in a **single** `Email/get` call.
+    ///
+    /// IDs that don't exist are simply absent from the result; the caller decides
+    /// whether that is an error. This is the batch primitive behind the GraphQL
+    /// email DataLoader.
     #[instrument(skip(self))]
-    pub async fn get_email(&self, email_id: &str) -> Result<Email> {
+    pub async fn get_emails(&self, ids: &[String]) -> Result<Vec<Email>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
         let account_id = self.account_id()?;
 
         let responses = self
@@ -598,14 +674,8 @@ impl JmapClient {
                 "Email/get",
                 {
                     "accountId": account_id,
-                    "ids": [email_id],
-                    "properties": [
-                        "id", "blobId", "threadId", "mailboxIds", "keywords",
-                        "size", "receivedAt", "messageId", "inReplyTo", "references",
-                        "from", "to", "cc", "bcc", "replyTo", "subject", "sentAt",
-                        "preview", "hasAttachment", "textBody", "htmlBody", "attachments",
-                        "bodyValues"
-                    ],
+                    "ids": ids,
+                    "properties": EMAIL_FULL_PROPERTIES,
                     "fetchTextBodyValues": true,
                     "fetchHTMLBodyValues": true
                 },
@@ -613,37 +683,42 @@ impl JmapClient {
             ])])
             .await?;
 
-        let resp: GetResponseWithNotFound<Email> =
+        let resp: GetResponse<Email> =
             Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/get")?;
 
-        if !resp.not_found.is_empty() {
-            return Err(Error::EmailNotFound(email_id.into()));
-        }
+        Ok(resp.list)
+    }
 
-        resp.list
+    #[instrument(skip(self))]
+    pub async fn get_email(&self, email_id: &str) -> Result<Email> {
+        let ids = [email_id.to_string()];
+        self.get_emails(&ids)
+            .await?
             .into_iter()
             .next()
             .ok_or_else(|| Error::EmailNotFound(email_id.into()))
     }
 
-    /// Get all emails in a thread
+    /// Resolve thread IDs to their member email IDs in a single `Thread/get`.
+    ///
+    /// Threads that don't exist are absent from the map. This is the batch
+    /// primitive behind the GraphQL thread DataLoader.
     #[instrument(skip(self))]
-    pub async fn get_thread(&self, email_id: &str) -> Result<Vec<Email>> {
+    pub async fn thread_email_ids(
+        &self,
+        thread_ids: &[String],
+    ) -> Result<HashMap<String, Vec<String>>> {
+        if thread_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
         let account_id = self.account_id()?;
 
-        // First get the email to find its threadId
-        let email = self.get_email(email_id).await?;
-        let thread_id = email
-            .thread_id
-            .ok_or_else(|| Error::Config("Email has no thread ID".into()))?;
-
-        // Get the thread to find all email IDs
         let responses = self
             .request(vec![json!([
                 "Thread/get",
                 {
                     "accountId": account_id,
-                    "ids": [thread_id]
+                    "ids": thread_ids
                 },
                 "t0"
             ])])
@@ -651,42 +726,32 @@ impl JmapClient {
 
         #[derive(Deserialize)]
         struct Thread {
+            id: String,
             #[serde(rename = "emailIds")]
             email_ids: Vec<String>,
         }
 
-        let thread_resp: GetResponse<Thread> =
+        let resp: GetResponse<Thread> =
             Self::parse_response(responses.first().unwrap_or(&Value::Null), "Thread/get")?;
 
-        let thread = thread_resp
-            .list
-            .into_iter()
-            .next()
+        Ok(resp.list.into_iter().map(|t| (t.id, t.email_ids)).collect())
+    }
+
+    /// Get all emails in a thread, with full content.
+    #[instrument(skip(self))]
+    pub async fn get_thread(&self, email_id: &str) -> Result<Vec<Email>> {
+        let email = self.get_email(email_id).await?;
+        let thread_id = email
+            .thread_id
+            .ok_or_else(|| Error::Config("Email has no thread ID".into()))?;
+
+        let ids = self
+            .thread_email_ids(std::slice::from_ref(&thread_id))
+            .await?
+            .remove(&thread_id)
             .ok_or_else(|| Error::Config("Thread not found".into()))?;
 
-        // Now get all emails in the thread
-        let responses = self
-            .request(vec![json!([
-                "Email/get",
-                {
-                    "accountId": account_id,
-                    "ids": thread.email_ids,
-                    "properties": [
-                        "id", "threadId", "mailboxIds", "keywords",
-                        "size", "receivedAt", "from", "to", "cc",
-                        "subject", "preview", "hasAttachment", "textBody", "htmlBody", "bodyValues"
-                    ],
-                    "fetchTextBodyValues": true,
-                    "fetchHTMLBodyValues": true
-                },
-                "e0"
-            ])])
-            .await?;
-
-        let resp: GetResponse<Email> =
-            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/get")?;
-
-        Ok(resp.list)
+        self.get_emails(&ids).await
     }
 
     /// Search emails with full JMAP filter support
@@ -780,11 +845,7 @@ impl JmapClient {
                             "name": "Email/query",
                             "path": "/ids"
                         },
-                        "properties": [
-                            "id", "threadId", "mailboxIds", "keywords",
-                            "size", "receivedAt", "from", "to", "cc",
-                            "subject", "preview", "hasAttachment"
-                        ]
+                        "properties": EMAIL_SUMMARY_PROPERTIES
                     },
                     "g0"
                 ]),

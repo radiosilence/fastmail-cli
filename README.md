@@ -468,12 +468,19 @@ This replaces the previous 18 individual tools with a composable interface. The 
 
 ### Nested resolution
 
-Queries support deep nesting so the LLM can get everything it needs in one hit:
+The object graph is fully navigable, so the LLM can get everything it needs in one hit:
+
+```
+Mailbox ──emails──▶ Email ──attachments──▶ Attachment ──content──▶ AttachmentContent
+   ▲ │                │ │
+   │ └─parent/children┘ ├──thread──▶ Thread ──emails──▶ Email …
+   └────mailboxes───────┘
+```
 
 ```graphql
-# Email with full attachment content in a single query
+# Bodies and attachment content for a whole folder — one query, 3 API calls
 {
-  email(id: "abc123") {
+  emails(mailbox: "INBOX", limit: 25) {
     subject
     from { name email }
     textBody
@@ -486,21 +493,42 @@ Queries support deep nesting so the LLM can get everything it needs in one hit:
   }
 }
 
-# Entire thread with all emails and their attachments
+# Walk the graph: folder tree → emails → conversation → the folders they live in
 {
-  thread(emailId: "abc123") {
-    total
-    emails {
+  mailbox(name: "INBOX") {
+    name
+    children { name unreadEmails }
+    emails(limit: 5) {
       subject
-      from { email }
-      textBody
-      attachments { name size }
+      thread { total emails { subject textBody } }
+      mailboxes { name role }
     }
   }
 }
 ```
 
-Attachment `content` is lazily resolved — only fetched when the field is included in the query. Omit it for fast metadata-only listings.
+### Lazy fields and batching
+
+Nothing below a list is fetched eagerly, and every lazy field goes through a
+[DataLoader](https://github.com/graphql/dataloader): the resolvers for a list's
+elements run concurrently, and their fetches collapse into **one batched API
+call** rather than one per element.
+
+| Selection on `emails(limit: 25)` | JMAP calls |
+| -------------------------------- | ---------- |
+| `{ subject from { email } }` | 2 (`Email/query` + `Email/get`) |
+| `{ subject textBody }` | 3 (+1 batched `Email/get` for all 25 bodies) |
+| `{ subject textBody attachments { name } }` | 3 (same batch covers both) |
+| `{ … attachments { content { … } } }` | 3 + the blob downloads, issued concurrently |
+
+The naive shape — one detail call per email — would be 26. Loader caches are
+per request, so referencing the same email or mailbox twice in one query costs
+one fetch; nothing is retained between requests where it could go stale.
+
+Because the graph contains cycles (`Email.thread.emails`, `Email.mailboxes.emails`),
+queries are bounded by a max nesting depth of 15 and a complexity limit that
+prices nested lists by their page size. Realistic queries are unaffected;
+pathological fan-out is rejected before any API call is made.
 
 All operations are available as GraphQL queries and mutations: mailboxes, emails, search, threads, identities (with signatures), attachments (with text extraction and image resizing), contacts, masked email management, and send/reply/forward with the preview/confirm safety pattern.
 

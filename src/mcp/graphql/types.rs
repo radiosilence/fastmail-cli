@@ -1,39 +1,113 @@
 //! GraphQL type wrappers around existing model structs
+//!
+//! # Lazy resolution
+//!
+//! The object graph is fully navigable: mailboxes → emails → bodies →
+//! attachments → content, plus emails → thread → emails and emails → mailboxes.
+//! Nothing below the top-level list is fetched eagerly. A field that needs data
+//! the parent doesn't already hold goes through a DataLoader (see
+//! [`super::loaders`]), so sibling fields and list elements collapse into one
+//! batched API call instead of N sequential ones.
+
+use std::borrow::Cow;
 
 use async_graphql::{Context, Enum, Object, Result, SimpleObject};
 
+use super::loaders::{Blobs, Emails, Mailboxes, Threads, to_gql_error};
 use crate::carddav::{Contact, ContactEmail, ContactPhone};
 use crate::models::{Email, EmailAddress, Identity, Mailbox, MaskedEmail};
 
+/// Default page size for nested email lists, and the multiplier used when
+/// costing an unbounded nested list for the complexity limit.
+pub(crate) const DEFAULT_LIMIT: u32 = 25;
+pub(crate) const MAX_LIMIT: u32 = 100;
+
+pub(crate) fn clamp_limit(limit: Option<u32>) -> u32 {
+    limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT)
+}
+
 // ============ Output Types ============
 
-#[derive(SimpleObject)]
-#[graphql(name = "Mailbox")]
-pub struct GqlMailbox {
-    pub id: String,
-    pub name: String,
-    pub parent_id: Option<String>,
-    pub role: Option<String>,
-    pub total_emails: u32,
-    pub unread_emails: u32,
-    pub total_threads: u32,
-    pub unread_threads: u32,
-    pub sort_order: u32,
-}
+/// A mailbox (folder). Navigate into its contents with `emails`, or around the
+/// folder tree with `parent` / `children`.
+pub struct GqlMailbox(pub Mailbox);
 
 impl From<Mailbox> for GqlMailbox {
     fn from(m: Mailbox) -> Self {
-        Self {
-            id: m.id,
-            name: m.name,
-            parent_id: m.parent_id,
-            role: m.role,
-            total_emails: m.total_emails,
-            unread_emails: m.unread_emails,
-            total_threads: m.total_threads,
-            unread_threads: m.unread_threads,
-            sort_order: m.sort_order,
-        }
+        Self(m)
+    }
+}
+
+#[Object(name = "Mailbox")]
+impl GqlMailbox {
+    async fn id(&self) -> &str {
+        &self.0.id
+    }
+    async fn name(&self) -> &str {
+        &self.0.name
+    }
+    async fn parent_id(&self) -> Option<&str> {
+        self.0.parent_id.as_deref()
+    }
+    async fn role(&self) -> Option<&str> {
+        self.0.role.as_deref()
+    }
+    async fn total_emails(&self) -> u32 {
+        self.0.total_emails
+    }
+    async fn unread_emails(&self) -> u32 {
+        self.0.unread_emails
+    }
+    async fn total_threads(&self) -> u32 {
+        self.0.total_threads
+    }
+    async fn unread_threads(&self) -> u32 {
+        self.0.unread_threads
+    }
+    async fn sort_order(&self) -> u32 {
+        self.0.sort_order
+    }
+
+    /// The mailbox this one is nested under, if any.
+    async fn parent(&self, ctx: &Context<'_>) -> Result<Option<GqlMailbox>> {
+        let Some(parent_id) = self.0.parent_id.clone() else {
+            return Ok(None);
+        };
+        let loader = ctx.data::<Mailboxes>()?;
+        let parent = loader
+            .load_one(parent_id)
+            .await
+            .map_err(to_gql_error)?
+            .map(GqlMailbox::from);
+        Ok(parent)
+    }
+
+    /// Mailboxes nested directly under this one.
+    async fn children(&self, ctx: &Context<'_>) -> Result<Vec<GqlMailbox>> {
+        let client = ctx.data::<super::SharedClient>()?;
+        let mut client = client.lock().await;
+        let mailboxes = client.list_mailboxes().await?;
+        Ok(mailboxes
+            .into_iter()
+            .filter(|m| m.parent_id.as_deref() == Some(self.0.id.as_str()))
+            .map(GqlMailbox::from)
+            .collect())
+    }
+
+    /// Emails in this mailbox, newest first. Bodies and attachments on the
+    /// returned emails are resolved lazily and in one batch.
+    #[graphql(complexity = "clamp_limit(limit) as usize * child_complexity")]
+    async fn emails(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Maximum number of emails to return (default 25, max 100)")] limit: Option<
+            u32,
+        >,
+    ) -> Result<Vec<GqlEmail>> {
+        let client = ctx.data::<super::SharedClient>()?;
+        let client = client.lock().await;
+        let emails = client.list_emails(&self.0.id, clamp_limit(limit)).await?;
+        Ok(emails.into_iter().map(GqlEmail::summary).collect())
     }
 }
 
@@ -61,158 +135,194 @@ pub(crate) fn convert_addrs(addrs: Option<Vec<EmailAddress>>) -> Vec<GqlEmailAdd
         .collect()
 }
 
-/// Compact email summary returned by list/search queries
-#[derive(SimpleObject)]
-#[graphql(name = "EmailSummary")]
-pub struct GqlEmailSummary {
-    pub id: String,
-    pub thread_id: Option<String>,
-    pub subject: Option<String>,
-    #[graphql(name = "from")]
-    pub sender: Vec<GqlEmailAddress>,
-    #[graphql(name = "to")]
-    pub recipients: Vec<GqlEmailAddress>,
-    #[graphql(name = "cc")]
-    pub cc_recipients: Vec<GqlEmailAddress>,
-    pub received_at: Option<String>,
-    pub preview: Option<String>,
-    pub has_attachment: bool,
-    pub is_unread: bool,
-    pub is_flagged: bool,
-    pub size: u64,
+/// Build the attachment list for an email that has already been fully fetched.
+pub(crate) fn attachments_of(email: &Email) -> Vec<GqlAttachment> {
+    email
+        .attachments
+        .as_ref()
+        .map(|atts| {
+            atts.iter()
+                .filter(|a| a.blob_id.is_some())
+                .map(|a| GqlAttachment {
+                    blob_id: a.blob_id.clone().unwrap_or_default(),
+                    name: a.name.clone(),
+                    content_type: a.content_type.clone(),
+                    size: a.size,
+                    disposition: a.disposition.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
-impl From<Email> for GqlEmailSummary {
-    fn from(e: Email) -> Self {
-        let is_unread = e.is_unread();
-        let is_flagged = e.is_flagged();
-        Self {
-            id: e.id,
-            thread_id: e.thread_id,
-            subject: e.subject,
-            sender: convert_addrs(e.from),
-            recipients: convert_addrs(e.to),
-            cc_recipients: convert_addrs(e.cc),
-            received_at: e.received_at,
-            preview: e.preview,
-            has_attachment: e.has_attachment,
-            is_unread,
-            is_flagged,
-            size: e.size,
-        }
-    }
+/// An email.
+///
+/// Lists (`emails`, `searchEmails`, `Mailbox.emails`) return these carrying only
+/// the cheap header fields. Selecting `textBody`, `htmlBody`, `attachments` or
+/// the threading headers triggers a batched fetch of the full record for every
+/// email in the list at once — one extra API call, not one per email.
+pub struct GqlEmail {
+    inner: Email,
+    /// Whether `inner` came from a full fetch (bodies + attachment metadata),
+    /// as opposed to a list/search result carrying headers only.
+    complete: bool,
 }
-
-/// Full email with body content and nested attachment resolution
-pub struct GqlEmail(pub Email);
 
 impl GqlEmail {
-    /// Build attachment list from the inner email — shared by the nested resolver
-    /// and the top-level `attachments`/`attachment` queries.
-    pub fn make_attachments(&self) -> Vec<GqlAttachment> {
-        self.0
-            .attachments
-            .as_ref()
-            .map(|atts| {
-                atts.iter()
-                    .filter(|a| a.blob_id.is_some())
-                    .map(|a| GqlAttachment {
-                        blob_id: a.blob_id.clone().unwrap_or_default(),
-                        name: a.name.clone(),
-                        content_type: a.content_type.clone(),
-                        size: a.size,
-                        disposition: a.disposition.clone(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+    /// Wrap an email fetched with the full property set.
+    pub fn full(email: Email) -> Self {
+        Self {
+            inner: email,
+            complete: true,
+        }
+    }
+
+    /// Wrap a list/search result. Body and attachment fields on it resolve lazily.
+    pub fn summary(email: Email) -> Self {
+        Self {
+            inner: email,
+            complete: false,
+        }
+    }
+
+    /// The full record: borrowed when we already have it, otherwise batch-loaded.
+    async fn detail<'a>(&'a self, ctx: &Context<'_>) -> Result<Cow<'a, Email>> {
+        if self.complete {
+            return Ok(Cow::Borrowed(&self.inner));
+        }
+        let loader = ctx.data::<Emails>()?;
+        let full = loader
+            .load_one(self.inner.id.clone())
+            .await
+            .map_err(to_gql_error)?
+            .ok_or_else(|| {
+                async_graphql::Error::new(format!("Email {} no longer exists", self.inner.id))
+            })?;
+        Ok(Cow::Owned(full))
     }
 }
 
 #[Object(name = "Email")]
 impl GqlEmail {
     async fn id(&self) -> &str {
-        &self.0.id
+        &self.inner.id
     }
     async fn blob_id(&self) -> Option<&str> {
-        self.0.blob_id.as_deref()
+        self.inner.blob_id.as_deref()
     }
     async fn thread_id(&self) -> Option<&str> {
-        self.0.thread_id.as_deref()
+        self.inner.thread_id.as_deref()
     }
     async fn subject(&self) -> Option<&str> {
-        self.0.subject.as_deref()
+        self.inner.subject.as_deref()
     }
     async fn from(&self) -> Vec<GqlEmailAddress> {
-        convert_addrs(self.0.from.clone())
+        convert_addrs(self.inner.from.clone())
     }
     async fn to(&self) -> Vec<GqlEmailAddress> {
-        convert_addrs(self.0.to.clone())
+        convert_addrs(self.inner.to.clone())
     }
     async fn cc(&self) -> Vec<GqlEmailAddress> {
-        convert_addrs(self.0.cc.clone())
+        convert_addrs(self.inner.cc.clone())
     }
     async fn bcc(&self) -> Vec<GqlEmailAddress> {
-        convert_addrs(self.0.bcc.clone())
+        convert_addrs(self.inner.bcc.clone())
     }
     async fn reply_to(&self) -> Vec<GqlEmailAddress> {
-        convert_addrs(self.0.reply_to.clone())
+        convert_addrs(self.inner.reply_to.clone())
     }
     async fn received_at(&self) -> Option<&str> {
-        self.0.received_at.as_deref()
+        self.inner.received_at.as_deref()
     }
     async fn sent_at(&self) -> Option<&str> {
-        self.0.sent_at.as_deref()
+        self.inner.sent_at.as_deref()
     }
     async fn preview(&self) -> Option<&str> {
-        self.0.preview.as_deref()
+        self.inner.preview.as_deref()
     }
     async fn has_attachment(&self) -> bool {
-        self.0.has_attachment
+        self.inner.has_attachment
     }
     async fn is_unread(&self) -> bool {
-        self.0.is_unread()
+        self.inner.is_unread()
     }
     async fn is_flagged(&self) -> bool {
-        self.0.is_flagged()
+        self.inner.is_flagged()
     }
     async fn is_draft(&self) -> bool {
-        self.0.is_draft()
+        self.inner.is_draft()
     }
     async fn size(&self) -> u64 {
-        self.0.size
+        self.inner.size
     }
-    async fn message_id(&self) -> Option<&Vec<String>> {
-        self.0.message_id.as_ref()
+
+    /// RFC 5322 Message-ID header. Lazily fetched.
+    async fn message_id(&self, ctx: &Context<'_>) -> Result<Option<Vec<String>>> {
+        Ok(self.detail(ctx).await?.message_id.clone())
     }
-    async fn in_reply_to(&self) -> Option<&Vec<String>> {
-        self.0.in_reply_to.as_ref()
+    /// RFC 5322 In-Reply-To header. Lazily fetched.
+    async fn in_reply_to(&self, ctx: &Context<'_>) -> Result<Option<Vec<String>>> {
+        Ok(self.detail(ctx).await?.in_reply_to.clone())
     }
-    async fn references(&self) -> Option<&Vec<String>> {
-        self.0.references.as_ref()
+    /// RFC 5322 References header. Lazily fetched.
+    async fn references(&self, ctx: &Context<'_>) -> Result<Option<Vec<String>>> {
+        Ok(self.detail(ctx).await?.references.clone())
     }
-    /// Plain text body content
-    async fn text_body(&self) -> Option<&str> {
-        self.0.text_content()
+
+    /// Plain text body content. Lazily fetched — selecting it on a list of
+    /// emails costs one batched call for the whole list.
+    async fn text_body(&self, ctx: &Context<'_>) -> Result<Option<String>> {
+        let email = self.detail(ctx).await?;
+        Ok(email.text_content().map(str::to_owned))
     }
-    /// HTML body content
-    async fn html_body(&self) -> Option<&str> {
-        self.0.html_content()
+
+    /// HTML body content. Lazily fetched — selecting it on a list of emails
+    /// costs one batched call for the whole list.
+    async fn html_body(&self, ctx: &Context<'_>) -> Result<Option<String>> {
+        let email = self.detail(ctx).await?;
+        Ok(email.html_content().map(str::to_owned))
     }
-    /// Attachments with metadata. Select `content` on an attachment to fetch its data (images
-    /// are base64-encoded, documents have text extracted). Content is lazily resolved — only
-    /// fetched when you include it in your query.
-    async fn attachments(&self) -> Vec<GqlAttachment> {
-        self.make_attachments()
+
+    /// Attachments with metadata. Lazily fetched. Select `content` on an
+    /// attachment to also download its data (images are base64-encoded,
+    /// documents have text extracted).
+    #[graphql(complexity = "5 * child_complexity")]
+    async fn attachments(&self, ctx: &Context<'_>) -> Result<Vec<GqlAttachment>> {
+        // Emails flagged as having no attachment need no fetch at all.
+        if !self.inner.has_attachment && !self.complete {
+            return Ok(Vec::new());
+        }
+        let email = self.detail(ctx).await?;
+        Ok(attachments_of(&email))
     }
+
     /// Mailbox IDs this email belongs to
     async fn mailbox_ids(&self) -> Vec<String> {
-        self.0.mailbox_ids.keys().cloned().collect()
+        self.inner.mailbox_ids.keys().cloned().collect()
+    }
+
+    /// The mailboxes this email belongs to, resolved from `mailboxIds`.
+    async fn mailboxes(&self, ctx: &Context<'_>) -> Result<Vec<GqlMailbox>> {
+        let loader = ctx.data::<Mailboxes>()?;
+        let ids: Vec<String> = self.inner.mailbox_ids.keys().cloned().collect();
+        let found = loader.load_many(ids).await.map_err(to_gql_error)?;
+        let mut mailboxes: Vec<Mailbox> = found.into_values().collect();
+        mailboxes.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(mailboxes.into_iter().map(GqlMailbox::from).collect())
     }
 
     /// Keywords (flags) on this email: $seen, $flagged, $draft, $junk, etc.
     async fn keywords(&self) -> Vec<String> {
-        self.0.keywords.keys().cloned().collect()
+        self.inner.keywords.keys().cloned().collect()
+    }
+
+    /// The conversation this email belongs to, with every message in it.
+    #[graphql(complexity = "10 * child_complexity")]
+    async fn thread(&self, ctx: &Context<'_>) -> Result<Option<GqlThread>> {
+        let Some(thread_id) = self.inner.thread_id.clone() else {
+            return Ok(None);
+        };
+        GqlThread::load(ctx, thread_id).await.map(Some)
     }
 }
 
@@ -245,10 +355,10 @@ impl GqlAttachment {
         self.disposition.as_deref()
     }
     /// Fetch the actual attachment content. Images are resized and base64-encoded,
-    /// documents have text extracted. Only fetched when this field is included in the query.
+    /// documents have text extracted. Only fetched when this field is included in
+    /// the query; downloads for sibling attachments are issued concurrently.
     async fn content(&self, ctx: &Context<'_>) -> Result<GqlAttachmentContent> {
-        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let client = client.lock().await;
+        let loader = ctx.data::<Blobs>()?;
 
         let content_type = self
             .content_type
@@ -256,7 +366,11 @@ impl GqlAttachment {
             .unwrap_or("application/octet-stream");
         let name = self.name.as_deref().unwrap_or("attachment");
 
-        let data = client.download_blob(&self.blob_id).await?;
+        let data = loader
+            .load_one(self.blob_id.clone())
+            .await
+            .map_err(to_gql_error)?
+            .ok_or_else(|| async_graphql::Error::new(format!("Blob {} not found", self.blob_id)))?;
 
         let mime = if crate::util::is_image(content_type, name) {
             crate::util::infer_image_mime(name).unwrap_or(content_type)
@@ -583,20 +697,47 @@ pub struct GqlStatus {
     pub error: Option<String>,
 }
 
-/// Thread result containing all emails in a conversation with full content.
-/// Each email has lazy attachment content resolution — only fetched when queried.
+/// A conversation: every email sharing a thread ID, oldest first. Each email is
+/// fully fetched, so bodies and attachment metadata are already present.
 pub struct GqlThread {
+    pub id: Option<String>,
     pub emails: Vec<Email>,
-    pub total: usize,
+}
+
+impl GqlThread {
+    /// Load a thread through the loaders: one batched `Thread/get` for the
+    /// member IDs, then one batched `Email/get` for their content.
+    pub async fn load(ctx: &Context<'_>, thread_id: String) -> Result<Self> {
+        let threads = ctx.data::<Threads>()?;
+        let emails = ctx.data::<Emails>()?;
+
+        let ids = threads
+            .load_one(thread_id.clone())
+            .await
+            .map_err(to_gql_error)?
+            .unwrap_or_default();
+
+        let loaded = emails.load_many(ids).await.map_err(to_gql_error)?;
+        let mut emails: Vec<Email> = loaded.into_values().collect();
+        emails.sort_by(|a, b| a.received_at.cmp(&b.received_at));
+
+        Ok(Self {
+            id: Some(thread_id),
+            emails,
+        })
+    }
 }
 
 #[Object(name = "Thread")]
 impl GqlThread {
+    async fn id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
     async fn emails(&self) -> Vec<GqlEmail> {
-        self.emails.iter().cloned().map(GqlEmail).collect()
+        self.emails.iter().cloned().map(GqlEmail::full).collect()
     }
     async fn total(&self) -> usize {
-        self.total
+        self.emails.len()
     }
 }
 
