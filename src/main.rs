@@ -33,7 +33,7 @@ fn build_compose_params<'a>(
 }
 
 #[derive(Parser)]
-#[command(name = "fastmail-cli")]
+#[command(name = "fastmail")]
 #[command(version, about = "CLI for Fastmail's JMAP API", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -680,7 +680,7 @@ async fn main() {
             generate(
                 shell,
                 &mut Cli::command(),
-                "fastmail-cli",
+                "fastmail",
                 &mut io::stdout(),
             );
             return;

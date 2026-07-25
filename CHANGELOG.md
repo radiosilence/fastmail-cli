@@ -1,5 +1,19 @@
 # Changelog
 
+## [3.2.0] - 2026-07-25
+
+### Changed
+
+- **The binary is now `fastmail`, not `fastmail-cli`.** The `-cli` suffix only
+  ever disambiguated the crate from the service; on the command line it was
+  noise you typed dozens of times a day. The package, repository and release
+  asset names are unchanged, so `cargo install` and the crates.io identity stay
+  put — only the installed executable is renamed. Two consequences: shell
+  completions must be regenerated, and `mise use -g github:radiosilence/fastmail-cli`
+  needs `[exe=fastmail]` appended, since ubi otherwise looks for a binary named
+  after the repository. The config directory stays at `~/.config/fastmail-cli/`
+  — nobody has to re-authenticate.
+
 ## [3.1.3] - 2026-07-25
 
 ### Changed
@@ -21,7 +35,7 @@
   `attachments { nodes { text } }` — and nothing compiles a doc comment, so they
   went unnoticed. The snippets are gone rather than corrected: they restated
   structure the SDL already describes, which is precisely why they could rot
-  without breaking anything. The prose that the SDL *cannot* express — that
+  without breaking anything. The prose that the SDL _cannot_ express — that
   scalar filter fields AND together, that attachment payloads resolve lazily,
   what each field costs — is what stays. A test now fails if the schema's prose
   names a construct the schema no longer has.
@@ -104,7 +118,7 @@
   header still wins where present, and the fallback is best-effort — a hosted
   deployment ships no config or `FASTMAIL_API_TOKEN`, so it stays absent there
   and per-request auth is unchanged. Note the consequence: binding a non-loopback
-  address on a machine that *does* have credentials now serves them to anything
+  address on a machine that _does_ have credentials now serves them to anything
   that can reach the port.
 
 - **Full nesting across the GraphQL graph.** Every logical edge is now
@@ -158,7 +172,7 @@
   `keyword` — and those that reject one — are validated before any API call.
 - **Counts without fetching.** `totalCount` maps to JMAP's `calculateTotal`,
   which costs the server real work, so it is requested only when the field is
-  selected. A query selecting *only* `totalCount` issues one `Email/query` and
+  selected. A query selecting _only_ `totalCount` issues one `Email/query` and
   fetches no emails at all — `{ emails(filter: {unread: true}) { totalCount } }`
   answers "how many?" without transferring a single message.
 - **`collapseThreads`** on every email list, for a conversation view.

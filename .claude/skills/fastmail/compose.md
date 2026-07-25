@@ -1,6 +1,6 @@
 ---
 name: fastmail/compose
-description: fastmail-cli send, reply, forward, draft — flags, identities, and compose patterns
+description: fastmail send, reply, forward, draft — flags, identities, and compose patterns
 ---
 
 # fastmail-cli — Compose (Send / Reply / Forward / Draft)
@@ -10,7 +10,7 @@ description: fastmail-cli send, reply, forward, draft — flags, identities, and
 Before composing, check available sender identities:
 
 ```bash
-fastmail-cli list identities
+fastmail list identities
 ```
 
 Use the identity email string with `--from` on any compose command.
@@ -20,7 +20,7 @@ Use the identity email string with `--from` on any compose command.
 ## Send
 
 ```bash
-fastmail-cli send \
+fastmail send \
   --to "alice@example.com,bob@example.com" \
   --subject "Subject line" \
   --body "Plain text body" \
@@ -37,7 +37,7 @@ fastmail-cli send \
 ## Reply
 
 ```bash
-fastmail-cli reply EMAIL_ID \
+fastmail reply EMAIL_ID \
   --body "Reply text" \
   [--all] \
   [--cc "extra@example.com"] \
@@ -53,7 +53,7 @@ fastmail-cli reply EMAIL_ID \
 ## Forward
 
 ```bash
-fastmail-cli forward EMAIL_ID \
+fastmail forward EMAIL_ID \
   --to "recipient@example.com" \
   [--body "Here's that email I mentioned..."] \
   [--cc "cc@example.com"] \
@@ -70,20 +70,20 @@ fastmail-cli forward EMAIL_ID \
 
 ```bash
 # Reply from a specific alias
-fastmail-cli list identities
-fastmail-cli reply abc123 --body "On it." --from work-alias@mydomain.com
+fastmail list identities
+fastmail reply abc123 --body "On it." --from work-alias@mydomain.com
 
 # Reply-all and BCC someone for records
-fastmail-cli reply abc123 --body "Thanks all." --all --bcc archive@mydomain.com
+fastmail reply abc123 --body "Thanks all." --all --bcc archive@mydomain.com
 
 # Save a draft to review before sending
-fastmail-cli send --to x@y.com --subject "Careful email" --body "..." --draft
+fastmail send --to x@y.com --subject "Careful email" --body "..." --draft
 
 # Forward with context note
-fastmail-cli forward abc123 --to manager@company.com --body "FYI, see below."
+fastmail forward abc123 --to manager@company.com --body "FYI, see below."
 
 # Quick reply inline
-fastmail-cli reply $(fastmail-cli search --from boss@co.com --unread | jq -r '.data[0].id') \
+fastmail reply $(fastmail search --from boss@co.com --unread | jq -r '.data[0].id') \
   --body "Done."
 ```
 

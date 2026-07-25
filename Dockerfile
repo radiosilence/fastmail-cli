@@ -14,7 +14,7 @@ RUN cargo build --release --locked
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=build /app/target/release/fastmail-cli /usr/local/bin/fastmail-cli
+COPY --from=build /app/target/release/fastmail /usr/local/bin/fastmail
 EXPOSE 8080
-ENTRYPOINT ["fastmail-cli"]
+ENTRYPOINT ["fastmail"]
 CMD ["mcp", "--http", "0.0.0.0:8080"]

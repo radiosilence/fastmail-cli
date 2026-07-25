@@ -1,6 +1,6 @@
 ---
 name: fastmail/masked
-description: fastmail-cli masked — create, list, enable, disable, and delete masked email addresses
+description: fastmail masked — create, list, enable, disable, and delete masked email addresses
 ---
 
 # fastmail-cli — Masked Email
@@ -10,21 +10,21 @@ Masked emails are Fastmail's disposable address feature — each masked address 
 ## Commands
 
 ```bash
-fastmail-cli masked list
-fastmail-cli masked create [--domain URL] [--description STR] [--prefix STR]
-fastmail-cli masked enable ID
-fastmail-cli masked disable ID
-fastmail-cli masked delete ID [-y]
+fastmail masked list
+fastmail masked create [--domain URL] [--description STR] [--prefix STR]
+fastmail masked enable ID
+fastmail masked disable ID
+fastmail masked delete ID [-y]
 ```
 
 ## Create a Masked Email
 
 ```bash
 # Basic (auto-generated address)
-fastmail-cli masked create
+fastmail masked create
 
 # With context metadata
-fastmail-cli masked create \
+fastmail masked create \
   --domain "https://example.com" \
   --description "Example site signup" \
   --prefix "example_shop"
@@ -38,30 +38,30 @@ fastmail-cli masked create \
 
 ```bash
 # See all masked addresses with their IDs and status
-fastmail-cli masked list
+fastmail masked list
 
 # Temporarily stop forwarding (keep address, bounce/drop inbound)
-fastmail-cli masked disable MASKED_ID
+fastmail masked disable MASKED_ID
 
 # Re-enable
-fastmail-cli masked enable MASKED_ID
+fastmail masked enable MASKED_ID
 
 # Permanently delete
-fastmail-cli masked delete MASKED_ID
-fastmail-cli masked delete MASKED_ID -y   # skip confirmation
+fastmail masked delete MASKED_ID
+fastmail masked delete MASKED_ID -y   # skip confirmation
 ```
 
 ## Typical Patterns
 
 ```bash
 # Create a throwaway for a signup
-fastmail-cli masked create --description "Newsletter signup" --prefix "news_acme"
+fastmail masked create --description "Newsletter signup" --prefix "news_acme"
 
 # Getting spam? Disable immediately
-fastmail-cli masked list  # find the ID
-fastmail-cli masked disable abc-masked-id
+fastmail masked list  # find the ID
+fastmail masked disable abc-masked-id
 
 # Clean up old ones
-fastmail-cli masked list | jq '.data[] | select(.description | test("old")) | .id'
-fastmail-cli masked delete OLD_ID -y
+fastmail masked list | jq '.data[] | select(.description | test("old")) | .id'
+fastmail masked delete OLD_ID -y
 ```
