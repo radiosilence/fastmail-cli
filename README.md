@@ -60,7 +60,7 @@ its current hosted tool set and may grow.)
 
 ```bash
 # Add to mise config
-mise use -g github:radiosilence/fastmail-cli
+mise use -g "github:radiosilence/fastmail-cli[exe=fastmail]"
 ```
 
 #### From Source
@@ -76,13 +76,13 @@ cargo install --git https://github.com/radiosilence/fastmail-cli
 
 ```bash
 # interactive — paste the token at the prompt
-fastmail-cli auth
+fastmail auth
 
 # non-interactive — pipe from a password manager, file, or env var
-echo "$FASTMAIL_TOKEN" | fastmail-cli auth
+echo "$FASTMAIL_TOKEN" | fastmail auth
 ```
 
-The positional form `fastmail-cli auth YOUR_TOKEN` still works for backward compatibility, but the stdin form is preferred.
+The positional form `fastmail auth YOUR_TOKEN` still works for backward compatibility, but the stdin form is preferred.
 
 Token is stored in `~/.config/fastmail-cli/config.toml` with `0600` permissions (directory `0700`). The file is written atomically via rename, and the path is refused if it's a symlink.
 
@@ -118,23 +118,23 @@ All output is JSON for easy scripting with `jq`.
 ### List Mailboxes
 
 ```bash
-fastmail-cli list mailboxes
+fastmail list mailboxes
 ```
 
 ### List Emails
 
 ```bash
 # Default: INBOX, 50 emails
-fastmail-cli list emails
+fastmail list emails
 
 # Specific mailbox and limit
-fastmail-cli list emails --mailbox Sent --limit 10
+fastmail list emails --mailbox Sent --limit 10
 ```
 
 ### Get Email Details
 
 ```bash
-fastmail-cli get EMAIL_ID
+fastmail get EMAIL_ID
 ```
 
 ### Search
@@ -143,28 +143,28 @@ Search uses JMAP filter flags (all filters are ANDed together):
 
 ```bash
 # Full-text search
-fastmail-cli search --text "meeting notes"
+fastmail search --text "meeting notes"
 
 # Filter by header fields
-fastmail-cli search --from "alice@example.com"
-fastmail-cli search --to "bob" --subject "project"
+fastmail search --from "alice@example.com"
+fastmail search --to "bob" --subject "project"
 
 # Filter by mailbox
-fastmail-cli search --mailbox Sent --limit 10
+fastmail search --mailbox Sent --limit 10
 
 # Attachments and size
-fastmail-cli search --has-attachment
-fastmail-cli search --min-size 1000000  # > 1MB
+fastmail search --has-attachment
+fastmail search --min-size 1000000  # > 1MB
 
 # Date range (ISO 8601)
-fastmail-cli search --after 2024-01-01 --before 2024-12-31
+fastmail search --after 2024-01-01 --before 2024-12-31
 
 # Status filters
-fastmail-cli search --unread
-fastmail-cli search --flagged
+fastmail search --unread
+fastmail search --flagged
 
 # Combine filters
-fastmail-cli search --from "boss" --has-attachment --after 2024-06-01 --limit 20
+fastmail search --from "boss" --has-attachment --after 2024-06-01 --limit 20
 ```
 
 Available flags: `--text`, `--from`, `--to`, `--cc`, `--bcc`, `--subject`, `--body`, `--mailbox`, `--has-attachment`, `--min-size`, `--max-size`, `--before`, `--after`, `--unread`, `--flagged`
@@ -174,19 +174,19 @@ Available flags: `--text`, `--from`, `--to`, `--cc`, `--bcc`, `--subject`, `--bo
 View available sender identities (useful for `--from`):
 
 ```bash
-fastmail-cli list identities
+fastmail list identities
 ```
 
 ### Send Email
 
 ```bash
-fastmail-cli send \
+fastmail send \
   --to "alice@example.com, bob@example.com" \
   --subject "Hello" \
   --body "Message body here"
 
 # With CC/BCC
-fastmail-cli send \
+fastmail send \
   --to "alice@example.com" \
   --cc "bob@example.com" \
   --bcc "secret@example.com" \
@@ -194,27 +194,27 @@ fastmail-cli send \
   --body "Message"
 
 # Send from a specific identity/alias
-fastmail-cli send \
+fastmail send \
   --to "alice@example.com" \
   --from "alias@yourdomain.com" \
   --subject "Hello" \
   --body "Message"
 
 # HTML email body (inline or from file)
-fastmail-cli send \
+fastmail send \
   --to "alice@example.com" \
   --subject "Newsletter" \
   --body "Plain text fallback" \
   --html-body "<h1>Hello</h1><p>Rich content here</p>"
 
-fastmail-cli send \
+fastmail send \
   --to "alice@example.com" \
   --subject "Report" \
   --body "See attached" \
   --html-file ./email.html
 
 # File attachments (repeatable)
-fastmail-cli send \
+fastmail send \
   --to "alice@example.com" \
   --subject "Documents" \
   --body "Please review" \
@@ -224,44 +224,44 @@ fastmail-cli send \
 ### Move Email
 
 ```bash
-fastmail-cli move EMAIL_ID --to Archive
-fastmail-cli move EMAIL_ID --to Trash
+fastmail move EMAIL_ID --to Archive
+fastmail move EMAIL_ID --to Trash
 ```
 
 ### Mark as Spam
 
 ```bash
 # Requires confirmation
-fastmail-cli spam EMAIL_ID
+fastmail spam EMAIL_ID
 
 # Skip confirmation
-fastmail-cli spam EMAIL_ID -y
+fastmail spam EMAIL_ID -y
 ```
 
 ### Mark as Read/Unread
 
 ```bash
 # Mark as read
-fastmail-cli mark-read EMAIL_ID
+fastmail mark-read EMAIL_ID
 
 # Mark as unread
-fastmail-cli mark-read EMAIL_ID --unread
+fastmail mark-read EMAIL_ID --unread
 ```
 
 ### Download Attachments
 
 ```bash
 # Download to current directory
-fastmail-cli download EMAIL_ID
+fastmail download EMAIL_ID
 
 # Download to specific directory
-fastmail-cli download EMAIL_ID --output ~/Downloads
+fastmail download EMAIL_ID --output ~/Downloads
 
 # Extract text content as JSON (PDF, DOCX, DOC, TXT)
-fastmail-cli download EMAIL_ID --format json
+fastmail download EMAIL_ID --format json
 
 # Resize images to max 500KB
-fastmail-cli download EMAIL_ID --max-size 500K
+fastmail download EMAIL_ID --max-size 500K
 ```
 
 Text extraction uses [kreuzberg](https://github.com/kreuzberg-dev/kreuzberg) and supports 56 formats:
@@ -280,27 +280,27 @@ Text extraction uses [kreuzberg](https://github.com/kreuzberg-dev/kreuzberg) and
 
 ```bash
 # Reply to sender only
-fastmail-cli reply EMAIL_ID --body "Thanks for your message"
+fastmail reply EMAIL_ID --body "Thanks for your message"
 
 # Reply all
-fastmail-cli reply EMAIL_ID --body "Thanks everyone" --all
+fastmail reply EMAIL_ID --body "Thanks everyone" --all
 
 # Reply with additional CC/BCC
-fastmail-cli reply EMAIL_ID --body "Response" --cc "boss@example.com"
+fastmail reply EMAIL_ID --body "Response" --cc "boss@example.com"
 
 # Reply from a specific identity
-fastmail-cli reply EMAIL_ID --body "Thanks" --from "alias@yourdomain.com"
+fastmail reply EMAIL_ID --body "Thanks" --from "alias@yourdomain.com"
 ```
 
 ### Forward Email
 
 ```bash
-fastmail-cli forward EMAIL_ID \
+fastmail forward EMAIL_ID \
   --to "colleague@example.com" \
   --body "FYI - see below"
 
 # Forward from a specific identity
-fastmail-cli forward EMAIL_ID \
+fastmail forward EMAIL_ID \
   --to "colleague@example.com" \
   --from "alias@yourdomain.com" \
   --body "FYI"
@@ -310,13 +310,13 @@ fastmail-cli forward EMAIL_ID \
 
 ```bash
 # Bash
-fastmail-cli completions bash >> ~/.bashrc
+fastmail completions bash >> ~/.bashrc
 
 # Zsh
-fastmail-cli completions zsh >> ~/.zshrc
+fastmail completions zsh >> ~/.zshrc
 
 # Fish
-fastmail-cli completions fish > ~/.config/fish/completions/fastmail-cli.fish
+fastmail completions fish > ~/.config/fish/completions/fastmail.fish
 ```
 
 ### Contacts
@@ -329,19 +329,19 @@ export FASTMAIL_USERNAME="you@fastmail.com"
 export FASTMAIL_APP_PASSWORD="your-app-password"
 
 # List all contacts
-fastmail-cli contacts list
+fastmail contacts list
 
 # Search by name, email, or organization
-fastmail-cli contacts search "alice"
+fastmail contacts search "alice"
 
 # Create a new contact
-fastmail-cli contacts create --name "Jane Doe" --email "jane@example.com" --organization "Acme Corp"
+fastmail contacts create --name "Jane Doe" --email "jane@example.com" --organization "Acme Corp"
 
 # Update an existing contact (only provided fields are changed)
-fastmail-cli contacts update CONTACT_ID --organization "New Corp" --title "CEO"
+fastmail contacts update CONTACT_ID --organization "New Corp" --title "CEO"
 
 # Delete a contact (requires -y confirmation)
-fastmail-cli contacts delete CONTACT_ID -y
+fastmail contacts delete CONTACT_ID -y
 ```
 
 Generate an app password at [Fastmail Settings > Privacy & Security > Integrations > App passwords](https://app.fastmail.com/settings/security/devicekeys).
@@ -352,20 +352,20 @@ Create disposable email addresses for signups. Requires Fastmail's masked email 
 
 ```bash
 # List all masked emails
-fastmail-cli masked list
+fastmail masked list
 
 # Create a new masked email
-fastmail-cli masked create --domain "https://example.com" --description "Example Site"
+fastmail masked create --domain "https://example.com" --description "Example Site"
 
 # Create with custom prefix
-fastmail-cli masked create --prefix "shopping" --description "Shopping sites"
+fastmail masked create --prefix "shopping" --description "Shopping sites"
 
 # Enable/disable a masked email
-fastmail-cli masked enable MASKED_EMAIL_ID
-fastmail-cli masked disable MASKED_EMAIL_ID
+fastmail masked enable MASKED_EMAIL_ID
+fastmail masked disable MASKED_EMAIL_ID
 
 # Delete (requires confirmation)
-fastmail-cli masked delete MASKED_EMAIL_ID -y
+fastmail masked delete MASKED_EMAIL_ID -y
 ```
 
 ## Output Format
@@ -385,13 +385,13 @@ All commands output JSON with this structure:
 
 ```bash
 # Get unread count for INBOX
-fastmail-cli list mailboxes | jq '.data[] | select(.role == "inbox") | .unreadEmails'
+fastmail list mailboxes | jq '.data[] | select(.role == "inbox") | .unreadEmails'
 
 # List email subjects
-fastmail-cli list emails | jq '.data.emails[].subject'
+fastmail list emails | jq '.data.emails[].subject'
 
 # Get email body
-fastmail-cli get EMAIL_ID | jq -r '.data.bodyValues | to_entries[0].value.value'
+fastmail get EMAIL_ID | jq -r '.data.bodyValues | to_entries[0].value.value'
 ```
 
 ## Claude Code Skills
@@ -417,7 +417,7 @@ Skills are in `.claude/skills/` in this repo. Each one includes concrete example
 Run as an MCP server for use with Claude Desktop or other MCP clients:
 
 ```bash
-fastmail-cli mcp
+fastmail mcp
 ```
 
 Configure in Claude Desktop's `claude_desktop_config.json`:
@@ -427,7 +427,7 @@ Configure in Claude Desktop's `claude_desktop_config.json`:
   "mcpServers": {
     "fastmail": {
       "command": "mise",
-      "args": ["x", "--", "fastmail-cli", "mcp"],
+      "args": ["x", "--", "fastmail", "mcp"],
       "env": {
         "FASTMAIL_API_TOKEN": "your-token-here",
         "FASTMAIL_USERNAME": "you@fastmail.com",
@@ -446,10 +446,10 @@ Username and app password are optional - only needed for contact search (CardDAV
 (default `127.0.0.1:8080`). Three surfaces can share the one port, each opt-in:
 
 ```bash
-fastmail-cli mcp --http                        # /mcp
-fastmail-cli mcp --graphql                     # + /graphql
-fastmail-cli mcp --browser                     # + GraphiQL at /, opened for you
-fastmail-cli mcp --http 0.0.0.0:8080 --graphql # explicit address
+fastmail mcp --http                        # /mcp
+fastmail mcp --graphql                     # + /graphql
+fastmail mcp --browser                     # + GraphiQL at /, opened for you
+fastmail mcp --http 0.0.0.0:8080 --graphql # explicit address
 ```
 
 The flags cascade rather than gate each other: `--browser` implies `--graphiql`
@@ -471,7 +471,7 @@ gets your mailbox without needing a token at all.
 
 The token is resolved on first query rather than at startup, so an expired one
 shows up as an error in the response pane rather than a server that won't boot —
-run `fastmail-cli auth` to refresh it. **Introspection needs no token**: it is
+run `fastmail auth` to refresh it. **Introspection needs no token**: it is
 answered from the schema without touching Fastmail, so GraphiQL's docs,
 autocomplete and explorer work before you have working credentials. Queries
 that select any real field still authenticate as normal.
@@ -680,7 +680,7 @@ Token can be set via `FASTMAIL_API_TOKEN` env var or config file.
 Enable debug output with `RUST_LOG`:
 
 ```bash
-RUST_LOG=debug fastmail-cli list mailboxes
+RUST_LOG=debug fastmail list mailboxes
 ```
 
 ## JMAP API

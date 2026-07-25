@@ -1,6 +1,6 @@
 ---
 name: fastmail/attachments
-description: fastmail-cli download — save attachments or extract text content from emails
+description: fastmail download — save attachments or extract text content from emails
 ---
 
 # fastmail-cli — Attachments
@@ -8,7 +8,7 @@ description: fastmail-cli download — save attachments or extract text content 
 ## Download Attachments
 
 ```bash
-fastmail-cli download EMAIL_ID [OPTIONS]
+fastmail download EMAIL_ID [OPTIONS]
 ```
 
 | Flag | Short | Description |
@@ -21,16 +21,16 @@ fastmail-cli download EMAIL_ID [OPTIONS]
 
 ```bash
 # Download all attachments to current directory
-fastmail-cli download abc123
+fastmail download abc123
 
 # Download to specific folder
-fastmail-cli download abc123 -o ~/Downloads/invoices
+fastmail download abc123 -o ~/Downloads/invoices
 
 # Extract text content as JSON (good for parsing docs/PDFs)
-fastmail-cli download abc123 -f json
+fastmail download abc123 -f json
 
 # Resize large images during download
-fastmail-cli download abc123 --max-size 800K -o ~/Downloads
+fastmail download abc123 --max-size 800K -o ~/Downloads
 ```
 
 ## Format Details
@@ -43,13 +43,13 @@ fastmail-cli download abc123 --max-size 800K -o ~/Downloads
 
 ```bash
 # Find emails with attachments
-fastmail-cli search --has-attachment --from invoices@vendor.com
+fastmail search --has-attachment --from invoices@vendor.com
 
 # Download attachments from a specific email
-fastmail-cli download EMAIL_ID -o ~/Documents/invoices
+fastmail download EMAIL_ID -o ~/Documents/invoices
 
 # Or extract text for processing
-fastmail-cli download EMAIL_ID -f json | jq '.data[].content'
+fastmail download EMAIL_ID -f json | jq '.data[].content'
 ```
 
 ## Tips

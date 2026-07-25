@@ -1,6 +1,6 @@
 ---
 name: fastmail/search
-description: fastmail-cli search — all filter flags, date ranges, and search workflow patterns
+description: fastmail search — all filter flags, date ranges, and search workflow patterns
 ---
 
 # fastmail-cli — Search
@@ -10,7 +10,7 @@ Search filters are ANDed together. All return JSON with a `data` array of email 
 ## Syntax
 
 ```bash
-fastmail-cli search [OPTIONS]
+fastmail search [OPTIONS]
 ```
 
 | Flag | Short | Description |
@@ -36,26 +36,26 @@ fastmail-cli search [OPTIONS]
 
 ```bash
 # Simple full-text search
-fastmail-cli search --text "invoice"
+fastmail search --text "invoice"
 
 # From a specific sender, unread only
-fastmail-cli search --from boss@company.com --unread
+fastmail search --from boss@company.com --unread
 
 # Subject keyword in a specific folder
-fastmail-cli search --subject "deployment" --mailbox "Work"
+fastmail search --subject "deployment" --mailbox "Work"
 
 # Date range
-fastmail-cli search --after 2024-01-01 --before 2024-02-01
+fastmail search --after 2024-01-01 --before 2024-02-01
 
 # Emails with attachments over 1MB
-fastmail-cli search --has-attachment --min-size 1048576
+fastmail search --has-attachment --min-size 1048576
 
 # Recent flagged emails
-fastmail-cli search --flagged --after 2024-01-01 --limit 20
+fastmail search --flagged --after 2024-01-01 --limit 20
 
 # Find a thread starter to then get full conversation
-fastmail-cli search --subject "Project Kickoff" --from alice@example.com
-# then: fastmail-cli thread EMAIL_ID
+fastmail search --subject "Project Kickoff" --from alice@example.com
+# then: fastmail thread EMAIL_ID
 ```
 
 ## Tips

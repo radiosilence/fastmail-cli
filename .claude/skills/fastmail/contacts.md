@@ -1,6 +1,6 @@
 ---
 name: fastmail/contacts
-description: fastmail-cli contacts — CardDAV setup, list and search contacts
+description: fastmail contacts — CardDAV setup, list and search contacts
 ---
 
 # fastmail-cli — Contacts
@@ -28,25 +28,25 @@ Generate an app password at: Fastmail Settings → Privacy & Security → App Pa
 
 ```bash
 # List all contacts
-fastmail-cli contacts list
+fastmail contacts list
 
 # Search by name, email, or organization
-fastmail-cli contacts search "Alice"
-fastmail-cli contacts search "acme.com"
-fastmail-cli contacts search "ACME Corp"
+fastmail contacts search "Alice"
+fastmail contacts search "acme.com"
+fastmail contacts search "ACME Corp"
 ```
 
 ## Typical Patterns
 
 ```bash
 # Find email address before composing
-fastmail-cli contacts search "Bob Smith" | jq '.data[0].emails[0].value'
+fastmail contacts search "Bob Smith" | jq '.data[0].emails[0].value'
 
 # Verify who someone is before replying
-fastmail-cli contacts search "bob@unknown.com"
+fastmail contacts search "bob@unknown.com"
 
 # Find all contacts at a company
-fastmail-cli contacts search "bigcorp.com"
+fastmail contacts search "bigcorp.com"
 ```
 
 ## Notes

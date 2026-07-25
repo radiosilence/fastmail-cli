@@ -168,7 +168,7 @@ impl FastmailMcp {
     ) -> ToolResult {
         let Some(token) = self.resolve_token(&ctx) else {
             return Self::error_result(
-                "No Fastmail token available. Configure one via `fastmail-cli auth` \
+                "No Fastmail token available. Configure one via `fastmail auth` \
                  (stdio) or send the X-Fastmail-Token header (HTTP).",
             );
         };
@@ -206,7 +206,7 @@ impl FastmailMcp {
 #[tool_handler]
 impl ServerHandler for FastmailMcp {
     fn get_info(&self) -> ServerInfo {
-        let server_info = Implementation::new("fastmail-cli", env!("CARGO_PKG_VERSION"))
+        let server_info = Implementation::new("fastmail", env!("CARGO_PKG_VERSION"))
             .with_title("Fastmail MCP Server")
             .with_website_url("https://github.com/radiosilence/fastmail-cli");
 
@@ -329,7 +329,7 @@ async fn graphql_endpoint(
     } else {
         let Some(token) = resolve_token(Some(&headers), mcp.default_token.as_deref()) else {
             return error(format!(
-                "No Fastmail token available. Configure one via `fastmail-cli auth` \
+                "No Fastmail token available. Configure one via `fastmail auth` \
                  or send the {TOKEN_HEADER} header."
             ));
         };

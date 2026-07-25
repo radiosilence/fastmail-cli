@@ -1,6 +1,6 @@
 ---
 name: fastmail/conversations
-description: fastmail-cli list, get, thread — reading emails, conversations, mark-read, and triage
+description: fastmail list, get, thread — reading emails, conversations, mark-read, and triage
 ---
 
 # fastmail-cli — Conversations & Email Reading
@@ -8,7 +8,7 @@ description: fastmail-cli list, get, thread — reading emails, conversations, m
 ## Listing Emails
 
 ```bash
-fastmail-cli list emails [-m MAILBOX] [-l LIMIT]
+fastmail list emails [-m MAILBOX] [-l LIMIT]
 ```
 
 - Default mailbox: `INBOX`, default limit: `50`
@@ -16,17 +16,17 @@ fastmail-cli list emails [-m MAILBOX] [-l LIMIT]
 
 ```bash
 # List a different folder
-fastmail-cli list emails --mailbox "Sent"
-fastmail-cli list emails --mailbox "Archive" --limit 100
+fastmail list emails --mailbox "Sent"
+fastmail list emails --mailbox "Archive" --limit 100
 
 # See all folders first
-fastmail-cli list mailboxes
+fastmail list mailboxes
 ```
 
 ## Reading a Single Email
 
 ```bash
-fastmail-cli get EMAIL_ID
+fastmail get EMAIL_ID
 ```
 
 Returns full email: headers, body (plain + HTML), attachment metadata.
@@ -34,7 +34,7 @@ Returns full email: headers, body (plain + HTML), attachment metadata.
 ## Reading a Full Thread/Conversation
 
 ```bash
-fastmail-cli thread EMAIL_ID
+fastmail thread EMAIL_ID
 ```
 
 - Provide **any** email ID in the thread — returns all messages in chronological order.
@@ -44,40 +44,40 @@ fastmail-cli thread EMAIL_ID
 
 ```bash
 # 1. List inbox
-fastmail-cli list emails
+fastmail list emails
 
 # 2. Get a specific email by ID
-fastmail-cli get abc123
+fastmail get abc123
 
 # 3. Get full thread for context
-fastmail-cli thread abc123
+fastmail thread abc123
 
 # 4. Mark as read when done
-fastmail-cli mark-read abc123
+fastmail mark-read abc123
 
 # 5. Reply or move
-fastmail-cli reply abc123 --body "Got it, thanks."
-fastmail-cli move abc123 --to "Archive"
+fastmail reply abc123 --body "Got it, thanks."
+fastmail move abc123 --to "Archive"
 ```
 
 ## Mark Read / Unread
 
 ```bash
-fastmail-cli mark-read EMAIL_ID          # mark as read
-fastmail-cli mark-read EMAIL_ID --unread # mark as unread
+fastmail mark-read EMAIL_ID          # mark as read
+fastmail mark-read EMAIL_ID --unread # mark as unread
 ```
 
 ## Triage
 
 ```bash
 # Move to folder
-fastmail-cli move EMAIL_ID --to "Work/Projects"
+fastmail move EMAIL_ID --to "Work/Projects"
 
 # Mark as spam (prompts confirmation)
-fastmail-cli spam EMAIL_ID
+fastmail spam EMAIL_ID
 
 # Skip confirmation
-fastmail-cli spam EMAIL_ID -y
+fastmail spam EMAIL_ID -y
 ```
 
 ## Tips

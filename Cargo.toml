@@ -1,6 +1,6 @@
 [package]
 name = "fastmail-cli"
-version = "3.1.3"
+version = "3.2.0"
 edition = "2024"
 description = "CLI for Fastmail's JMAP API"
 repository = "https://github.com/radiosilence/fastmail-cli"
@@ -8,41 +8,51 @@ license = "MIT"
 keywords = ["cli", "email", "fastmail", "jmap"]
 categories = ["command-line-utilities", "email"]
 
+[[bin]]
+name = "fastmail"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1.0.100"
+askama = "0.16"
+async-graphql = { version = "7", features = ["dataloader"] }
+axum = "0.8"
 base64 = "0.22"
 clap = { version = "4.5.54", features = ["derive"] }
 clap_complete = "4.5.65"
 dirs = "6.0.0"
-image = { version = "0.25", default-features = false, features = [
-  "gif",
-  "jpeg",
-  "png",
-  "webp"
-] }
-kreuzberg = { version = "~4.8", features = [
-  "archives",
-  "bundled-pdfium",
-  "email",
-  "excel",
-  "html",
-  "language-detection",
-  "office",
-  "pdf",
-  "xml"
-] }
-async-graphql = { version = "7", features = ["dataloader"] }
-reqwest = { version = "0.13.1", default-features = false, features = [
-  "json",
-  "rustls"
-] }
-rmcp = { version = "1", features = [
-  "server",
-  "transport-io",
-  "transport-streamable-http-server"
-] }
-axum = "0.8"
 http = "1"
+image = {
+  version = "0.25",
+  default-features = false,
+  features = ["gif", "jpeg", "png", "webp"]
+}
+kreuzberg = {
+  version = "~4.8",
+  features = [
+    "archives",
+    "bundled-pdfium",
+    "email",
+    "excel",
+    "html",
+    "language-detection",
+    "office",
+    "pdf",
+    "xml"
+  ]
+}
+open = "5"
+percent-encoding = "2"
+reqwest = {
+  version = "0.13.1",
+  default-features = false,
+  features = ["json", "rustls"]
+}
+rmcp = {
+  version = "1",
+  features = ["server", "transport-io", "transport-streamable-http-server"]
+}
+roxmltree = "0.21.1"
 schemars = "1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
@@ -51,11 +61,7 @@ tokio = { version = "1.49.0", features = ["full"] }
 toml = "1"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
-roxmltree = "0.21.1"
-percent-encoding = "2"
 uuid = { version = "1", features = ["v4"] }
-askama = "0.16"
-open = "5"
 
 [dev-dependencies]
 tempfile = "3"

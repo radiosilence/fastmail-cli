@@ -2,7 +2,7 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("Authentication required. Run `fastmail-cli auth <token>` first.")]
+    #[error("Authentication required. Run `fastmail auth <token>` first.")]
     NotAuthenticated,
 
     /// Authentication was rejected by the server.
@@ -39,7 +39,7 @@ pub enum Error {
     IdentityNotFound,
 
     #[error(
-        "No identity found matching '{0}'. Run `fastmail-cli list identities` to see available identities."
+        "No identity found matching '{0}'. Run `fastmail list identities` to see available identities."
     )]
     IdentityNotFoundForEmail(String),
 
