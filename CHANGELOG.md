@@ -16,6 +16,15 @@
   with every full email fetch and were discarded. `cid` is the useful one:
   inline images are referenced from the HTML body as `<img src="cid:...">`, so
   without it there is no way to tell which attachment appears where.
+- **`Email.sender`** — RFC 5322 Sender, distinct from `From`, set when a message
+  was sent on the author's behalf. In the summary property set, so lists carry
+  it with no extra call.
+- **`Email.headers`** — every raw header in order, for the ones the typed fields
+  don't cover (`List-Unsubscribe`, `Received`, `Authentication-Results`). On the
+  full property set, so it resolves lazily and batched like the bodies.
+- **`Mailbox.myRights` and `Mailbox.isSubscribed`** — what the account may
+  actually do in a folder, so a move or flag change can be checked in advance
+  rather than failing at the write.
 - **Introspection over `/graphql` needs no Fastmail token.** A query whose
   top-level selections are all introspection fields is answered from the schema
   without authenticating or touching the network, so GraphiQL's docs,

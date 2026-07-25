@@ -276,7 +276,7 @@ impl MutationRoot {
 
         if matches!(action, SendAction::Preview) {
             let nonce = super::types::issue_nonce(nonce_store, &params).await;
-            let original_body = original.text_content().unwrap_or("");
+            let original_body = original.text_content().unwrap_or_default();
             let sender = format_addrs(&original.from.clone().unwrap_or_default());
 
             let mut preview = format!(

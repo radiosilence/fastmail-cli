@@ -23,6 +23,7 @@ pub const EMAIL_SUMMARY_PROPERTIES: &[&str] = &[
     "size",
     "receivedAt",
     "sentAt",
+    "sender",
     "from",
     "to",
     "cc",
@@ -47,6 +48,7 @@ pub const EMAIL_FULL_PROPERTIES: &[&str] = &[
     "messageId",
     "inReplyTo",
     "references",
+    "sender",
     "from",
     "to",
     "cc",
@@ -59,6 +61,7 @@ pub const EMAIL_FULL_PROPERTIES: &[&str] = &[
     "htmlBody",
     "attachments",
     "bodyValues",
+    "headers",
 ];
 
 const DESIRED_CAPABILITIES: &[&str] = &[
@@ -735,7 +738,8 @@ impl JmapClient {
                     "properties": [
                         "id", "name", "parentId", "role",
                         "totalEmails", "unreadEmails",
-                        "totalThreads", "unreadThreads", "sortOrder"
+                        "totalThreads", "unreadThreads", "sortOrder",
+                        "isSubscribed", "myRights"
                     ]
                 },
                 "m0"
@@ -1399,7 +1403,7 @@ impl JmapClient {
         };
 
         // Build forwarded body with attribution
-        let original_body = original.text_content().unwrap_or("");
+        let original_body = original.text_content().unwrap_or_default();
 
         let sender = original
             .from
@@ -1773,28 +1777,7 @@ mod tests {
     fn reply_fixture(from: Vec<&str>, to: Vec<&str>, cc: Vec<&str>) -> Email {
         let mut email = Email {
             id: "test".into(),
-            blob_id: None,
-            thread_id: None,
-            mailbox_ids: HashMap::new(),
-            keywords: HashMap::new(),
-            size: 0,
-            received_at: None,
-            message_id: None,
-            in_reply_to: None,
-            references: None,
-            from: None,
-            to: None,
-            cc: None,
-            bcc: None,
-            reply_to: None,
-            subject: None,
-            sent_at: None,
-            preview: None,
-            has_attachment: false,
-            text_body: None,
-            html_body: None,
-            attachments: None,
-            body_values: None,
+            ..Default::default()
         };
         email.from = Some(from.iter().map(|e| addr(e)).collect());
         email.to = Some(to.iter().map(|e| addr(e)).collect());

@@ -17,7 +17,9 @@ use super::connection::{EmailConnection, PageArgs, emails_connection, page_compl
 use super::filter::{EmailFilter, EmailSort};
 use super::loaders::{Blobs, Emails, Mailboxes, Threads, to_gql_error};
 use crate::carddav::{Contact, ContactEmail, ContactPhone};
-use crate::models::{Email, EmailAddress, Identity, Mailbox, MaskedEmail};
+use crate::models::{
+    Email, EmailAddress, EmailHeader, Identity, Mailbox, MailboxRights, MaskedEmail,
+};
 
 /// Page size used when a connection field names no `first`/`last`.
 pub(crate) const DEFAULT_PAGE: u32 = 25;
@@ -56,6 +58,38 @@ pub(crate) fn find_by_name_or_role<'a>(
                 .iter()
                 .find(|m| m.role.as_deref().map(str::to_lowercase).as_deref() == Some(&wanted))
         })
+}
+
+/// What the account may do in a mailbox. Check these before a move or a flag
+/// change rather than discovering the refusal from a failed write.
+#[derive(SimpleObject)]
+#[graphql(name = "MailboxRights")]
+pub struct GqlMailboxRights {
+    pub may_read_items: bool,
+    pub may_add_items: bool,
+    pub may_remove_items: bool,
+    pub may_set_seen: bool,
+    pub may_set_keywords: bool,
+    pub may_create_child: bool,
+    pub may_rename: bool,
+    pub may_delete: bool,
+    pub may_submit: bool,
+}
+
+impl From<&MailboxRights> for GqlMailboxRights {
+    fn from(r: &MailboxRights) -> Self {
+        Self {
+            may_read_items: r.may_read_items,
+            may_add_items: r.may_add_items,
+            may_remove_items: r.may_remove_items,
+            may_set_seen: r.may_set_seen,
+            may_set_keywords: r.may_set_keywords,
+            may_create_child: r.may_create_child,
+            may_rename: r.may_rename,
+            may_delete: r.may_delete,
+            may_submit: r.may_submit,
+        }
+    }
 }
 
 /// A mailbox (folder). Navigate into its contents with `emails`, or around the
@@ -97,6 +131,14 @@ impl GqlMailbox {
     }
     async fn sort_order(&self) -> u32 {
         self.0.sort_order
+    }
+    /// Whether the account is subscribed to this mailbox.
+    async fn is_subscribed(&self) -> bool {
+        self.0.is_subscribed
+    }
+    /// Permissions the account holds on this mailbox.
+    async fn my_rights(&self) -> GqlMailboxRights {
+        GqlMailboxRights::from(&self.0.my_rights)
     }
 
     /// The mailbox this one is nested under, if any.
@@ -158,6 +200,22 @@ impl GqlMailbox {
             collapse_threads.unwrap_or(false),
         )
         .await
+    }
+}
+
+#[derive(SimpleObject)]
+#[graphql(name = "EmailHeader")]
+pub struct GqlEmailHeader {
+    pub name: String,
+    pub value: String,
+}
+
+impl From<EmailHeader> for GqlEmailHeader {
+    fn from(h: EmailHeader) -> Self {
+        Self {
+            name: h.name,
+            value: h.value,
+        }
     }
 }
 
@@ -272,6 +330,11 @@ impl GqlEmail {
     async fn from(&self) -> Vec<GqlEmailAddress> {
         convert_addrs(self.inner.from.clone())
     }
+    /// RFC 5322 Sender — who actually sent it, when that differs from `from`
+    /// (a mailing list, an assistant sending on someone's behalf).
+    async fn sender(&self) -> Vec<GqlEmailAddress> {
+        convert_addrs(self.inner.sender.clone())
+    }
     async fn to(&self) -> Vec<GqlEmailAddress> {
         convert_addrs(self.inner.to.clone())
     }
@@ -322,18 +385,33 @@ impl GqlEmail {
         Ok(self.detail(ctx).await?.references.clone())
     }
 
+    /// Every raw RFC 5322 header, in the order they appear on the message.
+    /// Lazily fetched — use it for headers the typed fields don't cover
+    /// (`List-Unsubscribe`, `Received`, `Authentication-Results`, …).
+    async fn headers(&self, ctx: &Context<'_>) -> Result<Vec<GqlEmailHeader>> {
+        Ok(self
+            .detail(ctx)
+            .await?
+            .headers
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(GqlEmailHeader::from)
+            .collect())
+    }
+
     /// Plain text body content. Lazily fetched — selecting it on a list of
     /// emails costs one batched call for the whole list.
     async fn text_body(&self, ctx: &Context<'_>) -> Result<Option<String>> {
         let email = self.detail(ctx).await?;
-        Ok(email.text_content().map(str::to_owned))
+        Ok(email.text_content())
     }
 
     /// HTML body content. Lazily fetched — selecting it on a list of emails
     /// costs one batched call for the whole list.
     async fn html_body(&self, ctx: &Context<'_>) -> Result<Option<String>> {
         let email = self.detail(ctx).await?;
-        Ok(email.html_content().map(str::to_owned))
+        Ok(email.html_content())
     }
 
     /// Attachments with metadata. Lazily fetched. Select `content` on an

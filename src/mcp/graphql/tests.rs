@@ -69,6 +69,7 @@ fn email_json(id: &str, thread: &str, with_body: bool) -> Value {
         "receivedAt": format!("2024-01-{:02}T00:00:00Z", n + 1),
         "subject": format!("Subject {id}"),
         "from": [{ "name": "Sender", "email": "sender@example.com" }],
+        "sender": [{ "name": "On Behalf Of", "email": "agent@example.com" }],
         "preview": "preview text",
         // Present in the summary property set, so a list result already knows
         // an attachment exists without fetching its metadata.
@@ -77,6 +78,10 @@ fn email_json(id: &str, thread: &str, with_body: bool) -> Value {
     if with_body {
         e["textBody"] = json!([{ "partId": "1", "type": "text/plain" }]);
         e["bodyValues"] = json!({ "1": { "value": format!("Body of {id}") } });
+        e["headers"] = json!([
+            { "name": "List-Unsubscribe", "value": "<https://example.com/u>" },
+            { "name": "Received", "value": "from mx.example.com" },
+        ]);
         e["attachments"] = json!([{
             "partId": "2",
             "blobId": format!("blob-att-{id}"),
@@ -132,7 +137,14 @@ async fn mock_server(count: usize) -> MockServer {
                 "Mailbox/get" => json!({ "list": [{
                     "id": "mb1", "name": "Inbox", "role": "inbox",
                     "totalEmails": 10, "unreadEmails": 2,
-                    "totalThreads": 8, "unreadThreads": 2, "sortOrder": 0
+                    "totalThreads": 8, "unreadThreads": 2, "sortOrder": 0,
+                    "isSubscribed": true,
+                    "myRights": {
+                        "mayReadItems": true, "mayAddItems": true,
+                        "mayRemoveItems": true, "maySetSeen": true,
+                        "maySetKeywords": true, "mayCreateChild": false,
+                        "mayRename": false, "mayDelete": false, "maySubmit": true
+                    }
                 }] }),
                 "Email/query" => {
                     let total = ids.len() as i64;
@@ -338,6 +350,54 @@ async fn mailboxes_are_refetched_for_each_request() {
         fetches, 2,
         "a second request on a pooled client must see fresh mailboxes"
     );
+}
+
+#[tokio::test]
+async fn newly_exposed_fields_come_back() {
+    // Fields the API was already returning, or that cost one more property on
+    // a call we make anyway. `sender` rides the summary set; `headers` is on
+    // the full fetch, so it resolves lazily like the bodies.
+    let server = mock_server(1).await;
+    let resp = run(
+        &server,
+        "{ mailboxes { isSubscribed myRights { mayAddItems mayDelete } } \
+           emails(first: 1) { nodes { \
+             sender { name email } \
+             headers { name value } } } }",
+    )
+    .await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+
+    let data = resp.data.into_json().unwrap();
+    let mb = &data["mailboxes"][0];
+    assert_eq!(mb["isSubscribed"], true);
+    assert_eq!(mb["myRights"]["mayAddItems"], true);
+    assert_eq!(mb["myRights"]["mayDelete"], false);
+
+    let email = &data["emails"]["nodes"][0];
+    assert_eq!(email["sender"][0]["email"], "agent@example.com");
+    let names: Vec<&str> = email["headers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"List-Unsubscribe"), "got {names:?}");
+}
+
+#[tokio::test]
+async fn sender_needs_no_extra_fetch() {
+    // It is in the summary property set, so a list already has it.
+    let server = mock_server(3).await;
+    let resp = run(&server, "{ emails { nodes { sender { email } } } }").await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+
+    let detail = calls(&server)
+        .await
+        .into_iter()
+        .filter(|c| c.method == "Email/get" && c.properties.contains(&"textBody".to_string()))
+        .count();
+    assert_eq!(detail, 0, "`sender` must not trigger the full fetch");
 }
 
 // ============ Attachment laziness ============

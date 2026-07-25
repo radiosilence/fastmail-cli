@@ -51,6 +51,32 @@ impl std::fmt::Display for EmailAddress {
     }
 }
 
+/// What the account may do in a mailbox (RFC 8621 §2). Fastmail returns this
+/// per mailbox; it is the difference between "this move will work" and finding
+/// out from a failed `Email/set`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MailboxRights {
+    #[serde(default)]
+    pub may_read_items: bool,
+    #[serde(default)]
+    pub may_add_items: bool,
+    #[serde(default)]
+    pub may_remove_items: bool,
+    #[serde(default)]
+    pub may_set_seen: bool,
+    #[serde(default)]
+    pub may_set_keywords: bool,
+    #[serde(default)]
+    pub may_create_child: bool,
+    #[serde(default)]
+    pub may_rename: bool,
+    #[serde(default)]
+    pub may_delete: bool,
+    #[serde(default)]
+    pub may_submit: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Mailbox {
@@ -70,6 +96,10 @@ pub struct Mailbox {
     pub unread_threads: u32,
     #[serde(default)]
     pub sort_order: u32,
+    #[serde(default)]
+    pub is_subscribed: bool,
+    #[serde(default)]
+    pub my_rights: MailboxRights,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,7 +132,15 @@ pub struct EmailBodyValue {
     pub is_truncated: bool,
 }
 
+/// A raw RFC 5322 header, as JMAP's `headers` property returns them: every
+/// header on the message, in order, undecoded.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailHeader {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Email {
     pub id: String,
@@ -124,6 +162,10 @@ pub struct Email {
     pub in_reply_to: Option<Vec<String>>,
     #[serde(default)]
     pub references: Option<Vec<String>>,
+    /// RFC 5322 Sender. Distinct from `from`: set when the message was sent by
+    /// someone on the author's behalf.
+    #[serde(default)]
+    pub sender: Option<Vec<EmailAddress>>,
     #[serde(default)]
     pub from: Option<Vec<EmailAddress>>,
     #[serde(default)]
@@ -150,6 +192,8 @@ pub struct Email {
     pub attachments: Option<Vec<EmailBodyPart>>,
     #[serde(default)]
     pub body_values: Option<HashMap<String, EmailBodyValue>>,
+    #[serde(default)]
+    pub headers: Option<Vec<EmailHeader>>,
 }
 
 impl Email {
@@ -165,20 +209,27 @@ impl Email {
         self.keywords.contains_key("$draft")
     }
 
-    pub fn text_content(&self) -> Option<&str> {
-        let body_values = self.body_values.as_ref()?;
-        let text_body = self.text_body.as_ref()?;
-        let part = text_body.first()?;
-        let part_id = part.part_id.as_ref()?;
-        body_values.get(part_id).map(|v| v.value.as_str())
+    /// Every text part joined, not just the first.
+    ///
+    /// A multipart message can carry several text parts; returning only the
+    /// leading one silently dropped the rest.
+    pub fn text_content(&self) -> Option<String> {
+        self.joined_body(self.text_body.as_deref())
     }
 
-    pub fn html_content(&self) -> Option<&str> {
+    /// Every HTML part joined. See [`Self::text_content`].
+    pub fn html_content(&self) -> Option<String> {
+        self.joined_body(self.html_body.as_deref())
+    }
+
+    fn joined_body(&self, parts: Option<&[EmailBodyPart]>) -> Option<String> {
         let body_values = self.body_values.as_ref()?;
-        let html_body = self.html_body.as_ref()?;
-        let part = html_body.first()?;
-        let part_id = part.part_id.as_ref()?;
-        body_values.get(part_id).map(|v| v.value.as_str())
+        let joined: Vec<&str> = parts?
+            .iter()
+            .filter_map(|p| body_values.get(p.part_id.as_ref()?))
+            .map(|v| v.value.as_str())
+            .collect();
+        (!joined.is_empty()).then(|| joined.join("\n"))
     }
 }
 
@@ -300,32 +351,73 @@ mod tests {
         assert_eq!(format!("{}", addr), "john@example.com");
     }
 
+    fn body_part(part_id: &str) -> EmailBodyPart {
+        EmailBodyPart {
+            part_id: Some(part_id.to_string()),
+            blob_id: None,
+            size: 0,
+            name: None,
+            content_type: Some("text/plain".to_string()),
+            charset: None,
+            disposition: None,
+            cid: None,
+        }
+    }
+
+    fn body_value(value: &str) -> EmailBodyValue {
+        EmailBodyValue {
+            value: value.to_string(),
+            is_encoding_problem: false,
+            is_truncated: false,
+        }
+    }
+
+    #[test]
+    fn text_content_joins_every_part() {
+        // A multipart message carries several text parts; taking only the first
+        // silently dropped the rest.
+        let email = Email {
+            id: "e1".to_string(),
+            text_body: Some(vec![body_part("1"), body_part("2"), body_part("3")]),
+            body_values: Some(HashMap::from([
+                ("1".to_string(), body_value("first")),
+                ("2".to_string(), body_value("second")),
+                ("3".to_string(), body_value("third")),
+            ])),
+            ..Default::default()
+        };
+        assert_eq!(
+            email.text_content().as_deref(),
+            Some("first\nsecond\nthird")
+        );
+    }
+
+    #[test]
+    fn body_content_is_none_when_there_are_no_parts() {
+        let email = Email {
+            id: "e1".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(email.text_content(), None);
+        assert_eq!(email.html_content(), None);
+    }
+
+    #[test]
+    fn body_parts_without_a_matching_value_are_skipped() {
+        let email = Email {
+            id: "e1".to_string(),
+            text_body: Some(vec![body_part("1"), body_part("missing")]),
+            body_values: Some(HashMap::from([("1".to_string(), body_value("only"))])),
+            ..Default::default()
+        };
+        assert_eq!(email.text_content().as_deref(), Some("only"));
+    }
+
     #[test]
     fn test_email_is_unread() {
         let mut email = Email {
             id: "test".to_string(),
-            blob_id: None,
-            thread_id: None,
-            mailbox_ids: HashMap::new(),
-            keywords: HashMap::new(),
-            size: 0,
-            received_at: None,
-            message_id: None,
-            in_reply_to: None,
-            references: None,
-            from: None,
-            to: None,
-            cc: None,
-            bcc: None,
-            reply_to: None,
-            subject: None,
-            sent_at: None,
-            preview: None,
-            has_attachment: false,
-            text_body: None,
-            html_body: None,
-            attachments: None,
-            body_values: None,
+            ..Default::default()
         };
         assert!(email.is_unread());
         email.keywords.insert("$seen".to_string(), true);
@@ -336,28 +428,7 @@ mod tests {
     fn test_email_is_flagged() {
         let mut email = Email {
             id: "test".to_string(),
-            blob_id: None,
-            thread_id: None,
-            mailbox_ids: HashMap::new(),
-            keywords: HashMap::new(),
-            size: 0,
-            received_at: None,
-            message_id: None,
-            in_reply_to: None,
-            references: None,
-            from: None,
-            to: None,
-            cc: None,
-            bcc: None,
-            reply_to: None,
-            subject: None,
-            sent_at: None,
-            preview: None,
-            has_attachment: false,
-            text_body: None,
-            html_body: None,
-            attachments: None,
-            body_values: None,
+            ..Default::default()
         };
         assert!(!email.is_flagged());
         email.keywords.insert("$flagged".to_string(), true);
