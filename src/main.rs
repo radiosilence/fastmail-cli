@@ -5,6 +5,8 @@ use fastmail_cli::{commands, jmap, mcp, util};
 use std::io;
 use tracing_subscriber::EnvFilter;
 
+const DEFAULT_HTTP_ADDR: &str = "127.0.0.1:8080";
+
 /// Build ComposeParams with resolved HTML and loaded attachments.
 fn build_compose_params<'a>(
     cc: Option<&'a str>,
@@ -333,20 +335,20 @@ enum Commands {
             long,
             value_name = "ADDR",
             num_args = 0..=1,
-            default_missing_value = "127.0.0.1:8080",
+            default_missing_value = DEFAULT_HTTP_ADDR,
         )]
         http: Option<String>,
 
         /// Also serve plain GraphQL-over-HTTP at /graphql
-        #[arg(long, requires = "http")]
+        #[arg(long)]
         graphql: bool,
 
-        /// Also serve the GraphiQL IDE at /
-        #[arg(long, requires = "graphql")]
+        /// Also serve the GraphiQL IDE at / (implies --graphql)
+        #[arg(long)]
         graphiql: bool,
 
-        /// Open the GraphiQL IDE in your browser once listening
-        #[arg(long, requires = "graphiql")]
+        /// Open the GraphiQL IDE in your browser once listening (implies --graphiql)
+        #[arg(long)]
         browser: bool,
     },
 }
@@ -764,17 +766,20 @@ async fn main() {
             graphql,
             graphiql,
             browser,
-        } => match http {
-            Some(addr) => {
-                let surfaces = mcp::HttpSurfaces {
-                    graphql,
-                    graphiql,
-                    browser,
-                };
-                mcp::run_http_server(&addr, surfaces).await
+        } => {
+            let graphiql = graphiql || browser;
+            let surfaces = mcp::HttpSurfaces {
+                graphql: graphql || graphiql,
+                graphiql,
+                browser,
+            };
+            // Any HTTP-only surface implies the HTTP transport, at its default address.
+            let addr = http.or_else(|| (surfaces.graphql).then(|| DEFAULT_HTTP_ADDR.to_string()));
+            match addr {
+                Some(addr) => mcp::run_http_server(&addr, surfaces).await,
+                None => mcp::run_server().await,
             }
-            None => mcp::run_server().await,
-        },
+        }
     };
 
     if let Err(e) = result {

@@ -446,14 +446,15 @@ Username and app password are optional - only needed for contact search (CardDAV
 (default `127.0.0.1:8080`). Three surfaces can share the one port, each opt-in:
 
 ```bash
-fastmail-cli mcp --http                              # /mcp
-fastmail-cli mcp --http --graphql                    # + /graphql
-fastmail-cli mcp --http --graphiql --browser         # + GraphiQL at /, opened for you
-fastmail-cli mcp --http 0.0.0.0:8080 --graphql       # explicit address
+fastmail-cli mcp --http                        # /mcp
+fastmail-cli mcp --graphql                     # + /graphql
+fastmail-cli mcp --browser                     # + GraphiQL at /, opened for you
+fastmail-cli mcp --http 0.0.0.0:8080 --graphql # explicit address
 ```
 
-`--graphql` requires `--http`, `--graphiql` requires `--graphql` (it is the
-IDE's endpoint), and `--browser` requires `--graphiql`; clap rejects the rest.
+The flags cascade rather than gate each other: `--browser` implies `--graphiql`
+implies `--graphql`, and any of them implies `--http` at its default address.
+`--http` is only needed to override the address.
 
 **Token resolution is the same everywhere:** the request's `X-Fastmail-Token`
 header wins, otherwise the configured token (or `FASTMAIL_API_TOKEN`) is used.
