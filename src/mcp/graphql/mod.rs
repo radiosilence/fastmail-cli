@@ -64,6 +64,8 @@ pub fn request(query: &str, client: SharedClient) -> async_graphql::Request {
         .data(client)
         .data(loaders.email)
         .data(loaders.mailbox)
+        .data(loaders.identity)
+        .data(loaders.masked)
         .data(loaders.thread)
         .data(loaders.blob)
 }

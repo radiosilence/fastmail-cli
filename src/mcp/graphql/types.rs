@@ -30,6 +30,34 @@ pub(crate) fn clamp_page(size: Option<u32>) -> u32 {
 
 // ============ Output Types ============
 
+/// The account's mailboxes, through the loader. Every mailbox question is
+/// answered by filtering this one list, so a query touching mailboxes at ten
+/// different points still costs a single `Mailbox/get`.
+pub(crate) async fn all_mailboxes(ctx: &Context<'_>) -> Result<std::sync::Arc<Vec<Mailbox>>> {
+    ctx.data::<Mailboxes>()?
+        .load_one(())
+        .await
+        .map_err(to_gql_error)?
+        .ok_or_else(|| async_graphql::Error::new("Mailbox list unavailable"))
+}
+
+/// Find a mailbox by name, falling back to matching its role. Case-insensitive
+/// both ways, so `"INBOX"`, `"Inbox"` and `"inbox"` all land on the same folder.
+pub(crate) fn find_by_name_or_role<'a>(
+    mailboxes: &'a [Mailbox],
+    name: &str,
+) -> Option<&'a Mailbox> {
+    let wanted = name.to_lowercase();
+    mailboxes
+        .iter()
+        .find(|m| m.name.to_lowercase() == wanted)
+        .or_else(|| {
+            mailboxes
+                .iter()
+                .find(|m| m.role.as_deref().map(str::to_lowercase).as_deref() == Some(&wanted))
+        })
+}
+
 /// A mailbox (folder). Navigate into its contents with `emails`, or around the
 /// folder tree with `parent` / `children`.
 pub struct GqlMailbox(pub Mailbox);
@@ -73,26 +101,24 @@ impl GqlMailbox {
 
     /// The mailbox this one is nested under, if any.
     async fn parent(&self, ctx: &Context<'_>) -> Result<Option<GqlMailbox>> {
-        let Some(parent_id) = self.0.parent_id.clone() else {
+        let Some(parent_id) = self.0.parent_id.as_deref() else {
             return Ok(None);
         };
-        let loader = ctx.data::<Mailboxes>()?;
-        let parent = loader
-            .load_one(parent_id)
-            .await
-            .map_err(to_gql_error)?
-            .map(GqlMailbox::from);
-        Ok(parent)
+        Ok(all_mailboxes(ctx)
+            .await?
+            .iter()
+            .find(|m| m.id == parent_id)
+            .cloned()
+            .map(GqlMailbox::from))
     }
 
     /// Mailboxes nested directly under this one.
     async fn children(&self, ctx: &Context<'_>) -> Result<Vec<GqlMailbox>> {
-        let client = ctx.data::<super::SharedClient>()?;
-        let mut client = client.lock().await;
-        let mailboxes = client.list_mailboxes().await?;
-        Ok(mailboxes
-            .into_iter()
+        Ok(all_mailboxes(ctx)
+            .await?
+            .iter()
             .filter(|m| m.parent_id.as_deref() == Some(self.0.id.as_str()))
+            .cloned()
             .map(GqlMailbox::from)
             .collect())
     }
@@ -330,10 +356,12 @@ impl GqlEmail {
 
     /// The mailboxes this email belongs to, resolved from `mailboxIds`.
     async fn mailboxes(&self, ctx: &Context<'_>) -> Result<Vec<GqlMailbox>> {
-        let loader = ctx.data::<Mailboxes>()?;
-        let ids: Vec<String> = self.inner.mailbox_ids.keys().cloned().collect();
-        let found = loader.load_many(ids).await.map_err(to_gql_error)?;
-        let mut mailboxes: Vec<Mailbox> = found.into_values().collect();
+        let all = all_mailboxes(ctx).await?;
+        let mut mailboxes: Vec<Mailbox> = all
+            .iter()
+            .filter(|m| self.inner.mailbox_ids.contains_key(&m.id))
+            .cloned()
+            .collect();
         mailboxes.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(mailboxes.into_iter().map(GqlMailbox::from).collect())
     }

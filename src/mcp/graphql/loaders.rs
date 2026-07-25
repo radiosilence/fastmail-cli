@@ -18,7 +18,7 @@ use async_graphql::futures_util::future::join_all;
 
 use super::SharedClient;
 use crate::error::Error;
-use crate::models::{Email, Mailbox};
+use crate::models::{Email, Identity, Mailbox, MaskedEmail};
 
 /// Loader errors are cloned out to every waiter in a batch, so they must be
 /// cheap to clone — hence the `Arc`.
@@ -47,23 +47,56 @@ impl Loader<String> for EmailLoader {
     }
 }
 
-/// Resolves mailbox IDs to mailboxes. The JMAP client caches the full mailbox
-/// list after the first call, so a whole request costs at most one `Mailbox/get`
-/// no matter how many mailboxes are referenced.
-pub struct MailboxLoader(SharedClient);
+/// Loads the account's whole mailbox list.
+///
+/// JMAP offers no way to fetch mailboxes by id more cheaply than fetching the
+/// lot, and every mailbox question — by id, by name, children of, the full
+/// list — is answered by filtering it. So there is one loader, keyed by `()`,
+/// and each of those questions is in-memory work on its single result.
+///
+/// Keying by unit puts the deduplication in the request-scoped cache:
+/// `{ mailboxes { children { name } } }` resolves `children` once per mailbox
+/// and still issues exactly one `Mailbox/get`.
+pub struct MailboxListLoader(SharedClient);
 
-impl Loader<String> for MailboxLoader {
-    type Value = Mailbox;
+impl Loader<()> for MailboxListLoader {
+    type Value = Arc<Vec<Mailbox>>;
     type Error = LoadError;
 
-    async fn load(&self, keys: &[String]) -> Result<HashMap<String, Mailbox>, Self::Error> {
-        let mut client = self.0.lock().await;
-        let mailboxes = client.list_mailboxes().await.map_err(Arc::new)?;
-        Ok(mailboxes
-            .into_iter()
-            .filter(|m| keys.contains(&m.id))
-            .map(|m| (m.id.clone(), m))
-            .collect())
+    async fn load(&self, _keys: &[()]) -> Result<HashMap<(), Arc<Vec<Mailbox>>>, Self::Error> {
+        let client = self.0.lock().await;
+        let mailboxes = client.fetch_mailboxes().await.map_err(Arc::new)?;
+        Ok(HashMap::from([((), Arc::new(mailboxes))]))
+    }
+}
+
+/// Loads the account's sender identities. Like mailboxes this is a whole-list
+/// fetch with no per-id form, so it is keyed by `()` and deduplicated by the
+/// request-scoped cache.
+pub struct IdentityListLoader(SharedClient);
+
+impl Loader<()> for IdentityListLoader {
+    type Value = Arc<Vec<Identity>>;
+    type Error = LoadError;
+
+    async fn load(&self, _keys: &[()]) -> Result<HashMap<(), Arc<Vec<Identity>>>, Self::Error> {
+        let client = self.0.lock().await;
+        let identities = client.list_identities().await.map_err(Arc::new)?;
+        Ok(HashMap::from([((), Arc::new(identities))]))
+    }
+}
+
+/// Loads the account's masked email addresses. Whole-list, keyed by `()`.
+pub struct MaskedEmailListLoader(SharedClient);
+
+impl Loader<()> for MaskedEmailListLoader {
+    type Value = Arc<Vec<MaskedEmail>>;
+    type Error = LoadError;
+
+    async fn load(&self, _keys: &[()]) -> Result<HashMap<(), Arc<Vec<MaskedEmail>>>, Self::Error> {
+        let client = self.0.lock().await;
+        let masked = client.list_masked_emails().await.map_err(Arc::new)?;
+        Ok(HashMap::from([((), Arc::new(masked))]))
     }
 }
 
@@ -118,7 +151,9 @@ const BLOB_BATCH: usize = 4;
 // are built with `with_cache` to get a genuine request-scoped cache: an email
 // pulled for one field is free for every later field in the same query.
 pub type Emails = DataLoader<EmailLoader, HashMapCache>;
-pub type Mailboxes = DataLoader<MailboxLoader, HashMapCache>;
+pub type Mailboxes = DataLoader<MailboxListLoader, HashMapCache>;
+pub type Identities = DataLoader<IdentityListLoader, HashMapCache>;
+pub type MaskedEmails = DataLoader<MaskedEmailListLoader, HashMapCache>;
 pub type Threads = DataLoader<ThreadLoader, HashMapCache>;
 /// Blobs stay uncached: the bytes are large, each is consumed once, and the
 /// resolver keeps the processed output — caching the raw download on top would
@@ -129,6 +164,8 @@ pub type Blobs = DataLoader<BlobLoader>;
 pub struct Loaders {
     pub email: Emails,
     pub mailbox: Mailboxes,
+    pub identity: Identities,
+    pub masked: MaskedEmails,
     pub thread: Threads,
     pub blob: Blobs,
 }
@@ -143,7 +180,17 @@ impl Loaders {
             )
             .max_batch_size(EMAIL_BATCH),
             mailbox: Mailboxes::with_cache(
-                MailboxLoader(client.clone()),
+                MailboxListLoader(client.clone()),
+                tokio::spawn,
+                HashMapCache::default(),
+            ),
+            identity: Identities::with_cache(
+                IdentityListLoader(client.clone()),
+                tokio::spawn,
+                HashMapCache::default(),
+            ),
+            masked: MaskedEmails::with_cache(
+                MaskedEmailListLoader(client.clone()),
                 tokio::spawn,
                 HashMapCache::default(),
             ),

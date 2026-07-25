@@ -20,7 +20,7 @@ use serde_json::Value;
 
 use super::SharedClient;
 use super::filter::{EmailFilter, EmailSort, and_also, sort_to_jmap};
-use super::types::{GqlEmail, clamp_page};
+use super::types::{GqlEmail, all_mailboxes, clamp_page, find_by_name_or_role};
 use crate::jmap::{EmailQuery, QueryStart};
 
 /// Connection-level fields beyond the Relay defaults.
@@ -88,23 +88,13 @@ async fn resolve_mailbox_names(
         return Ok(HashMap::new());
     }
 
-    let client = ctx.data::<SharedClient>()?;
-    let mut client = client.lock().await;
-    // One `Mailbox/get` (cached on the client) covers every name in the tree.
-    let mailboxes = client.list_mailboxes().await?;
+    // Through the same loader as every other mailbox lookup, so a filter naming
+    // a folder costs nothing extra when the query also walks the folder tree.
+    let mailboxes = all_mailboxes(ctx).await?;
 
     let mut resolved = HashMap::new();
     for name in names {
-        let lower = name.to_lowercase();
-        let found = mailboxes
-            .iter()
-            .find(|m| m.name.to_lowercase() == lower)
-            .or_else(|| {
-                mailboxes
-                    .iter()
-                    .find(|m| m.role.as_deref().map(str::to_lowercase) == Some(lower.clone()))
-            });
-        match found {
+        match find_by_name_or_role(&mailboxes, &name) {
             Some(m) => {
                 resolved.insert(name, m.id.clone());
             }

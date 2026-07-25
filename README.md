@@ -641,7 +641,9 @@ call** rather than one per element.
 | `{ subject from { email } }` | 2 (`Email/query` + `Email/get`) |
 | `{ subject textBody }` | 3 (+1 batched `Email/get` for all 25 bodies) |
 | `{ subject textBody attachments { name } }` | 3 (same batch covers both) |
-| `{ … attachments { content { … } } }` | 3 + the blob downloads, issued concurrently |
+| `{ … attachments { name cid size } }` | 3 (metadata downloads nothing) |
+| `{ … attachments { base64 } }` or `{ … text }` | 3 + the blob downloads, issued concurrently |
+| `{ … mailboxes { name } }` + `mailbox(…)` + a name filter | +1 `Mailbox/get` total, however many ask |
 
 The naive shape — one detail call per email — would be 26. Loader caches are
 per request, so referencing the same email or mailbox twice in one query costs

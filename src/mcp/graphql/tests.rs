@@ -288,6 +288,58 @@ async fn body_and_attachments_together_share_one_fetch() {
     );
 }
 
+// ============ Mailbox loading ============
+
+#[tokio::test]
+async fn every_mailbox_path_shares_one_fetch() {
+    // The list, the tree, a name lookup, a filter naming a folder, and the
+    // folders an email belongs to — five routes to the same data, one call.
+    let server = mock_server(3).await;
+    let resp = run(
+        &server,
+        "{ mailboxes { name parent { name } children { name } } \
+           mailbox(name: \"INBOX\") { name } \
+           emails(filter: { inMailbox: \"Inbox\" }, first: 3) { \
+             nodes { mailboxes { name role } } } }",
+    )
+    .await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+
+    let fetches = calls(&server)
+        .await
+        .into_iter()
+        .filter(|c| c.method == "Mailbox/get")
+        .count();
+    assert_eq!(fetches, 1, "every mailbox path must share one Mailbox/get");
+}
+
+#[tokio::test]
+async fn mailboxes_are_refetched_for_each_request() {
+    // Clients are pooled per token for the life of the process, so caching the
+    // mailbox list on the client would mean a folder created after start-up
+    // never appears. The loader's cache is per request; this pins that.
+    let server = mock_server(1).await;
+    let client = client_for(&server);
+    let schema = build_schema();
+
+    for _ in 0..2 {
+        let resp = schema
+            .execute(request("{ mailboxes { name } }", client.clone()))
+            .await;
+        assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+    }
+
+    let fetches = calls(&server)
+        .await
+        .into_iter()
+        .filter(|c| c.method == "Mailbox/get")
+        .count();
+    assert_eq!(
+        fetches, 2,
+        "a second request on a pooled client must see fresh mailboxes"
+    );
+}
+
 // ============ Attachment laziness ============
 //
 // Metadata is free, each payload field does the least work that answers it, and

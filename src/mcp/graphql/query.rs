@@ -4,7 +4,7 @@ use async_graphql::{Context, Object, Result};
 
 use super::connection::{EmailConnection, PageArgs, emails_connection, page_complexity};
 use super::filter::{EmailFilter, EmailSort};
-use super::loaders::{Emails, to_gql_error};
+use super::loaders::{Emails, Identities, MaskedEmails, to_gql_error};
 use super::types::*;
 
 pub struct QueryRoot;
@@ -14,9 +14,7 @@ pub struct QueryRoot;
 impl QueryRoot {
     /// List all mailboxes (folders) with unread counts. Start here to discover available folders.
     async fn mailboxes(&self, ctx: &Context<'_>) -> Result<Vec<GqlMailbox>> {
-        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let mut client = client.lock().await;
-        let mut mailboxes = client.list_mailboxes().await?;
+        let mut mailboxes = all_mailboxes(ctx).await?.as_ref().clone();
         mailboxes.sort_by(|a, b| match (&a.role, &b.role) {
             (Some(_), None) => std::cmp::Ordering::Less,
             (None, Some(_)) => std::cmp::Ordering::Greater,
@@ -35,13 +33,10 @@ impl QueryRoot {
         )]
         name: String,
     ) -> Result<Option<GqlMailbox>> {
-        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let mut client = client.lock().await;
-        match client.find_mailbox(&name).await {
-            Ok(mb) => Ok(Some(GqlMailbox::from(mb))),
-            Err(crate::error::Error::MailboxNotFound(_)) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+        let all = all_mailboxes(ctx).await?;
+        Ok(find_by_name_or_role(&all, &name)
+            .cloned()
+            .map(GqlMailbox::from))
     }
 
     /// Query emails with a composable filter, sorting and pagination.
@@ -88,8 +83,9 @@ impl QueryRoot {
     }
 
     /// Get a specific email by ID, with full content. Select
-    /// `attachments { content { ... } }` to download attachment data in the same
-    /// query, or `thread { emails { ... } }` for the whole conversation.
+    /// `attachments { text }` or `attachments { base64 }` to pull attachment
+    /// data in the same query, or `thread { emails { ... } }` for the whole
+    /// conversation.
     async fn email(
         &self,
         ctx: &Context<'_>,
@@ -185,7 +181,8 @@ impl QueryRoot {
         .await
     }
 
-    /// List attachment metadata for an email. Select `content` on each attachment to fetch data.
+    /// List attachment metadata for an email. Metadata alone downloads nothing;
+    /// select `base64`, `image` or `text` to pull the data.
     /// Equivalent to `email(id: ...) { attachments { ... } }`.
     async fn attachments(
         &self,
@@ -221,17 +218,25 @@ impl QueryRoot {
 
     /// List all sender identities on the account. Includes signatures and default reply-to/bcc.
     async fn identities(&self, ctx: &Context<'_>) -> Result<Vec<GqlIdentity>> {
-        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let client = client.lock().await;
-        let identities = client.list_identities().await?;
-        Ok(identities.into_iter().map(GqlIdentity::from).collect())
+        let identities = ctx
+            .data::<Identities>()?
+            .load_one(())
+            .await
+            .map_err(to_gql_error)?
+            .unwrap_or_default();
+        Ok(identities.iter().cloned().map(GqlIdentity::from).collect())
     }
 
     /// List all masked email addresses.
     async fn masked_emails(&self, ctx: &Context<'_>) -> Result<Vec<GqlMaskedEmail>> {
-        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let client = client.lock().await;
-        let mut masked = client.list_masked_emails().await?;
+        let mut masked = ctx
+            .data::<MaskedEmails>()?
+            .load_one(())
+            .await
+            .map_err(to_gql_error)?
+            .unwrap_or_default()
+            .as_ref()
+            .clone();
         masked.sort_by(|a, b| {
             let a_enabled = a.state.as_deref() == Some("enabled");
             let b_enabled = b.state.as_deref() == Some("enabled");

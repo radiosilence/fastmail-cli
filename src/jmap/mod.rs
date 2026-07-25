@@ -716,12 +716,15 @@ impl JmapClient {
         })
     }
 
+    /// Fetch the mailbox list from the server, always. Takes `&self` so callers
+    /// holding a shared client can use it concurrently.
+    ///
+    /// This is the primitive the GraphQL mailbox loader wraps: the loader has a
+    /// request-scoped cache of its own, and a cache *here* would outlive the
+    /// request — clients are pooled per token for the life of the process, so a
+    /// folder created after start-up would never appear.
     #[instrument(skip(self))]
-    pub async fn list_mailboxes(&mut self) -> Result<Vec<Mailbox>> {
-        if let Some(ref cached) = self.cached_mailboxes {
-            return Ok(cached.clone());
-        }
-
+    pub async fn fetch_mailboxes(&self) -> Result<Vec<Mailbox>> {
         let account_id = self.account_id()?;
 
         let responses = self
@@ -742,8 +745,22 @@ impl JmapClient {
         let resp: GetResponse<Mailbox> =
             Self::parse_response(responses.first().unwrap_or(&Value::Null), "Mailbox/get")?;
 
-        self.cached_mailboxes = Some(resp.list.clone());
         Ok(resp.list)
+    }
+
+    /// Mailbox list, memoised for the life of this client.
+    ///
+    /// For the CLI, where the process is short-lived and several commands walk
+    /// the folder tree in one run. Long-lived callers want
+    /// [`Self::fetch_mailboxes`] instead.
+    #[instrument(skip(self))]
+    pub async fn list_mailboxes(&mut self) -> Result<Vec<Mailbox>> {
+        if let Some(ref cached) = self.cached_mailboxes {
+            return Ok(cached.clone());
+        }
+        let mailboxes = self.fetch_mailboxes().await?;
+        self.cached_mailboxes = Some(mailboxes.clone());
+        Ok(mailboxes)
     }
 
     pub async fn find_mailbox(&mut self, name: &str) -> Result<Mailbox> {
