@@ -76,6 +76,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      is_new: ${{ steps.check_tag.outputs.exists == 'false' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -145,7 +148,7 @@ jobs:
 
   manifest:
     name: Push image manifest
-    needs: build-image
+    needs: [build-image, publish]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
@@ -160,6 +163,16 @@ jobs:
       - name: Create :main and :sha-<short> manifests
         run: |
           for tag in main "sha-$(echo ${{ github.sha }} | cut -c1-7)"; do
+            docker buildx imagetools create \
+              --tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$tag \
+              ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main-amd64 \
+              ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main-arm64
+          done
+      - name: Create semver manifests
+        if: needs.publish.outputs.is_new == 'true'
+        run: |
+          VERSION=${{ needs.publish.outputs.version }}
+          for tag in "v$VERSION" "v$(echo $VERSION | cut -d. -f1,2)" "v$(echo $VERSION | cut -d. -f1)" latest; do
             docker buildx imagetools create \
               --tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$tag \
               ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main-amd64 \
