@@ -42,8 +42,8 @@ impl QueryRoot {
         )
     }
 
-    /// Look up a single mailbox by name or role. Navigate into it with
-    /// `emails { ... }` or around the tree with `parent` / `children`.
+    /// Look up a single mailbox by name or role, then navigate into its
+    /// contents or around the folder tree from there.
     async fn mailbox(
         &self,
         ctx: &Context<'_>,
@@ -101,10 +101,10 @@ impl QueryRoot {
         .await
     }
 
-    /// Get a specific email by ID, with full content. Select
-    /// `attachments { text }` or `attachments { base64 }` to pull attachment
-    /// data in the same query, or `thread { emails { ... } }` for the whole
-    /// conversation.
+    /// Get a specific email by ID, with full content.
+    ///
+    /// Attachment payloads and the surrounding conversation resolve lazily, so
+    /// pull them in this query rather than paying a second round trip.
     async fn email(
         &self,
         ctx: &Context<'_>,
@@ -201,8 +201,8 @@ impl QueryRoot {
     }
 
     /// List attachment metadata for an email. Metadata alone downloads nothing;
-    /// select `base64`, `image` or `text` to pull the data.
-    /// Equivalent to `email(id: ...) { attachments { ... } }`.
+    /// select `base64`, `image` or `text` to pull the data. Equivalent to the
+    /// `attachments` field on `email(id:)`.
     #[graphql(complexity = "page_complexity(first, last, child_complexity)")]
     async fn attachments(
         &self,
