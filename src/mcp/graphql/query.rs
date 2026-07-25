@@ -51,9 +51,10 @@ impl QueryRoot {
     /// things like "unread, from either address, but not in Archive". Bodies,
     /// attachments and threads on the results resolve lazily and batched.
     ///
-    /// Cursors are zero-based positions, so `after: "24"` resumes at item 25.
-    /// Select `totalCount` for the full match count — it is only computed when
-    /// you ask for it.
+    /// Cursors are email IDs, so `after: "<last id you saw>"` resumes after that
+    /// message and stays correct even if mail arrives in between. Select
+    /// `totalCount` for the full match count — it is only computed when you ask
+    /// for it.
     #[graphql(complexity = "page_complexity(first, last, child_complexity)")]
     async fn emails(
         &self,
