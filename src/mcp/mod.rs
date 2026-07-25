@@ -150,6 +150,7 @@ impl FastmailMcp {
 #[tool_router]
 impl FastmailMcp {
     #[tool(
+        title = "Fastmail schema",
         description = "Returns the full GraphQL SDL (Schema Definition Language) for the Fastmail API. Call this first to discover available queries, mutations, types, and their arguments. The schema includes all email, mailbox, identity, masked email, contact, and attachment operations."
     )]
     async fn schema_sdl(&self) -> ToolResult {
@@ -157,6 +158,7 @@ impl FastmailMcp {
     }
 
     #[tool(
+        title = "Fastmail",
         description = "Execute a GraphQL query or mutation against the Fastmail API. Use `schema_sdl` first to discover the schema. Supports all email operations: listing mailboxes, reading/searching emails, sending/replying/forwarding (with preview/confirm pattern), managing masked emails, downloading attachments, and searching contacts. Pass variables as a JSON string."
     )]
     async fn graphql(
@@ -208,8 +210,12 @@ impl ServerHandler for FastmailMcp {
             .with_title("Fastmail MCP Server")
             .with_website_url("https://github.com/radiosilence/fastmail-cli");
 
+        // No protocol version is declared: rmcp defaults to the newest it
+        // implements, and negotiation settles on the lower of ours and the
+        // client's. The declared version is therefore a *ceiling* — pinning an
+        // old one (this was stuck on 2024-11-05) caps every client to it, which
+        // is how `title` on a tool went unused.
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_protocol_version(rmcp::model::ProtocolVersion::V_2024_11_05)
             .with_server_info(server_info)
             .with_instructions(
                 "Fastmail MCP Server — GraphQL interface for email operations.\n\n\
