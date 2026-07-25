@@ -13,6 +13,14 @@
 
 ### Added
 
+- **MCP instructions trimmed by 80%** — ~1,220 tokens to ~240. They had grown
+  into a tutorial with worked GraphQL examples, all of which duplicated what
+  `schema_sdl` already documents per field. Instructions ride in context for
+  every conversation the server is connected to, whether or not it gets used, so
+  what stays is only what the schema cannot say for itself: fetch the schema
+  first, ask in one nested query rather than looping, collections are
+  connections, and always preview before sending.
+
 - **Display titles on the MCP tools.** `graphql` and `schema_sdl` are what a
   client shows in its UI, which reads as "Graphql" and "Schema sdl". They now
   carry `title` — "Fastmail" and "Fastmail schema". Wire names are unchanged, so

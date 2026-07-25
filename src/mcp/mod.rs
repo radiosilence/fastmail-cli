@@ -218,114 +218,27 @@ impl ServerHandler for FastmailMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(server_info)
             .with_instructions(
-                "Fastmail MCP Server — GraphQL interface for email operations.\n\n\
-                ## Getting Started\n\
-                1. Call `schema_sdl` to get the full GraphQL schema\n\
-                2. Use `graphql` to execute queries and mutations\n\n\
-                ## Common Queries\n\
-                ```graphql\n\
-                # List mailboxes\n\
-                { mailboxes { totalCount nodes { id name role unreadEmails totalEmails } } }\n\n\
-                # List emails in inbox\n\
-                { emails(filter: { inMailbox: \"INBOX\" }, first: 10) {\n\
-                    nodes { id subject from { email name } receivedAt preview isUnread } } }\n\n\
-                # Get full email\n\
-                { email(id: \"abc123\") { id subject from { email name } to { email name } textBody } }\n\n\
-                # Search emails\n\
-                { emails(filter: { text: \"invoice\", after: \"2024-01-01\" }, first: 10) {\n\
-                    nodes { id subject from { email } receivedAt } } }\n\
-                ```\n\n\
-                ## Filters compose\n\
-                `EmailFilter` is a tree, not a flat argument list. Fields on one\n\
-                filter object are AND-ed; `and`/`or`/`not` nest arbitrarily. The\n\
-                same input works on `Mailbox.emails`, where it is AND-ed with the\n\
-                mailbox. `inMailbox` accepts a folder name or role.\n\
-                ```graphql\n\
-                { emails(\n\
-                    filter: {\n\
-                      unread: true\n\
-                      or:  [{ from: \"alice@example.com\" }, { from: \"bob@example.com\" }]\n\
-                      not: [{ inMailbox: \"Archive\" }]\n\
-                    }\n\
-                    sort: [{ property: SIZE, ascending: false }]\n\
-                    first: 20\n\
-                  ) { totalCount nodes { subject size } } }\n\
-                ```\n\n\
-                ## Pagination and counts\n\
-                Email lists are connections. **Cursors are email IDs** — pass the\n\
-                `endCursor` (or any edge's `cursor`) back as `after`. They stay\n\
-                valid when new mail arrives, unlike a positional cursor. Page\n\
-                size is capped at 100.\n\
-                ```graphql\n\
-                { emails(first: 25, after: \"Mabc123\") {\n\
-                    totalCount\n\
-                    pageInfo { hasNextPage endCursor }\n\
-                    edges { cursor node { subject } } } }\n\
-                ```\n\
-                Use `last: N` for the newest-last window, `before:` to page\n\
-                backwards. If a cursor's email is deleted you get an error saying\n\
-                so — restart without `after`/`before`.\n\
-                `totalCount` is only computed when you select it, and selecting it\n\
-                **alone** fetches no emails — use that to answer \"how many?\"\n\
-                cheaply instead of listing and counting:\n\
-                ```graphql\n\
-                { emails(filter: { unread: true, from: \"alerts@example.com\" }) { totalCount } }\n\
-                ```\n\
-                Use `collapseThreads: true` for a conversation view (one email per thread).\n\n\
-                ## Ask for everything in one query\n\
-                The graph is fully nested and every field below a list is fetched\n\
-                lazily and batched, so ask for what you actually need in a single\n\
-                query instead of looping. Selecting `textBody` on 25 emails costs\n\
-                one extra API call, not 25.\n\
-                ```graphql\n\
-                # Bodies + attachment text for a whole folder, in one round trip\n\
-                { emails(filter: { inMailbox: \"INBOX\" }, first: 10) { nodes {\n\
-                    subject from { email }\n\
-                    textBody\n\
-                    attachments { nodes { name contentType text } }\n\
-                } } }\n\n\
-                # Walk the graph: folder → emails → conversation → mailboxes\n\
-                { mailbox(name: \"INBOX\") { name children { nodes { name } }\n\
-                    emails(first: 5) { nodes {\n\
-                      subject\n\
-                      thread { total emails { nodes { subject textBody } } }\n\
-                      mailboxes { name role }\n\
-                    } } } }\n\
-                ```\n\
-                Nesting is capped at depth 15 (the graph has cycles). Breadth is\n\
-                not capped, so fan-out is your call — but it is real work, and\n\
-                the field descriptions say what each field costs.\n\n\
-                ## Lists are connections\n\
-                Every collection — `mailboxes`, `identities`, `maskedEmails`,\n\
-                `contacts`, `attachments`, `Mailbox.children`, `Thread.emails` —\n\
-                is a connection, so it takes `first` / `last` / `after` /\n\
-                `before` and exposes `totalCount`, `pageInfo`, `edges`, `nodes`.\n\
-                Cursors are IDs. Use `nodes { ... }` for the items and `edges`\n\
-                only when you need per-item cursors. Default page is 25, max 100,\n\
-                so check `pageInfo.hasNextPage` rather than assuming you got\n\
-                everything.\n\
-                Value lists stay plain arrays — `from`, `to`, `cc`, `keywords`,\n\
-                `headers` and friends belong to the message and are never paged.\n\n\
-                ## Attachment payloads cost different amounts\n\
-                Metadata (`name`, `size`, `contentType`, `cid`) comes with the email\n\
-                and downloads nothing. Beyond that, pick the cheapest field that\n\
-                answers the question:\n\
-                - `base64` — raw bytes, any type. Download only.\n\
-                - `image(maxBytes: N)` — resized then encoded, null for non-images.\n\
-                - `text` — extracted document text. **Expensive**: it parses the\n\
-                  whole file. Only select it when you actually need the text,\n\
-                  and prefer a small page size when you do.\n\n\
-                ## Sending Emails (ALWAYS preview first!)\n\
-                ```graphql\n\
-                # Step 1: Preview\n\
-                mutation { sendEmail(action: PREVIEW, to: \"recipient@example.com\", subject: \"Hello\", body: \"...\") { preview } }\n\n\
-                # Step 2: After user approval, confirm\n\
-                mutation { sendEmail(action: CONFIRM, to: \"recipient@example.com\", subject: \"Hello\", body: \"...\") { emailId } }\n\
-                ```\n\n\
-                ## Safety Rules\n\
-                - NEVER send without showing preview first\n\
-                - NEVER confirm send without explicit user approval\n\
-                - mark_as_spam affects future filtering — always preview first",
+                "Fastmail, as a GraphQL API.\n\n\
+                Call `schema_sdl` once — every type, argument and per-field cost \
+                is documented there — then use `graphql`. Variables go as a JSON \
+                string.\n\n\
+                ## Querying well\n\
+                - The graph is fully nested and everything below a list is \
+                  batched, so ask for what you need in ONE query rather than \
+                  looping. Selecting `textBody` across 25 emails costs one extra \
+                  API call, not 25.\n\
+                - Collections are connections: `nodes { ... }` for the items, \
+                  `first`/`after` to page, cursors are IDs. Default page is 25, \
+                  so check `pageInfo.hasNextPage` before assuming that is all of \
+                  them.\n\
+                - Ask only for fields you will use; their descriptions say what \
+                  each costs. Attachment metadata is free, `text` parses the \
+                  whole document. `emails { totalCount }` on its own answers \
+                  \"how many?\" while fetching no mail at all.\n\n\
+                ## Safety\n\
+                Never send without showing the user a PREVIEW first, and never \
+                CONFIRM without their explicit approval. Marking spam trains the \
+                filter, so preview that too.",
             )
     }
 }
