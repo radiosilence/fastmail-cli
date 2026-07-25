@@ -173,6 +173,9 @@ pub(crate) fn attachments_of(email: &Email) -> Vec<GqlAttachment> {
                     content_type: a.content_type.clone(),
                     size: a.size,
                     disposition: a.disposition.clone(),
+                    cid: a.cid.clone(),
+                    charset: a.charset.clone(),
+                    part_id: a.part_id.clone(),
                 })
                 .collect()
         })
@@ -359,6 +362,9 @@ pub struct GqlAttachment {
     pub content_type: Option<String>,
     pub size: u64,
     pub disposition: Option<String>,
+    pub cid: Option<String>,
+    pub charset: Option<String>,
+    pub part_id: Option<String>,
 }
 
 #[Object(name = "Attachment")]
@@ -377,6 +383,20 @@ impl GqlAttachment {
     }
     async fn disposition(&self) -> Option<&str> {
         self.disposition.as_deref()
+    }
+    /// Content-ID. Inline images are referenced from the HTML body as
+    /// `<img src="cid:...">`, so this is what ties an attachment to where it
+    /// appears in `htmlBody`.
+    async fn cid(&self) -> Option<&str> {
+        self.cid.as_deref()
+    }
+    /// Character set, for decoding text attachments.
+    async fn charset(&self) -> Option<&str> {
+        self.charset.as_deref()
+    }
+    /// This part's identifier within the message.
+    async fn part_id(&self) -> Option<&str> {
+        self.part_id.as_deref()
     }
     /// Fetch the actual attachment content. Images are resized and base64-encoded,
     /// documents have text extracted. Only fetched when this field is included in

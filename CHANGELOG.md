@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [3.1.0] - 2026-07-25
 
 ### Added
 
@@ -12,6 +12,10 @@
   the listener is bound. GraphiQL is loaded from a CDN with pinned versions and
   SRI hashes; the page is an Askama template.
 - **`--http` now takes an optional address**, defaulting to `127.0.0.1:8080`.
+- **`cid`, `charset` and `partId` on `Attachment`.** All three already arrived
+  with every full email fetch and were discarded. `cid` is the useful one:
+  inline images are referenced from the HTML body as `<img src="cid:...">`, so
+  without it there is no way to tell which attachment appears where.
 - **Introspection over `/graphql` needs no Fastmail token.** A query whose
   top-level selections are all introspection fields is answered from the schema
   without authenticating or touching the network, so GraphiQL's docs,
