@@ -219,7 +219,7 @@ impl ServerHandler for FastmailMcp {
                 ## Common Queries\n\
                 ```graphql\n\
                 # List mailboxes\n\
-                { mailboxes { id name role unreadEmails totalEmails } }\n\n\
+                { mailboxes { totalCount nodes { id name role unreadEmails totalEmails } } }\n\n\
                 # List emails in inbox\n\
                 { emails(filter: { inMailbox: \"INBOX\" }, first: 10) {\n\
                     nodes { id subject from { email name } receivedAt preview isUnread } } }\n\n\
@@ -276,19 +276,30 @@ impl ServerHandler for FastmailMcp {
                 { emails(filter: { inMailbox: \"INBOX\" }, first: 10) { nodes {\n\
                     subject from { email }\n\
                     textBody\n\
-                    attachments { name contentType text }\n\
+                    attachments { nodes { name contentType text } }\n\
                 } } }\n\n\
                 # Walk the graph: folder → emails → conversation → mailboxes\n\
-                { mailbox(name: \"INBOX\") { name children { name }\n\
+                { mailbox(name: \"INBOX\") { name children { nodes { name } }\n\
                     emails(first: 5) { nodes {\n\
                       subject\n\
-                      thread { total emails { subject textBody } }\n\
+                      thread { total emails { nodes { subject textBody } } }\n\
                       mailboxes { name role }\n\
                     } } } }\n\
                 ```\n\
                 Nesting is capped at depth 15 (the graph has cycles). Breadth is\n\
                 not capped, so fan-out is your call — but it is real work, and\n\
                 the field descriptions say what each field costs.\n\n\
+                ## Lists are connections\n\
+                Every collection — `mailboxes`, `identities`, `maskedEmails`,\n\
+                `contacts`, `attachments`, `Mailbox.children`, `Thread.emails` —\n\
+                is a connection, so it takes `first` / `last` / `after` /\n\
+                `before` and exposes `totalCount`, `pageInfo`, `edges`, `nodes`.\n\
+                Cursors are IDs. Use `nodes { ... }` for the items and `edges`\n\
+                only when you need per-item cursors. Default page is 25, max 100,\n\
+                so check `pageInfo.hasNextPage` rather than assuming you got\n\
+                everything.\n\
+                Value lists stay plain arrays — `from`, `to`, `cc`, `keywords`,\n\
+                `headers` and friends belong to the message and are never paged.\n\n\
                 ## Attachment payloads cost different amounts\n\
                 Metadata (`name`, `size`, `contentType`, `cid`) comes with the email\n\
                 and downloads nothing. Beyond that, pick the cheapest field that\n\

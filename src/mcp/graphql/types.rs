@@ -13,7 +13,10 @@ use std::borrow::Cow;
 
 use async_graphql::{Context, Enum, Object, Result, SimpleObject};
 
-use super::connection::{EmailConnection, PageArgs, emails_connection, page_complexity};
+use super::connection::{
+    EmailConnection, ListConnection, PageArgs, emails_connection, page_complexity, paginate,
+    thread_connection,
+};
 use super::filter::{EmailFilter, EmailSort};
 use super::loaders::{Blobs, Emails, Mailboxes, Threads, to_gql_error};
 use crate::carddav::{Contact, ContactEmail, ContactPhone};
@@ -154,15 +157,33 @@ impl GqlMailbox {
             .map(GqlMailbox::from))
     }
 
-    /// Mailboxes nested directly under this one.
-    async fn children(&self, ctx: &Context<'_>) -> Result<Vec<GqlMailbox>> {
-        Ok(all_mailboxes(ctx)
+    /// Mailboxes nested directly under this one. Cursors are mailbox IDs.
+    #[graphql(complexity = "page_complexity(first, last, child_complexity)")]
+    async fn children(
+        &self,
+        ctx: &Context<'_>,
+        after: Option<String>,
+        before: Option<String>,
+        first: Option<i32>,
+        last: Option<i32>,
+    ) -> Result<ListConnection<GqlMailbox>> {
+        let children: Vec<GqlMailbox> = all_mailboxes(ctx)
             .await?
             .iter()
             .filter(|m| m.parent_id.as_deref() == Some(self.0.id.as_str()))
             .cloned()
             .map(GqlMailbox::from)
-            .collect())
+            .collect();
+        paginate(
+            children,
+            PageArgs {
+                after,
+                before,
+                first,
+                last,
+            },
+            |m| m.0.id.clone(),
+        )
     }
 
     /// Emails in this mailbox, newest first by default.
@@ -280,6 +301,12 @@ pub struct GqlEmail {
 }
 
 impl GqlEmail {
+    /// This email's ID, for callers outside the resolver layer. Named apart
+    /// from the `id` resolver, which the `#[Object]` macro also defines.
+    pub(crate) fn email_id(&self) -> &str {
+        &self.inner.id
+    }
+
     /// Wrap an email fetched with the full property set.
     pub fn full(email: Email) -> Self {
         Self {
@@ -417,14 +444,28 @@ impl GqlEmail {
     /// Attachments with metadata. Lazily fetched. Select `content` on an
     /// attachment to also download its data (images are base64-encoded,
     /// documents have text extracted).
-    #[graphql(complexity = "5 * child_complexity")]
-    async fn attachments(&self, ctx: &Context<'_>) -> Result<Vec<GqlAttachment>> {
+    #[graphql(complexity = "page_complexity(first, last, child_complexity)")]
+    async fn attachments(
+        &self,
+        ctx: &Context<'_>,
+        after: Option<String>,
+        before: Option<String>,
+        first: Option<i32>,
+        last: Option<i32>,
+    ) -> Result<ListConnection<GqlAttachment>> {
+        let args = PageArgs {
+            after,
+            before,
+            first,
+            last,
+        };
         // Emails flagged as having no attachment need no fetch at all.
-        if !self.inner.has_attachment && !self.complete {
-            return Ok(Vec::new());
-        }
-        let email = self.detail(ctx).await?;
-        Ok(attachments_of(&email))
+        let attachments = if !self.inner.has_attachment && !self.complete {
+            Vec::new()
+        } else {
+            attachments_of(self.detail(ctx).await?.as_ref())
+        };
+        paginate(attachments, args, |a| a.blob_id.clone())
     }
 
     /// Mailbox IDs this email belongs to
@@ -869,9 +910,33 @@ impl GqlThread {
     async fn id(&self) -> Option<&str> {
         self.id.as_deref()
     }
-    async fn emails(&self) -> Vec<GqlEmail> {
-        self.emails.iter().cloned().map(GqlEmail::full).collect()
+
+    /// The conversation's messages, oldest first. Cursors are email IDs.
+    ///
+    /// The whole thread is fetched in one batch regardless, so paging here
+    /// bounds what is *returned* rather than what is fetched — worth using on a
+    /// long thread where each node carries a body.
+    #[graphql(complexity = "page_complexity(first, last, child_complexity)")]
+    async fn emails(
+        &self,
+        after: Option<String>,
+        before: Option<String>,
+        first: Option<i32>,
+        last: Option<i32>,
+    ) -> Result<EmailConnection> {
+        let emails: Vec<GqlEmail> = self.emails.iter().cloned().map(GqlEmail::full).collect();
+        thread_connection(
+            emails,
+            PageArgs {
+                after,
+                before,
+                first,
+                last,
+            },
+        )
     }
+
+    /// Number of messages in the conversation.
     async fn total(&self) -> usize {
         self.emails.len()
     }

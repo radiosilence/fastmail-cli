@@ -284,7 +284,7 @@ async fn body_and_attachments_together_share_one_fetch() {
     let server = mock_server(3).await;
     let resp = run(
         &server,
-        "{ emails { nodes { textBody htmlBody attachments { name } } } }",
+        "{ emails { nodes { textBody htmlBody attachments { nodes { name } } } } }",
     )
     .await;
     assert!(resp.errors.is_empty(), "{:?}", resp.errors);
@@ -309,7 +309,7 @@ async fn every_mailbox_path_shares_one_fetch() {
     let server = mock_server(3).await;
     let resp = run(
         &server,
-        "{ mailboxes { name parent { name } children { name } } \
+        "{ mailboxes { nodes { name parent { name } children { nodes { name } } } } \
            mailbox(name: \"INBOX\") { name } \
            emails(filter: { inMailbox: \"Inbox\" }, first: 3) { \
              nodes { mailboxes { name role } } } }",
@@ -336,7 +336,7 @@ async fn mailboxes_are_refetched_for_each_request() {
 
     for _ in 0..2 {
         let resp = schema
-            .execute(request("{ mailboxes { name } }", client.clone()))
+            .execute(request("{ mailboxes { nodes { name } } }", client.clone()))
             .await;
         assert!(resp.errors.is_empty(), "{:?}", resp.errors);
     }
@@ -360,7 +360,7 @@ async fn newly_exposed_fields_come_back() {
     let server = mock_server(1).await;
     let resp = run(
         &server,
-        "{ mailboxes { isSubscribed myRights { mayAddItems mayDelete } } \
+        "{ mailboxes { nodes { isSubscribed myRights { mayAddItems mayDelete } } } \
            emails(first: 1) { nodes { \
              sender { name email } \
              headers { name value } } } }",
@@ -369,7 +369,7 @@ async fn newly_exposed_fields_come_back() {
     assert!(resp.errors.is_empty(), "{:?}", resp.errors);
 
     let data = resp.data.into_json().unwrap();
-    let mb = &data["mailboxes"][0];
+    let mb = &data["mailboxes"]["nodes"][0];
     assert_eq!(mb["isSubscribed"], true);
     assert_eq!(mb["myRights"]["mayAddItems"], true);
     assert_eq!(mb["myRights"]["mayDelete"], false);
@@ -400,6 +400,131 @@ async fn sender_needs_no_extra_fetch() {
     assert_eq!(detail, 0, "`sender` must not trigger the full fetch");
 }
 
+// ============ In-memory connections ============
+
+#[tokio::test]
+async fn list_connections_paginate_by_id() {
+    // `Thread.emails` is the one with enough items in the mock to page through.
+    let server = mock_server(5).await;
+
+    let first = run(
+        &server,
+        "{ thread(emailId: \"e0\") { emails(first: 2) { \
+            totalCount pageInfo { hasNextPage hasPreviousPage endCursor } \
+            edges { cursor node { id } } } } }",
+    )
+    .await;
+    assert!(first.errors.is_empty(), "{:?}", first.errors);
+    let d = first.data.into_json().unwrap();
+    let page = &d["thread"]["emails"];
+
+    assert_eq!(page["totalCount"], 5, "totalCount ignores the page");
+    assert_eq!(page["pageInfo"]["hasNextPage"], true);
+    assert_eq!(page["pageInfo"]["hasPreviousPage"], false);
+    let ids: Vec<&str> = page["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["node"]["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["e0", "e1"]);
+    // Cursors are IDs, as everywhere else in this schema.
+    assert_eq!(page["edges"][0]["cursor"], "e0");
+    let end = page["pageInfo"]["endCursor"].as_str().unwrap().to_string();
+
+    let second = run(
+        &server,
+        &format!(
+            "{{ thread(emailId: \"e0\") {{ emails(first: 2, after: \"{end}\") {{ \
+                pageInfo {{ hasPreviousPage }} nodes {{ id }} }} }} }}"
+        ),
+    )
+    .await;
+    assert!(second.errors.is_empty(), "{:?}", second.errors);
+    let d = second.data.into_json().unwrap();
+    let ids: Vec<&str> = d["thread"]["emails"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["e2", "e3"], "`after` resumes past the cursor");
+    assert_eq!(d["thread"]["emails"]["pageInfo"]["hasPreviousPage"], true);
+}
+
+#[tokio::test]
+async fn list_connections_page_backwards() {
+    let server = mock_server(5).await;
+    let resp = run(
+        &server,
+        "{ thread(emailId: \"e0\") { emails(last: 2) { \
+            pageInfo { hasNextPage hasPreviousPage } nodes { id } } } }",
+    )
+    .await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+
+    let d = resp.data.into_json().unwrap();
+    let ids: Vec<&str> = d["thread"]["emails"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["e3", "e4"], "`last` takes from the end");
+    assert_eq!(d["thread"]["emails"]["pageInfo"]["hasPreviousPage"], true);
+    assert_eq!(d["thread"]["emails"]["pageInfo"]["hasNextPage"], false);
+}
+
+#[tokio::test]
+async fn conflicting_page_args_are_rejected() {
+    let server = mock_server(3).await;
+    for args in ["first: 1, last: 1", "after: \"e0\", before: \"e2\""] {
+        let resp = run(
+            &server,
+            &format!("{{ thread(emailId: \"e0\") {{ emails({args}) {{ nodes {{ id }} }} }} }}"),
+        )
+        .await;
+        assert!(
+            resp.errors.iter().any(|e| e.message.contains("not both")),
+            "expected a rejection for `{args}`, got {:?}",
+            resp.errors
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_removed_cursor_says_how_to_recover() {
+    let server = mock_server(3).await;
+    let resp = run(
+        &server,
+        "{ thread(emailId: \"e0\") { emails(after: \"nope\") { nodes { id } } } }",
+    )
+    .await;
+    assert!(
+        resp.errors
+            .iter()
+            .any(|e| e.message.contains("Restart pagination")),
+        "got {:?}",
+        resp.errors
+    );
+}
+
+#[tokio::test]
+async fn total_count_on_an_in_memory_list_is_free() {
+    // No `calculateTotal` anywhere — the list is already in hand, so the count
+    // is a length. Contrast the email connection, which asks the server.
+    let server = mock_server(4).await;
+    let resp = run(
+        &server,
+        "{ thread(emailId: \"e0\") { emails(first: 1) { totalCount } } }",
+    )
+    .await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+
+    let d = resp.data.into_json().unwrap();
+    assert_eq!(d["thread"]["emails"]["totalCount"], 4);
+}
+
 // ============ Attachment laziness ============
 //
 // Metadata is free, each payload field does the least work that answers it, and
@@ -410,8 +535,8 @@ async fn attachment_metadata_downloads_nothing() {
     let server = mock_server(3).await;
     let resp = run(
         &server,
-        "{ emails { nodes { attachments { \
-            blobId name contentType size disposition cid charset partId } } } }",
+        "{ emails { nodes { attachments { nodes { \
+            blobId name contentType size disposition cid charset partId } } } } }",
     )
     .await;
     assert!(resp.errors.is_empty(), "{:?}", resp.errors);
@@ -425,7 +550,11 @@ async fn attachment_metadata_downloads_nothing() {
 #[tokio::test]
 async fn base64_downloads_once_per_attachment() {
     let server = mock_server(3).await;
-    let resp = run(&server, "{ emails { nodes { attachments { base64 } } } }").await;
+    let resp = run(
+        &server,
+        "{ emails { nodes { attachments { nodes { base64 } } } } }",
+    )
+    .await;
     assert!(resp.errors.is_empty(), "{:?}", resp.errors);
 
     assert_eq!(
@@ -440,7 +569,7 @@ async fn siblings_needing_the_same_blob_download_it_once() {
     let server = mock_server(1).await;
     let resp = run(
         &server,
-        "{ emails(first: 1) { nodes { attachments { base64 text image } } } }",
+        "{ emails(first: 1) { nodes { attachments { nodes { base64 text image } } } } }",
     )
     .await;
     assert!(resp.errors.is_empty(), "{:?}", resp.errors);
@@ -465,13 +594,13 @@ async fn payload_fields_resolve_independently() {
     let server = mock_server(1).await;
     let resp = run(
         &server,
-        "{ emails(first: 1) { nodes { attachments { name size base64 image } } } }",
+        "{ emails(first: 1) { nodes { attachments { nodes { name size base64 image } } } } }",
     )
     .await;
     assert!(resp.errors.is_empty(), "{:?}", resp.errors);
 
     let data = resp.data.into_json().unwrap();
-    let att = &data["emails"]["nodes"][0]["attachments"][0];
+    let att = &data["emails"]["nodes"][0]["attachments"]["nodes"][0];
     assert!(att.get("text").is_none(), "text was not selected");
     assert!(
         att["base64"].is_string(),
@@ -488,13 +617,13 @@ async fn text_extracts_document_content() {
     let server = mock_server(1).await;
     let resp = run(
         &server,
-        "{ emails(first: 1) { nodes { attachments { text } } } }",
+        "{ emails(first: 1) { nodes { attachments { nodes { text } } } } }",
     )
     .await;
     assert!(resp.errors.is_empty(), "{:?}", resp.errors);
 
     let data = resp.data.into_json().unwrap();
-    let text = data["emails"]["nodes"][0]["attachments"][0]["text"]
+    let text = data["emails"]["nodes"][0]["attachments"]["nodes"][0]["text"]
         .as_str()
         .unwrap_or_default()
         .to_string();
@@ -512,7 +641,7 @@ async fn expensive_queries_are_costed_but_not_refused() {
     let server = mock_server(1).await;
     let resp = run(
         &server,
-        "{ emails(first: 100) { nodes { attachments { text base64 image } } } }",
+        "{ emails(first: 100) { nodes { attachments { nodes { text base64 image } } } } }",
     )
     .await;
     assert!(
@@ -531,10 +660,10 @@ async fn documented_examples_execute() {
     let documented = [
         "{ emails(filter: { inMailbox: \"INBOX\" }, first: 10) { nodes { \
             subject from { name email } textBody \
-            attachments { name contentType size cid text } } } }",
-        "{ mailbox(name: \"INBOX\") { name children { name unreadEmails } \
+            attachments { nodes { name contentType size cid text } } } } }",
+        "{ mailbox(name: \"INBOX\") { name children { nodes { name unreadEmails } } \
             emails(first: 5) { nodes { subject \
-              thread { total emails { subject textBody } } \
+              thread { total emails { nodes { subject textBody } } } \
               mailboxes { name role } } } } }",
         "{ emails(filter: { unread: true }, sort: [{ property: SIZE, ascending: false }], \
             first: 20) { totalCount nodes { subject size } } }",
@@ -602,7 +731,7 @@ async fn email_nests_into_its_thread() {
     let server = mock_server(3).await;
     let resp = run(
         &server,
-        "{ email(id: \"e0\") { subject thread { total emails { id textBody } } } }",
+        "{ email(id: \"e0\") { subject thread { total emails { nodes { id textBody } } } } }",
     )
     .await;
     assert!(resp.errors.is_empty(), "{:?}", resp.errors);
@@ -610,7 +739,7 @@ async fn email_nests_into_its_thread() {
     let data = resp.data.into_json().unwrap();
     assert_eq!(data["email"]["thread"]["total"], 3);
     assert_eq!(
-        data["email"]["thread"]["emails"][0]["textBody"],
+        data["email"]["thread"]["emails"]["nodes"][0]["textBody"],
         "Body of e0"
     );
 
@@ -656,8 +785,8 @@ async fn depth_limit_leaves_realistic_queries_alone() {
     let server = mock_server(1).await;
     let resp = run(
         &server,
-        "{ mailbox(name: \"INBOX\") { emails(first: 1) { nodes { thread { emails { \
-            attachments { name size } } } } } } }",
+        "{ mailbox(name: \"INBOX\") { emails(first: 1) { nodes { thread { emails { nodes { \
+            attachments { nodes { name size } } } } } } } } }",
     )
     .await;
     assert!(resp.errors.is_empty(), "{:?}", resp.errors);
@@ -690,7 +819,7 @@ fn schema_exposes_the_nested_edges() {
     let sdl = build_schema().sdl();
     for edge in [
         "emails(",    // Mailbox.emails
-        "children:",  // Mailbox.children
+        "children(",  // Mailbox.children — a connection, so it takes page args
         "parent:",    // Mailbox.parent
         "thread:",    // Email.thread
         "mailboxes:", // Email.mailboxes

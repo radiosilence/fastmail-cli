@@ -14,6 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use async_graphql::OutputType;
 use async_graphql::connection::{Connection, Edge, EmptyFields, query};
 use async_graphql::{Context, Result, SimpleObject};
 use serde_json::Value;
@@ -26,16 +27,20 @@ use crate::jmap::{EmailQuery, QueryStart};
 /// Connection-level fields beyond the Relay defaults.
 #[derive(SimpleObject)]
 pub struct EmailConnectionFields {
-    /// Total number of emails matching the filter, ignoring pagination.
+    /// Total number of emails matching, ignoring pagination.
     ///
-    /// Computing this costs the server extra work, so it is only requested when
-    /// you actually select the field — a query that omits it pays nothing.
+    /// On a query-backed list this costs the server extra work, so it is only
+    /// requested when you select it — omit it and you pay nothing. On
+    /// `Thread.emails` it is free and always present, being a length.
     pub total_count: Option<u64>,
-    /// Zero-based index of the first returned email within the full result set.
+    /// Zero-based index of the first returned email within the whole result set.
     pub position: u64,
     /// Opaque server state for this query. Two pages sharing a `queryState`
     /// came from the same result set; a change means messages arrived, moved,
     /// or were deleted in between.
+    ///
+    /// **Null on `Thread.emails`** — a conversation is not a query, so there is
+    /// no query state to report. Compare `totalCount` across pages instead.
     pub query_state: Option<String>,
 }
 
@@ -48,6 +53,150 @@ pub struct PageArgs {
     pub before: Option<String>,
     pub first: Option<i32>,
     pub last: Option<i32>,
+}
+
+/// The extra field on a connection built from a list we already hold.
+#[derive(SimpleObject)]
+pub struct CountFields {
+    /// How many items match, before paging.
+    ///
+    /// Free to ask for: this list arrived whole from a single call, so the
+    /// count is a length rather than extra work for the server.
+    pub total_count: u64,
+}
+
+/// A connection over a list that is already in memory. The GraphQL type name
+/// is derived from the node — `Mailbox` gives `MailboxConnection`, and so on.
+pub type ListConnection<T> = Connection<String, T, CountFields>;
+
+/// Work out which slice of an in-memory list a page refers to.
+///
+/// Everything except `emails` arrives whole from one API call — JMAP has no
+/// windowed form for mailboxes, identities, a thread's messages or an email's
+/// attachments. So paging here is slicing, and the honest consequence is that a
+/// cursor is only as stable as the list: `after` names an item by id, and if
+/// that item is gone next time you get a "restart pagination" error rather than
+/// a quietly different page.
+///
+/// Returns the cursors paired with their items, plus where the window sits.
+pub struct Page<T> {
+    pub items: Vec<(String, T)>,
+    pub start: usize,
+    pub total: usize,
+    pub has_previous: bool,
+    pub has_next: bool,
+}
+
+pub fn page_of<T>(
+    items: Vec<T>,
+    args: PageArgs,
+    cursor_of: impl Fn(&T) -> String,
+) -> Result<Page<T>> {
+    if args.first.is_some() && args.last.is_some() {
+        return Err(async_graphql::Error::new(
+            "Pass `first` or `last`, not both.",
+        ));
+    }
+    if args.after.is_some() && args.before.is_some() {
+        return Err(async_graphql::Error::new(
+            "Pass `after` or `before`, not both.",
+        ));
+    }
+
+    let cursors: Vec<String> = items.iter().map(&cursor_of).collect();
+    let total = items.len();
+
+    let locate = |cursor: &str| {
+        cursors.iter().position(|c| c == cursor).ok_or_else(|| {
+            async_graphql::Error::new(format!(
+                "Cursor {cursor:?} is no longer in this list — it was removed since the \
+                 cursor was issued. Restart pagination without `after`/`before`."
+            ))
+        })
+    };
+
+    let mut start = match &args.after {
+        Some(cursor) => locate(cursor)? + 1,
+        None => 0,
+    };
+    let mut end = match &args.before {
+        Some(cursor) => locate(cursor)?,
+        None => total,
+    };
+    end = end.max(start);
+
+    // Same page-size rules as the email connection, so `first`/`last` behave the
+    // same wherever they appear.
+    match (args.first, args.last) {
+        (Some(first), _) => {
+            end = end.min(start + clamp_page(Some(first.max(0) as u32)) as usize);
+        }
+        (_, Some(last)) => {
+            start = end.saturating_sub(clamp_page(Some(last.max(0) as u32)) as usize);
+        }
+        _ => end = end.min(start + clamp_page(None) as usize),
+    }
+
+    Ok(Page {
+        items: items
+            .into_iter()
+            .zip(cursors)
+            .skip(start)
+            .take(end - start)
+            .map(|(node, cursor)| (cursor, node))
+            .collect(),
+        start,
+        total,
+        has_previous: start > 0,
+        has_next: end < total,
+    })
+}
+
+/// Paginate a list we already hold. See [`page_of`] for what cursors mean here.
+pub fn paginate<T: OutputType>(
+    items: Vec<T>,
+    args: PageArgs,
+    cursor_of: impl Fn(&T) -> String,
+) -> Result<ListConnection<T>> {
+    let page = page_of(items, args, cursor_of)?;
+    let mut connection = Connection::with_additional_fields(
+        page.has_previous,
+        page.has_next,
+        CountFields {
+            total_count: page.total as u64,
+        },
+    );
+    connection.edges.extend(
+        page.items
+            .into_iter()
+            .map(|(cursor, node)| Edge::new(cursor, node)),
+    );
+    Ok(connection)
+}
+
+/// Paginate a thread's messages into the same `EmailConnection` every other
+/// email list returns.
+///
+/// A thread is not an `Email/query`, so `queryState` is null — there is no
+/// query to have a state. `position` and `totalCount` are both exact and free:
+/// the whole thread is already in hand.
+pub fn thread_connection(emails: Vec<GqlEmail>, args: PageArgs) -> Result<EmailConnection> {
+    let page = page_of(emails, args, |e| e.email_id().to_string())?;
+    let mut connection = Connection::with_additional_fields(
+        page.has_previous,
+        page.has_next,
+        EmailConnectionFields {
+            total_count: Some(page.total as u64),
+            position: page.start as u64,
+            query_state: None,
+        },
+    );
+    connection.edges.extend(
+        page.items
+            .into_iter()
+            .map(|(cursor, node)| Edge::new(cursor, node)),
+    );
+    Ok(connection)
 }
 
 /// Cost of a connection field for the complexity limit: the page size the

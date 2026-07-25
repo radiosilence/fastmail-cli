@@ -12,6 +12,16 @@
   the listener is bound. GraphiQL is loaded from a CDN with pinned versions and
   SRI hashes; the page is an Askama template.
 - **`--http` now takes an optional address**, defaulting to `127.0.0.1:8080`.
+- **Every collection is a connection.** `mailboxes`, `identities`,
+  `maskedEmails`, `contacts`, `attachments`, `Mailbox.children` and
+  `Thread.emails` now take `first`/`last`/`after`/`before` and expose
+  `totalCount`, `pageInfo`, `edges` and `nodes`, with IDs for cursors. Only
+  `emails` pages server-side; the rest arrive whole from one call, so their
+  `totalCount` is free and a stale cursor errors rather than silently shifting
+  the page. `Thread.emails` returns the same `EmailConnection` as the query
+  does — `queryState` is null there, since a conversation is not a query.
+  Value lists (`from`, `to`, `cc`, `keywords`, `headers`, …) stay plain arrays:
+  they belong to the parent and paging them would be ceremony.
 - **`cid`, `charset` and `partId` on `Attachment`.** All three already arrived
   with every full email fetch and were discarded. `cid` is the useful one:
   inline images are referenced from the HTML body as `<img src="cid:...">`, so

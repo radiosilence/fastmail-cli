@@ -497,6 +497,24 @@ Mailbox ──emails──▶ Email ──attachments──▶ Attachment ──
    └────mailboxes───────┘
 ```
 
+Every collection is a Relay connection — `mailboxes`, `identities`,
+`maskedEmails`, `contacts`, `attachments`, `Mailbox.children`, `Thread.emails` —
+so each takes `first` / `last` / `after` / `before` and exposes `totalCount`,
+`pageInfo`, `edges` and `nodes`. Cursors are IDs. Use `nodes` for the items;
+`edges` only when you want per-item cursors. Default page 25, max 100 — check
+`pageInfo.hasNextPage` rather than assuming you got the lot.
+
+Only `emails` pages server-side, via JMAP's anchors. The rest arrive whole from
+one call, so their paging is slicing: `totalCount` is free (a length, not
+`calculateTotal`) and a cursor holds only as long as its item is still in the
+list — if it goes, you get a "restart pagination" error rather than a quietly
+different page. `Thread.emails` returns the same `EmailConnection` as the query
+does, with `queryState` null because a conversation is not a query.
+
+Value lists stay plain arrays: `from`, `to`, `cc`, `bcc`, `replyTo`, `sender`,
+`keywords`, `mailboxIds`, `headers`, `Contact.emails`. They belong to the parent,
+arrive with it, and paging them would be ceremony.
+
 Attachment payloads are three separate fields, each doing the least work that
 answers it. Metadata (`name`, `size`, `contentType`, `cid`, …) arrives with the
 email and downloads nothing at all:
@@ -519,11 +537,7 @@ email and downloads nothing at all:
       from { name email }
       textBody
       attachments {
-        name
-        contentType
-        size
-        cid
-        text
+        nodes { name contentType size cid text }
       }
     }
   }
@@ -533,11 +547,11 @@ email and downloads nothing at all:
 {
   mailbox(name: "INBOX") {
     name
-    children { name unreadEmails }
+    children { nodes { name unreadEmails } }
     emails(first: 5) {
       nodes {
         subject
-        thread { total emails { subject textBody } }
+        thread { total emails { nodes { subject textBody } } }
         mailboxes { name role }
       }
     }
@@ -640,9 +654,9 @@ call** rather than one per element.
 | `{ totalCount }` alone | 1 (`Email/query`, no emails fetched) |
 | `{ subject from { email } }` | 2 (`Email/query` + `Email/get`) |
 | `{ subject textBody }` | 3 (+1 batched `Email/get` for all 25 bodies) |
-| `{ subject textBody attachments { name } }` | 3 (same batch covers both) |
-| `{ … attachments { name cid size } }` | 3 (metadata downloads nothing) |
-| `{ … attachments { base64 } }` or `{ … text }` | 3 + the blob downloads, issued concurrently |
+| `{ subject textBody attachments { nodes { name } } }` | 3 (same batch covers both) |
+| `{ … attachments { nodes { name cid size } } }` | 3 (metadata downloads nothing) |
+| `{ … attachments { nodes { base64 } } }` | 3 + the blob downloads, issued concurrently |
 | `{ … mailboxes { name } }` + `mailbox(…)` + a name filter | +1 `Mailbox/get` total, however many ask |
 
 The naive shape — one detail call per email — would be 26. Loader caches are

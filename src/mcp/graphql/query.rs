@@ -2,7 +2,9 @@
 
 use async_graphql::{Context, Object, Result};
 
-use super::connection::{EmailConnection, PageArgs, emails_connection, page_complexity};
+use super::connection::{
+    EmailConnection, ListConnection, PageArgs, emails_connection, page_complexity, paginate,
+};
 use super::filter::{EmailFilter, EmailSort};
 use super::loaders::{Emails, Identities, MaskedEmails, to_gql_error};
 use super::types::*;
@@ -13,14 +15,31 @@ pub struct QueryRoot;
 #[allow(clippy::too_many_arguments)]
 impl QueryRoot {
     /// List all mailboxes (folders) with unread counts. Start here to discover available folders.
-    async fn mailboxes(&self, ctx: &Context<'_>) -> Result<Vec<GqlMailbox>> {
+    #[graphql(complexity = "page_complexity(first, last, child_complexity)")]
+    async fn mailboxes(
+        &self,
+        ctx: &Context<'_>,
+        after: Option<String>,
+        before: Option<String>,
+        first: Option<i32>,
+        last: Option<i32>,
+    ) -> Result<ListConnection<GqlMailbox>> {
         let mut mailboxes = all_mailboxes(ctx).await?.as_ref().clone();
         mailboxes.sort_by(|a, b| match (&a.role, &b.role) {
             (Some(_), None) => std::cmp::Ordering::Less,
             (None, Some(_)) => std::cmp::Ordering::Greater,
             _ => a.name.cmp(&b.name),
         });
-        Ok(mailboxes.into_iter().map(GqlMailbox::from).collect())
+        paginate(
+            mailboxes.into_iter().map(GqlMailbox::from).collect(),
+            PageArgs {
+                after,
+                before,
+                first,
+                last,
+            },
+            |m| m.0.id.clone(),
+        )
     }
 
     /// Look up a single mailbox by name or role. Navigate into it with
@@ -184,18 +203,32 @@ impl QueryRoot {
     /// List attachment metadata for an email. Metadata alone downloads nothing;
     /// select `base64`, `image` or `text` to pull the data.
     /// Equivalent to `email(id: ...) { attachments { ... } }`.
+    #[graphql(complexity = "page_complexity(first, last, child_complexity)")]
     async fn attachments(
         &self,
         ctx: &Context<'_>,
         #[graphql(desc = "The email ID")] email_id: String,
-    ) -> Result<Vec<GqlAttachment>> {
+        after: Option<String>,
+        before: Option<String>,
+        first: Option<i32>,
+        last: Option<i32>,
+    ) -> Result<ListConnection<GqlAttachment>> {
         let loader = ctx.data::<Emails>()?;
         let email = loader
             .load_one(email_id.clone())
             .await
             .map_err(to_gql_error)?
             .ok_or_else(|| async_graphql::Error::new(format!("Email {email_id} not found")))?;
-        Ok(attachments_of(&email))
+        paginate(
+            attachments_of(&email),
+            PageArgs {
+                after,
+                before,
+                first,
+                last,
+            },
+            |a| a.blob_id.clone(),
+        )
     }
 
     /// Get a single attachment by blob ID. Select `content` to fetch its data.
@@ -217,18 +250,43 @@ impl QueryRoot {
     }
 
     /// List all sender identities on the account. Includes signatures and default reply-to/bcc.
-    async fn identities(&self, ctx: &Context<'_>) -> Result<Vec<GqlIdentity>> {
+    #[graphql(complexity = "page_complexity(first, last, child_complexity)")]
+    async fn identities(
+        &self,
+        ctx: &Context<'_>,
+        after: Option<String>,
+        before: Option<String>,
+        first: Option<i32>,
+        last: Option<i32>,
+    ) -> Result<ListConnection<GqlIdentity>> {
         let identities = ctx
             .data::<Identities>()?
             .load_one(())
             .await
             .map_err(to_gql_error)?
             .unwrap_or_default();
-        Ok(identities.iter().cloned().map(GqlIdentity::from).collect())
+        paginate(
+            identities.iter().cloned().map(GqlIdentity::from).collect(),
+            PageArgs {
+                after,
+                before,
+                first,
+                last,
+            },
+            |i| i.id.clone(),
+        )
     }
 
     /// List all masked email addresses.
-    async fn masked_emails(&self, ctx: &Context<'_>) -> Result<Vec<GqlMaskedEmail>> {
+    #[graphql(complexity = "page_complexity(first, last, child_complexity)")]
+    async fn masked_emails(
+        &self,
+        ctx: &Context<'_>,
+        after: Option<String>,
+        before: Option<String>,
+        first: Option<i32>,
+        last: Option<i32>,
+    ) -> Result<ListConnection<GqlMaskedEmail>> {
         let mut masked = ctx
             .data::<MaskedEmails>()?
             .load_one(())
@@ -246,14 +304,28 @@ impl QueryRoot {
                 _ => a.email.cmp(&b.email),
             }
         });
-        Ok(masked.into_iter().map(GqlMaskedEmail::from).collect())
+        paginate(
+            masked.into_iter().map(GqlMaskedEmail::from).collect(),
+            PageArgs {
+                after,
+                before,
+                first,
+                last,
+            },
+            |m| m.id.clone(),
+        )
     }
 
     /// Search contacts by name, email, or organization. Requires FASTMAIL_APP_PASSWORD.
+    #[graphql(complexity = "page_complexity(first, last, child_complexity)")]
     async fn contacts(
         &self,
         #[graphql(desc = "Search query — matches name, email, or organization")] query: String,
-    ) -> Result<Vec<GqlContact>> {
+        after: Option<String>,
+        before: Option<String>,
+        first: Option<i32>,
+        last: Option<i32>,
+    ) -> Result<ListConnection<GqlContact>> {
         let config = crate::config::Config::load()?;
         let username = config.get_username().map_err(|_| {
             async_graphql::Error::new("Username not configured. Set FASTMAIL_USERNAME env var.")
@@ -266,6 +338,15 @@ impl QueryRoot {
 
         let client = crate::carddav::CardDavClient::new(username, app_password);
         let contacts = client.search_contacts(&query).await?;
-        Ok(contacts.into_iter().map(GqlContact::from).collect())
+        paginate(
+            contacts.into_iter().map(GqlContact::from).collect(),
+            PageArgs {
+                after,
+                before,
+                first,
+                last,
+            },
+            |c| c.id.clone(),
+        )
     }
 }
