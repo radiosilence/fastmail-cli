@@ -5,8 +5,13 @@
 
 use async_graphql::Schema;
 
+pub mod connection;
+pub mod filter;
+pub mod loaders;
 mod mutation;
 mod query;
+#[cfg(test)]
+mod tests;
 pub mod types;
 
 use mutation::MutationRoot;
@@ -19,6 +24,12 @@ pub type FastmailSchema = Schema<QueryRoot, MutationRoot, async_graphql::EmptySu
 /// for the same Fastmail token rather than re-authenticating every call.
 pub type SharedClient = std::sync::Arc<tokio::sync::Mutex<crate::jmap::JmapClient>>;
 
+/// Maximum selection-set nesting. The graph contains cycles by design — an
+/// email's thread contains emails, a mailbox's emails belong to mailboxes — so
+/// unbounded depth would let one query walk forever. 15 is far past any useful
+/// query (mailbox → emails → thread → emails → attachments → text is 6).
+const MAX_DEPTH: usize = 15;
+
 /// Build the GraphQL schema with only the process-shared preview-nonce store.
 ///
 /// The JMAP client is **not** baked in — it is supplied per request via
@@ -26,7 +37,35 @@ pub type SharedClient = std::sync::Arc<tokio::sync::Mutex<crate::jmap::JmapClien
 /// each with their own Fastmail token. The nonce store stays schema-level
 /// because send preview→confirm spans two separate requests.
 pub fn build_schema() -> FastmailSchema {
+    // Complexity is deliberately **not** capped. Resolvers still declare costs
+    // (the `complexity` attributes, priced so a document parse reads as far more
+    // expensive than a download) but those are guidance, surfaced in the field
+    // descriptions so a caller can choose a sensible page size — not a limit
+    // that refuses the query. Rejecting an expensive-but-legitimate request
+    // leaves the caller guessing at a threshold it cannot see.
+    //
+    // Depth stays capped: the graph contains cycles, and nothing else bounds
+    // them.
     Schema::build(QueryRoot, MutationRoot, async_graphql::EmptySubscription)
         .data(types::NonceStore::default())
+        .limit_depth(MAX_DEPTH)
         .finish()
+}
+
+/// Build a GraphQL request carrying everything a resolver may need: the
+/// authenticated JMAP client plus a fresh set of DataLoaders.
+///
+/// Loaders are per request on purpose — their cache is then a request-scoped
+/// cache, so repeating a key inside one query is free while nothing is retained
+/// long enough to go stale.
+pub fn request(query: &str, client: SharedClient) -> async_graphql::Request {
+    let loaders = loaders::Loaders::new(client.clone());
+    async_graphql::Request::new(query)
+        .data(client)
+        .data(loaders.email)
+        .data(loaders.mailbox)
+        .data(loaders.identity)
+        .data(loaders.masked)
+        .data(loaders.thread)
+        .data(loaders.blob)
 }

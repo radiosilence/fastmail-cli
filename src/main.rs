@@ -326,12 +326,28 @@ enum Commands {
 
     /// Run as MCP (Model Context Protocol) server for Claude integration
     Mcp {
-        /// Serve over streamable HTTP on this address (e.g. 127.0.0.1:8080)
-        /// instead of stdio. In HTTP mode the Fastmail token is read from the
-        /// `X-Fastmail-Token` header per request; over stdio it comes from
-        /// config as usual.
-        #[arg(long, value_name = "ADDR")]
+        /// Serve over streamable HTTP instead of stdio, at this address.
+        /// The `X-Fastmail-Token` header overrides the configured token per
+        /// request, which is how a hosted deployment serves many users.
+        #[arg(
+            long,
+            value_name = "ADDR",
+            num_args = 0..=1,
+            default_missing_value = "127.0.0.1:8080",
+        )]
         http: Option<String>,
+
+        /// Also serve plain GraphQL-over-HTTP at /graphql
+        #[arg(long, requires = "http")]
+        graphql: bool,
+
+        /// Also serve the GraphiQL IDE at /
+        #[arg(long, requires = "graphql")]
+        graphiql: bool,
+
+        /// Open the GraphiQL IDE in your browser once listening
+        #[arg(long, requires = "graphiql")]
+        browser: bool,
     },
 }
 
@@ -743,8 +759,20 @@ async fn main() {
             }
         },
 
-        Commands::Mcp { http } => match http {
-            Some(addr) => mcp::run_http_server(&addr).await,
+        Commands::Mcp {
+            http,
+            graphql,
+            graphiql,
+            browser,
+        } => match http {
+            Some(addr) => {
+                let surfaces = mcp::HttpSurfaces {
+                    graphql,
+                    graphiql,
+                    browser,
+                };
+                mcp::run_http_server(&addr, surfaces).await
+            }
             None => mcp::run_server().await,
         },
     };

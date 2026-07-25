@@ -11,6 +11,59 @@ use tracing::{debug, instrument};
 const SESSION_URL: &str = "https://api.fastmail.com/jmap/session";
 const TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Properties fetched for list/search results: everything that is cheap to
+/// serialise. Bodies and attachment metadata are deliberately excluded — those
+/// are pulled on demand, in one batched call, by [`JmapClient::get_emails`].
+pub const EMAIL_SUMMARY_PROPERTIES: &[&str] = &[
+    "id",
+    "blobId",
+    "threadId",
+    "mailboxIds",
+    "keywords",
+    "size",
+    "receivedAt",
+    "sentAt",
+    "sender",
+    "from",
+    "to",
+    "cc",
+    "bcc",
+    "replyTo",
+    "subject",
+    "preview",
+    "hasAttachment",
+];
+
+/// The summary set plus bodies, attachment metadata and threading headers —
+/// the expensive fetch.
+pub const EMAIL_FULL_PROPERTIES: &[&str] = &[
+    "id",
+    "blobId",
+    "threadId",
+    "mailboxIds",
+    "keywords",
+    "size",
+    "receivedAt",
+    "sentAt",
+    "messageId",
+    "inReplyTo",
+    "references",
+    "sender",
+    "from",
+    "to",
+    "cc",
+    "bcc",
+    "replyTo",
+    "subject",
+    "preview",
+    "hasAttachment",
+    "textBody",
+    "htmlBody",
+    "attachments",
+    "bodyValues",
+    "headers",
+];
+
 const DESIRED_CAPABILITIES: &[&str] = &[
     "urn:ietf:params:jmap:core",
     "urn:ietf:params:jmap:mail",
@@ -208,10 +261,152 @@ struct GetResponse<T> {
 }
 
 #[derive(Deserialize)]
-struct GetResponseWithNotFound<T> {
-    list: Vec<T>,
-    #[serde(rename = "notFound")]
-    not_found: Vec<String>,
+struct QueryResponse {
+    ids: Vec<String>,
+    #[serde(default)]
+    position: u64,
+    #[serde(default)]
+    total: Option<u64>,
+    #[serde(default, rename = "queryState")]
+    query_state: Option<String>,
+}
+
+/// Where a query window starts.
+///
+/// JMAP offers two ways to say this, and the anchor form is what makes stable
+/// pagination possible: an index shifts whenever mail arrives, but an anchor is
+/// an ID in the result set, so a cursor built from one still points at the same
+/// message a minute later.
+pub enum QueryStart {
+    /// Zero-based index. Negative counts back from the end, so `-10` is "the
+    /// last ten" without needing to know the total first.
+    Position(i64),
+    /// Start relative to a known ID: offset `1` is the item after it, `-n` the
+    /// `n` items ending just before it.
+    Anchor { id: String, offset: i64 },
+}
+
+impl Default for QueryStart {
+    fn default() -> Self {
+        Self::Position(0)
+    }
+}
+
+/// Parameters for one `Email/query` window.
+pub struct EmailQuery {
+    /// A JMAP `FilterCondition` or `FilterOperator` object.
+    pub filter: Value,
+    /// JMAP sort comparators, most significant first.
+    pub sort: Vec<Value>,
+    /// Where the window begins.
+    pub start: QueryStart,
+    pub limit: u32,
+    /// Ask the server for the total match count. Costs the server extra work,
+    /// so only set it when the caller actually needs the number.
+    pub calculate_total: bool,
+    /// Return one email per conversation instead of every message.
+    pub collapse_threads: bool,
+    /// Also fetch summary records for the matched IDs, in query order.
+    pub fetch_summaries: bool,
+}
+
+impl EmailQuery {
+    /// Newest-first page of `limit` emails, with summaries and no total.
+    pub fn first(limit: u32) -> Self {
+        Self {
+            filter: json!({}),
+            sort: vec![json!({ "property": "receivedAt", "isAscending": false })],
+            start: QueryStart::Position(0),
+            limit,
+            calculate_total: false,
+            collapse_threads: false,
+            fetch_summaries: true,
+        }
+    }
+}
+
+/// Normalise a date to ISO 8601, accepting a bare `YYYY-MM-DD`.
+pub fn normalize_date(date: &str) -> String {
+    if date.contains('T') {
+        date.to_string()
+    } else {
+        format!("{date}T00:00:00Z")
+    }
+}
+
+/// Build a flat JMAP `FilterCondition` from the CLI's [`SearchFilter`].
+///
+/// This is the flattened view the CLI needs. The GraphQL layer builds richer
+/// `FilterOperator` trees directly — see `mcp::graphql::filter`.
+pub fn search_filter_to_jmap(filter: &SearchFilter, mailbox_id: Option<&str>) -> Value {
+    let mut f = json!({});
+
+    let mut set = |key: &str, value: Value| {
+        f[key] = value;
+    };
+
+    if let Some(ref text) = filter.text {
+        set("text", json!(text));
+    }
+    if let Some(ref from) = filter.from {
+        set("from", json!(from));
+    }
+    if let Some(ref to) = filter.to {
+        set("to", json!(to));
+    }
+    if let Some(ref cc) = filter.cc {
+        set("cc", json!(cc));
+    }
+    if let Some(ref bcc) = filter.bcc {
+        set("bcc", json!(bcc));
+    }
+    if let Some(ref subject) = filter.subject {
+        set("subject", json!(subject));
+    }
+    if let Some(ref body) = filter.body {
+        set("body", json!(body));
+    }
+    if let Some(mailbox) = mailbox_id {
+        set("inMailbox", json!(mailbox));
+    }
+    if filter.has_attachment {
+        set("hasAttachment", json!(true));
+    }
+    if let Some(min_size) = filter.min_size {
+        set("minSize", json!(min_size));
+    }
+    if let Some(max_size) = filter.max_size {
+        set("maxSize", json!(max_size));
+    }
+    if let Some(ref before) = filter.before {
+        set("before", json!(normalize_date(before)));
+    }
+    if let Some(ref after) = filter.after {
+        set("after", json!(normalize_date(after)));
+    }
+    if filter.unread {
+        set("notKeyword", json!("$seen"));
+    }
+    if filter.flagged {
+        set("hasKeyword", json!("$flagged"));
+    }
+
+    f
+}
+
+/// One window of an `Email/query` result set.
+pub struct EmailPage {
+    /// Summary records in query order. Empty when summaries weren't requested.
+    pub emails: Vec<Email>,
+    /// The IDs this window matched, in order.
+    pub ids: Vec<String>,
+    /// Index of the first returned ID within the full result set.
+    pub position: u64,
+    /// Total matches, when `calculate_total` was set.
+    pub total: Option<u64>,
+    /// Opaque server state string for this query, letting a client tell whether
+    /// the result set has changed since it last looked.
+    pub query_state: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -371,6 +566,34 @@ impl JmapClient {
         }
     }
 
+    /// Build a client that is already "authenticated" against `api_url`, so
+    /// tests can point it at a mock JMAP server without going through the
+    /// hardcoded session endpoint.
+    #[cfg(test)]
+    pub fn with_test_session(api_url: &str) -> Self {
+        let mut client = Self::new("test-token".into());
+        client.available_capabilities =
+            DESIRED_CAPABILITIES.iter().map(|s| s.to_string()).collect();
+        client.session = Some(Session {
+            capabilities: DESIRED_CAPABILITIES
+                .iter()
+                .map(|c| (c.to_string(), json!({})))
+                .collect(),
+            accounts: HashMap::new(),
+            primary_accounts: HashMap::from([(
+                "urn:ietf:params:jmap:mail".to_string(),
+                "acct1".to_string(),
+            )]),
+            username: "test@example.com".into(),
+            api_url: api_url.to_string(),
+            download_url: format!("{api_url}/download/{{blobId}}"),
+            upload_url: format!("{api_url}/upload"),
+            event_source_url: None,
+            state: None,
+        });
+        client
+    }
+
     #[instrument(skip(self))]
     pub async fn authenticate(&mut self) -> Result<&Session> {
         debug!("Fetching JMAP session");
@@ -496,12 +719,15 @@ impl JmapClient {
         })
     }
 
+    /// Fetch the mailbox list from the server, always. Takes `&self` so callers
+    /// holding a shared client can use it concurrently.
+    ///
+    /// This is the primitive the GraphQL mailbox loader wraps: the loader has a
+    /// request-scoped cache of its own, and a cache *here* would outlive the
+    /// request — clients are pooled per token for the life of the process, so a
+    /// folder created after start-up would never appear.
     #[instrument(skip(self))]
-    pub async fn list_mailboxes(&mut self) -> Result<Vec<Mailbox>> {
-        if let Some(ref cached) = self.cached_mailboxes {
-            return Ok(cached.clone());
-        }
-
+    pub async fn fetch_mailboxes(&self) -> Result<Vec<Mailbox>> {
         let account_id = self.account_id()?;
 
         let responses = self
@@ -512,7 +738,8 @@ impl JmapClient {
                     "properties": [
                         "id", "name", "parentId", "role",
                         "totalEmails", "unreadEmails",
-                        "totalThreads", "unreadThreads", "sortOrder"
+                        "totalThreads", "unreadThreads", "sortOrder",
+                        "isSubscribed", "myRights"
                     ]
                 },
                 "m0"
@@ -522,8 +749,22 @@ impl JmapClient {
         let resp: GetResponse<Mailbox> =
             Self::parse_response(responses.first().unwrap_or(&Value::Null), "Mailbox/get")?;
 
-        self.cached_mailboxes = Some(resp.list.clone());
         Ok(resp.list)
+    }
+
+    /// Mailbox list, memoised for the life of this client.
+    ///
+    /// For the CLI, where the process is short-lived and several commands walk
+    /// the folder tree in one run. Long-lived callers want
+    /// [`Self::fetch_mailboxes`] instead.
+    #[instrument(skip(self))]
+    pub async fn list_mailboxes(&mut self) -> Result<Vec<Mailbox>> {
+        if let Some(ref cached) = self.cached_mailboxes {
+            return Ok(cached.clone());
+        }
+        let mailboxes = self.fetch_mailboxes().await?;
+        self.cached_mailboxes = Some(mailboxes.clone());
+        Ok(mailboxes)
     }
 
     pub async fn find_mailbox(&mut self, name: &str) -> Result<Mailbox> {
@@ -547,50 +788,102 @@ impl JmapClient {
         Err(Error::MailboxNotFound(name.into()))
     }
 
-    #[instrument(skip(self))]
-    pub async fn list_emails(&self, mailbox_id: &str, limit: u32) -> Result<Vec<Email>> {
+    /// One window of an `Email/query` result.
+    #[instrument(skip(self, query))]
+    pub async fn query_emails(&self, query: EmailQuery) -> Result<EmailPage> {
         let account_id = self.account_id()?;
 
-        let responses = self
-            .request(vec![
-                json!([
-                    "Email/query",
-                    {
-                        "accountId": account_id,
-                        "filter": { "inMailbox": mailbox_id },
-                        "sort": [{"property": "receivedAt", "isAscending": false}],
-                        "limit": limit
-                    },
-                    "q0"
-                ]),
-                json!([
-                    "Email/get",
-                    {
-                        "accountId": account_id,
-                        "#ids": {
-                            "resultOf": "q0",
-                            "name": "Email/query",
-                            "path": "/ids"
-                        },
-                        "properties": [
-                            "id", "threadId", "mailboxIds", "keywords",
-                            "size", "receivedAt", "from", "to", "cc",
-                            "subject", "preview", "hasAttachment"
-                        ]
-                    },
-                    "g0"
-                ]),
-            ])
-            .await?;
+        let mut args = json!({
+            "accountId": account_id,
+            "filter": query.filter,
+            "sort": query.sort,
+            "limit": query.limit,
+            "calculateTotal": query.calculate_total,
+            "collapseThreads": query.collapse_threads
+        });
+        match query.start {
+            QueryStart::Position(p) => args["position"] = json!(p),
+            QueryStart::Anchor { ref id, offset } => {
+                args["anchor"] = json!(id);
+                args["anchorOffset"] = json!(offset);
+            }
+        }
 
-        let resp: GetResponse<Email> =
-            Self::parse_response(responses.get(1).unwrap_or(&Value::Null), "Email/get")?;
+        let mut method_calls = vec![json!(["Email/query", args, "q0"])];
 
-        Ok(resp.list)
+        // Chain the summary fetch off the query with a JMAP back-reference, so a
+        // page costs one HTTP round trip rather than two. Skipped entirely when
+        // the caller only wants counts.
+        if query.fetch_summaries {
+            method_calls.push(json!([
+                "Email/get",
+                {
+                    "accountId": account_id,
+                    "#ids": {
+                        "resultOf": "q0",
+                        "name": "Email/query",
+                        "path": "/ids"
+                    },
+                    "properties": EMAIL_SUMMARY_PROPERTIES
+                },
+                "g0"
+            ]));
+        }
+
+        let responses = self.request(method_calls).await?;
+
+        let query_resp: QueryResponse =
+            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/query")?;
+
+        let mut emails = Vec::new();
+        if query.fetch_summaries {
+            let get_resp: GetResponse<Email> =
+                Self::parse_response(responses.get(1).unwrap_or(&Value::Null), "Email/get")?;
+            // `Email/get` makes no ordering guarantee, so restore the sort order
+            // the query asked for rather than trusting the response order.
+            let mut by_id: HashMap<&str, Email> = get_resp
+                .list
+                .iter()
+                .map(|e| (e.id.as_str(), e.clone()))
+                .collect();
+            emails = query_resp
+                .ids
+                .iter()
+                .filter_map(|id| by_id.remove(id.as_str()))
+                .collect();
+        }
+
+        Ok(EmailPage {
+            emails,
+            ids: query_resp.ids,
+            position: query_resp.position,
+            total: query_resp.total,
+            query_state: query_resp.query_state,
+        })
     }
 
     #[instrument(skip(self))]
-    pub async fn get_email(&self, email_id: &str) -> Result<Email> {
+    pub async fn list_emails(&self, mailbox_id: &str, limit: u32) -> Result<Vec<Email>> {
+        let page = self
+            .query_emails(EmailQuery {
+                filter: json!({ "inMailbox": mailbox_id }),
+                ..EmailQuery::first(limit)
+            })
+            .await?;
+        Ok(page.emails)
+    }
+
+    /// Fetch full content — bodies, attachment metadata, threading headers — for
+    /// many emails in a **single** `Email/get` call.
+    ///
+    /// IDs that don't exist are simply absent from the result; the caller decides
+    /// whether that is an error. This is the batch primitive behind the GraphQL
+    /// email DataLoader.
+    #[instrument(skip(self))]
+    pub async fn get_emails(&self, ids: &[String]) -> Result<Vec<Email>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
         let account_id = self.account_id()?;
 
         let responses = self
@@ -598,14 +891,8 @@ impl JmapClient {
                 "Email/get",
                 {
                     "accountId": account_id,
-                    "ids": [email_id],
-                    "properties": [
-                        "id", "blobId", "threadId", "mailboxIds", "keywords",
-                        "size", "receivedAt", "messageId", "inReplyTo", "references",
-                        "from", "to", "cc", "bcc", "replyTo", "subject", "sentAt",
-                        "preview", "hasAttachment", "textBody", "htmlBody", "attachments",
-                        "bodyValues"
-                    ],
+                    "ids": ids,
+                    "properties": EMAIL_FULL_PROPERTIES,
                     "fetchTextBodyValues": true,
                     "fetchHTMLBodyValues": true
                 },
@@ -613,37 +900,42 @@ impl JmapClient {
             ])])
             .await?;
 
-        let resp: GetResponseWithNotFound<Email> =
+        let resp: GetResponse<Email> =
             Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/get")?;
 
-        if !resp.not_found.is_empty() {
-            return Err(Error::EmailNotFound(email_id.into()));
-        }
+        Ok(resp.list)
+    }
 
-        resp.list
+    #[instrument(skip(self))]
+    pub async fn get_email(&self, email_id: &str) -> Result<Email> {
+        let ids = [email_id.to_string()];
+        self.get_emails(&ids)
+            .await?
             .into_iter()
             .next()
             .ok_or_else(|| Error::EmailNotFound(email_id.into()))
     }
 
-    /// Get all emails in a thread
+    /// Resolve thread IDs to their member email IDs in a single `Thread/get`.
+    ///
+    /// Threads that don't exist are absent from the map. This is the batch
+    /// primitive behind the GraphQL thread DataLoader.
     #[instrument(skip(self))]
-    pub async fn get_thread(&self, email_id: &str) -> Result<Vec<Email>> {
+    pub async fn thread_email_ids(
+        &self,
+        thread_ids: &[String],
+    ) -> Result<HashMap<String, Vec<String>>> {
+        if thread_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
         let account_id = self.account_id()?;
 
-        // First get the email to find its threadId
-        let email = self.get_email(email_id).await?;
-        let thread_id = email
-            .thread_id
-            .ok_or_else(|| Error::Config("Email has no thread ID".into()))?;
-
-        // Get the thread to find all email IDs
         let responses = self
             .request(vec![json!([
                 "Thread/get",
                 {
                     "accountId": account_id,
-                    "ids": [thread_id]
+                    "ids": thread_ids
                 },
                 "t0"
             ])])
@@ -651,42 +943,32 @@ impl JmapClient {
 
         #[derive(Deserialize)]
         struct Thread {
+            id: String,
             #[serde(rename = "emailIds")]
             email_ids: Vec<String>,
         }
 
-        let thread_resp: GetResponse<Thread> =
+        let resp: GetResponse<Thread> =
             Self::parse_response(responses.first().unwrap_or(&Value::Null), "Thread/get")?;
 
-        let thread = thread_resp
-            .list
-            .into_iter()
-            .next()
+        Ok(resp.list.into_iter().map(|t| (t.id, t.email_ids)).collect())
+    }
+
+    /// Get all emails in a thread, with full content.
+    #[instrument(skip(self))]
+    pub async fn get_thread(&self, email_id: &str) -> Result<Vec<Email>> {
+        let email = self.get_email(email_id).await?;
+        let thread_id = email
+            .thread_id
+            .ok_or_else(|| Error::Config("Email has no thread ID".into()))?;
+
+        let ids = self
+            .thread_email_ids(std::slice::from_ref(&thread_id))
+            .await?
+            .remove(&thread_id)
             .ok_or_else(|| Error::Config("Thread not found".into()))?;
 
-        // Now get all emails in the thread
-        let responses = self
-            .request(vec![json!([
-                "Email/get",
-                {
-                    "accountId": account_id,
-                    "ids": thread.email_ids,
-                    "properties": [
-                        "id", "threadId", "mailboxIds", "keywords",
-                        "size", "receivedAt", "from", "to", "cc",
-                        "subject", "preview", "hasAttachment", "textBody", "htmlBody", "bodyValues"
-                    ],
-                    "fetchTextBodyValues": true,
-                    "fetchHTMLBodyValues": true
-                },
-                "e0"
-            ])])
-            .await?;
-
-        let resp: GetResponse<Email> =
-            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/get")?;
-
-        Ok(resp.list)
+        self.get_emails(&ids).await
     }
 
     /// Search emails with full JMAP filter support
@@ -697,104 +979,13 @@ impl JmapClient {
         mailbox_id: Option<&str>,
         limit: u32,
     ) -> Result<Vec<Email>> {
-        let account_id = self.account_id()?;
-
-        // Build JMAP filter object
-        let mut jmap_filter = json!({});
-
-        if let Some(ref text) = filter.text {
-            jmap_filter["text"] = json!(text);
-        }
-        if let Some(ref from) = filter.from {
-            jmap_filter["from"] = json!(from);
-        }
-        if let Some(ref to) = filter.to {
-            jmap_filter["to"] = json!(to);
-        }
-        if let Some(ref cc) = filter.cc {
-            jmap_filter["cc"] = json!(cc);
-        }
-        if let Some(ref bcc) = filter.bcc {
-            jmap_filter["bcc"] = json!(bcc);
-        }
-        if let Some(ref subject) = filter.subject {
-            jmap_filter["subject"] = json!(subject);
-        }
-        if let Some(ref body) = filter.body {
-            jmap_filter["body"] = json!(body);
-        }
-        if let Some(mailbox) = mailbox_id {
-            jmap_filter["inMailbox"] = json!(mailbox);
-        }
-        if filter.has_attachment {
-            jmap_filter["hasAttachment"] = json!(true);
-        }
-        if let Some(min_size) = filter.min_size {
-            jmap_filter["minSize"] = json!(min_size);
-        }
-        if let Some(max_size) = filter.max_size {
-            jmap_filter["maxSize"] = json!(max_size);
-        }
-        if let Some(ref before) = filter.before {
-            // Normalize date to ISO 8601 if needed
-            let date = if before.contains('T') {
-                before.clone()
-            } else {
-                format!("{}T00:00:00Z", before)
-            };
-            jmap_filter["before"] = json!(date);
-        }
-        if let Some(ref after) = filter.after {
-            let date = if after.contains('T') {
-                after.clone()
-            } else {
-                format!("{}T00:00:00Z", after)
-            };
-            jmap_filter["after"] = json!(date);
-        }
-        if filter.unread {
-            jmap_filter["notKeyword"] = json!("$seen");
-        }
-        if filter.flagged {
-            jmap_filter["hasKeyword"] = json!("$flagged");
-        }
-
-        let responses = self
-            .request(vec![
-                json!([
-                    "Email/query",
-                    {
-                        "accountId": account_id,
-                        "filter": jmap_filter,
-                        "sort": [{"property": "receivedAt", "isAscending": false}],
-                        "limit": limit
-                    },
-                    "q0"
-                ]),
-                json!([
-                    "Email/get",
-                    {
-                        "accountId": account_id,
-                        "#ids": {
-                            "resultOf": "q0",
-                            "name": "Email/query",
-                            "path": "/ids"
-                        },
-                        "properties": [
-                            "id", "threadId", "mailboxIds", "keywords",
-                            "size", "receivedAt", "from", "to", "cc",
-                            "subject", "preview", "hasAttachment"
-                        ]
-                    },
-                    "g0"
-                ]),
-            ])
+        let page = self
+            .query_emails(EmailQuery {
+                filter: search_filter_to_jmap(filter, mailbox_id),
+                ..EmailQuery::first(limit)
+            })
             .await?;
-
-        let resp: GetResponse<Email> =
-            Self::parse_response(responses.get(1).unwrap_or(&Value::Null), "Email/get")?;
-
-        Ok(resp.list)
+        Ok(page.emails)
     }
 
     #[instrument(skip(self))]
@@ -1212,7 +1403,7 @@ impl JmapClient {
         };
 
         // Build forwarded body with attribution
-        let original_body = original.text_content().unwrap_or("");
+        let original_body = original.text_content().unwrap_or_default();
 
         let sender = original
             .from
@@ -1586,28 +1777,7 @@ mod tests {
     fn reply_fixture(from: Vec<&str>, to: Vec<&str>, cc: Vec<&str>) -> Email {
         let mut email = Email {
             id: "test".into(),
-            blob_id: None,
-            thread_id: None,
-            mailbox_ids: HashMap::new(),
-            keywords: HashMap::new(),
-            size: 0,
-            received_at: None,
-            message_id: None,
-            in_reply_to: None,
-            references: None,
-            from: None,
-            to: None,
-            cc: None,
-            bcc: None,
-            reply_to: None,
-            subject: None,
-            sent_at: None,
-            preview: None,
-            has_attachment: false,
-            text_body: None,
-            html_body: None,
-            attachments: None,
-            body_values: None,
+            ..Default::default()
         };
         email.from = Some(from.iter().map(|e| addr(e)).collect());
         email.to = Some(to.iter().map(|e| addr(e)).collect());

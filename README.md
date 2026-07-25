@@ -440,24 +440,44 @@ Configure in Claude Desktop's `claude_desktop_config.json`:
 
 Username and app password are optional - only needed for contact search (CardDAV requires app password, API tokens don't work).
 
-### HTTP transport (hosted / multi-tenant)
+### HTTP transport
 
-For remote hosting, the server can run over streamable HTTP instead of stdio:
+`--http` swaps stdio for streamable HTTP and takes an optional address
+(default `127.0.0.1:8080`). Three surfaces can share the one port, each opt-in:
 
 ```bash
-fastmail-cli mcp --http 127.0.0.1:8080   # serves at /mcp
+fastmail-cli mcp --http                              # /mcp
+fastmail-cli mcp --http --graphql                    # + /graphql
+fastmail-cli mcp --http --graphiql --browser         # + GraphiQL at /, opened for you
+fastmail-cli mcp --http 0.0.0.0:8080 --graphql       # explicit address
 ```
 
-In this mode **no token is baked in**. Each request must carry its Fastmail
-token in the `X-Fastmail-Token` header, injected by a trusted upstream after it
-has authenticated the caller. Authenticated JMAP clients are cached per token,
-so the JMAP session handshake runs once per distinct token rather than per call.
+`--graphql` requires `--http`, `--graphiql` requires `--graphql` (it is the
+IDE's endpoint), and `--browser` requires `--graphiql`; clap rejects the rest.
 
-This is the seam the hosted OAuth service builds on: it terminates the user's
-OAuth session, looks up their Fastmail token from encrypted storage, and sets the
-header before the request reaches this transport. Do **not** expose `--http`
-directly to the internet without such an auth layer in front — the header is
-trusted unconditionally.
+**Token resolution is the same everywhere:** the request's `X-Fastmail-Token`
+header wins, otherwise the configured token (or `FASTMAIL_API_TOKEN`) is used.
+Running it yourself, that means your own credentials with no ceremony. In a
+hosted deployment there is no local token, so the fallback is absent and every
+request must carry the header, injected by a trusted upstream after it has
+authenticated the caller. Authenticated JMAP clients are cached per token, so
+the JMAP session handshake runs once per distinct token rather than per call.
+
+Do **not** expose this to the internet without such an auth layer in front —
+the header is trusted unconditionally. Equally, do not run it with local
+credentials present on a non-loopback address: anything that can reach the port
+gets your mailbox without needing a token at all.
+
+The token is resolved on first query rather than at startup, so an expired one
+shows up as an error in the response pane rather than a server that won't boot —
+run `fastmail-cli auth` to refresh it. **Introspection needs no token**: it is
+answered from the schema without touching Fastmail, so GraphiQL's docs,
+autocomplete and explorer work before you have working credentials. Queries
+that select any real field still authenticate as normal.
+
+`/graphql` is plain GraphQL-over-HTTP, which is what a browser speaks; `/mcp` is
+MCP JSON-RPC, which it doesn't. That is why GraphiQL needs its own route rather
+than pointing at the MCP one.
 
 The MCP server exposes **2 tools** via a GraphQL interface:
 
@@ -468,39 +488,187 @@ This replaces the previous 18 individual tools with a composable interface. The 
 
 ### Nested resolution
 
-Queries support deep nesting so the LLM can get everything it needs in one hit:
+The object graph is fully navigable, so the LLM can get everything it needs in one hit:
+
+```
+Mailbox ──emails──▶ Email ──attachments──▶ Attachment ──base64/image/text──▶
+   ▲ │                │ │
+   │ └─parent/children┘ ├──thread──▶ Thread ──emails──▶ Email …
+   └────mailboxes───────┘
+```
+
+Every collection is a Relay connection — `mailboxes`, `identities`,
+`maskedEmails`, `contacts`, `attachments`, `Mailbox.children`, `Thread.emails` —
+so each takes `first` / `last` / `after` / `before` and exposes `totalCount`,
+`pageInfo`, `edges` and `nodes`. Cursors are IDs. Use `nodes` for the items;
+`edges` only when you want per-item cursors. Default page 25, max 100 — check
+`pageInfo.hasNextPage` rather than assuming you got the lot.
+
+Only `emails` pages server-side, via JMAP's anchors. The rest arrive whole from
+one call, so their paging is slicing: `totalCount` is free (a length, not
+`calculateTotal`) and a cursor holds only as long as its item is still in the
+list — if it goes, you get a "restart pagination" error rather than a quietly
+different page. `Thread.emails` returns the same `EmailConnection` as the query
+does, with `queryState` null because a conversation is not a query.
+
+Value lists stay plain arrays: `from`, `to`, `cc`, `bcc`, `replyTo`, `sender`,
+`keywords`, `mailboxIds`, `headers`, `Contact.emails`. They belong to the parent,
+arrive with it, and paging them would be ceremony.
+
+Attachment payloads are three separate fields, each doing the least work that
+answers it. Metadata (`name`, `size`, `contentType`, `cid`, …) arrives with the
+email and downloads nothing at all:
+
+- `base64` — the raw bytes, base64-encoded. Download only, any type.
+- `image(maxBytes:)` — resized then encoded, so a model isn't handed a 10MB
+  photo. Null for non-images.
+- `text` — extracted document text. **The expensive one**: it parses the whole
+  file, is priced far above the other two, and nothing else on `Attachment`
+  triggers it. Prefer a small page when selecting it.
 
 ```graphql
-# Email with full attachment content in a single query
+# Bodies and attachment text for a whole folder — one query, 3 API calls.
+# Note the smaller page: `text` parses every document, so a big page means a
+# lot of work. Nothing stops you asking for more; the cost is just yours.
 {
-  email(id: "abc123") {
-    subject
-    from { name email }
-    textBody
-    attachments {
-      name
-      contentType
-      size
-      content { textContent base64Content }
+  emails(filter: { inMailbox: "INBOX" }, first: 10) {
+    nodes {
+      subject
+      from { name email }
+      textBody
+      attachments {
+        nodes { name contentType size cid text }
+      }
     }
   }
 }
 
-# Entire thread with all emails and their attachments
+# Walk the graph: folder tree → emails → conversation → the folders they live in
 {
-  thread(emailId: "abc123") {
-    total
-    emails {
-      subject
-      from { email }
-      textBody
-      attachments { name size }
+  mailbox(name: "INBOX") {
+    name
+    children { nodes { name unreadEmails } }
+    emails(first: 5) {
+      nodes {
+        subject
+        thread { total emails { nodes { subject textBody } } }
+        mailboxes { name role }
+      }
     }
   }
 }
 ```
 
-Attachment `content` is lazily resolved — only fetched when the field is included in the query. Omit it for fast metadata-only listings.
+### Composable filters
+
+`EmailFilter` mirrors JMAP's filter tree (RFC 8620 §5.5) rather than flattening
+it into scalar arguments. Fields on one filter object are AND-ed; `and` / `or` /
+`not` nest arbitrarily. The same input type is accepted everywhere emails
+appear, including `Mailbox.emails`, where it's AND-ed with the mailbox.
+
+```graphql
+# Unread, from either sender, not in Archive, biggest first
+{
+  emails(
+    filter: {
+      unread: true
+      or:  [{ from: "alice@example.com" }, { from: "bob@example.com" }]
+      not: [{ inMailbox: "Archive" }]
+    }
+    sort: [{ property: SIZE, ascending: false }]
+    first: 20
+  ) {
+    totalCount
+    nodes { subject size }
+  }
+}
+```
+
+Mailbox names and roles are resolved to IDs at every depth of the tree in a
+single `Mailbox/get`. `collapseThreads: true` returns one email per
+conversation, for a threaded view.
+
+The filter mirrors JMAP's `FilterCondition` (RFC 8621 §4.4.1) field for field:
+alongside the usual participant/date/size conditions there are
+`inMailboxOtherThan`, `hasKeyword` / `notKeyword`, the thread-wide
+`allInThreadHaveKeyword` / `someInThreadHaveKeyword` / `noneInThreadHaveKeyword`,
+and raw `header` matching (`["List-Id"]` for presence, `["List-Id", "rust-lang"]`
+for a value).
+
+Sorting likewise covers the full comparator set — `receivedAt`, `sentAt`, `size`,
+`subject`, `from`, `to`, plus the keyword-based `hasKeyword`,
+`allInThreadHaveKeyword` and `someInThreadHaveKeyword`, with `collation`. The
+keyword comparators require a `keyword` argument and the others reject one;
+both are caught before any API call.
+
+### Pagination
+
+Email lists are Relay connections with `edges`/`nodes`, `pageInfo`, `totalCount`,
+`position`, and `queryState`.
+
+**Cursors are email IDs**, mapped onto JMAP's `anchor` / `anchorOffset`. This
+falls out of what the API already offers, and it's what makes pagination stable:
+a positional cursor silently shifts every time mail arrives, so page 2 would
+re-show or skip messages. An anchor names a specific message, so the page after
+it is the same page whatever else changed. It stays legible for a model
+composing the follow-up query too — the cursor is just an ID it has already seen.
+
+```graphql
+{
+  emails(first: 25, after: "Mabc123") {
+    totalCount
+    pageInfo { hasNextPage endCursor }
+    edges { cursor node { subject } }
+  }
+}
+```
+
+`last` without `before` becomes a negative `position`, which JMAP counts from
+the end — "the last N" is one call and never needs a total. `last` with `before`
+anchors backwards from the cursor.
+
+The trade for stability is that a cursor can go stale: if its message is deleted
+or stops matching the filter, JMAP returns `anchorNotFound`. That surfaces as an
+error saying exactly that, and that the fix is to restart pagination. Compare
+`queryState` between pages to detect that the result set moved underneath you.
+
+`totalCount` maps to JMAP's `calculateTotal`, which costs the server real work,
+so it's only requested when the field is actually selected. The same look-ahead
+means a query selecting **only** `totalCount` performs one `Email/query` and
+fetches no emails at all:
+
+```graphql
+# "How many unread from this sender?" — one call, zero emails transferred
+{ emails(filter: { unread: true, from: "alerts@example.com" }) { totalCount } }
+```
+
+### Lazy fields and batching
+
+Nothing below a list is fetched eagerly, and every lazy field goes through a
+[DataLoader](https://github.com/graphql/dataloader): the resolvers for a list's
+elements run concurrently, and their fetches collapse into **one batched API
+call** rather than one per element.
+
+| Selection on `emails(first: 25) { nodes { … } }` | JMAP calls |
+| ----------------------------------------------- | ---------- |
+| `{ totalCount }` alone | 1 (`Email/query`, no emails fetched) |
+| `{ subject from { email } }` | 2 (`Email/query` + `Email/get`) |
+| `{ subject textBody }` | 3 (+1 batched `Email/get` for all 25 bodies) |
+| `{ subject textBody attachments { nodes { name } } }` | 3 (same batch covers both) |
+| `{ … attachments { nodes { name cid size } } }` | 3 (metadata downloads nothing) |
+| `{ … attachments { nodes { base64 } } }` | 3 + the blob downloads, issued concurrently |
+| `{ … mailboxes { name } }` + `mailbox(…)` + a name filter | +1 `Mailbox/get` total, however many ask |
+
+The naive shape — one detail call per email — would be 26. Loader caches are
+per request, so referencing the same email or mailbox twice in one query costs
+one fetch; nothing is retained between requests where it could go stale.
+
+Because the graph contains cycles (`Email.thread.emails`, `Email.mailboxes.emails`),
+nesting is capped at depth 15 — nothing else bounds a cycle. Breadth is **not**
+capped. Resolvers declare a cost (a document parse prices far above a download,
+nested lists scale with page size) but that cost is guidance for choosing a page
+size, surfaced in the field descriptions; it never refuses a query. Being told
+"too complex" without being told the threshold just makes a caller guess.
 
 All operations are available as GraphQL queries and mutations: mailboxes, emails, search, threads, identities (with signatures), attachments (with text extraction and image resizing), contacts, masked email management, and send/reply/forward with the preview/confirm safety pattern.
 

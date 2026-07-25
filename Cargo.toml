@@ -1,6 +1,6 @@
 [package]
 name = "fastmail-cli"
-version = "3.0.0"
+version = "3.1.0"
 edition = "2024"
 description = "CLI for Fastmail's JMAP API"
 repository = "https://github.com/radiosilence/fastmail-cli"
@@ -31,7 +31,7 @@ kreuzberg = { version = "~4.8", features = [
   "pdf",
   "xml"
 ] }
-async-graphql = "7"
+async-graphql = { version = "7", features = ["dataloader"] }
 reqwest = { version = "0.13.1", default-features = false, features = [
   "json",
   "rustls"
@@ -54,6 +54,8 @@ tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 roxmltree = "0.21.1"
 percent-encoding = "2"
 uuid = { version = "1", features = ["v4"] }
+askama = "0.16"
+open = "5"
 
 [dev-dependencies]
 tempfile = "3"
