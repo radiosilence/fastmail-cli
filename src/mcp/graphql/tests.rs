@@ -453,13 +453,19 @@ async fn siblings_needing_the_same_blob_download_it_once() {
 }
 
 #[tokio::test]
-async fn text_extraction_is_not_triggered_by_other_fields() {
-    // `text` is the only field that parses the document. Selecting everything
-    // else — including the other payload fields — must not reach for it.
+async fn payload_fields_resolve_independently() {
+    // Selecting the cheap payload fields must not drag `text` along.
+    //
+    // Extraction is unobservable from outside once the blob is downloaded — it
+    // returns Ok(None) rather than failing on input it cannot parse — so the
+    // guarantee is structural: `crate::util::extract_text` has exactly one call
+    // site in this crate's GraphQL layer, inside the `text` resolver. The
+    // observable half is `attachment_metadata_downloads_nothing`: no download
+    // means no bytes, and no bytes means nothing was extracted.
     let server = mock_server(1).await;
     let resp = run(
         &server,
-        "{ emails { nodes { attachments { name size base64 image } } } }",
+        "{ emails(first: 1) { nodes { attachments { name size base64 image } } } }",
     )
     .await;
     assert!(resp.errors.is_empty(), "{:?}", resp.errors);
