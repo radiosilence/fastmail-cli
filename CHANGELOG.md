@@ -4,6 +4,33 @@
 
 ### Added
 
+- **`--graphql` and `--graphiql` on `mcp --http`.** The HTTP server can now
+  mount a plain GraphQL-over-HTTP endpoint at `/graphql` and the GraphiQL IDE at
+  `/`, alongside MCP at `/mcp` on the same port, so the schema can be explored in
+  a browser rather than only through an LLM. `/mcp` speaks JSON-RPC, which a
+  browser doesn't, hence the separate endpoint. `--browser` opens the IDE once
+  the listener is bound. GraphiQL is loaded from a CDN with pinned versions and
+  SRI hashes; the page is an Askama template.
+- **`--http` now takes an optional address**, defaulting to `127.0.0.1:8080`.
+- **Introspection over `/graphql` needs no Fastmail token.** A query whose
+  top-level selections are all introspection fields is answered from the schema
+  without authenticating or touching the network, so GraphiQL's docs,
+  autocomplete and explorer work before credentials do — otherwise a bad token
+  leaves you with an IDE that cannot describe the API you are trying to explore.
+  Anything selecting a real field, mixing introspection with real fields, or
+  hiding behind a fragment takes the normal authenticated path.
+
+### Changed
+
+- **`mcp --http` falls back to local credentials when a request sends no
+  `X-Fastmail-Token`.** Previously the HTTP transport had no fallback at all and
+  every request needed the header, which made running it locally awkward. The
+  header still wins where present, and the fallback is best-effort — a hosted
+  deployment ships no config or `FASTMAIL_API_TOKEN`, so it stays absent there
+  and per-request auth is unchanged. Note the consequence: binding a non-loopback
+  address on a machine that *does* have credentials now serves them to anything
+  that can reach the port.
+
 - **Full nesting across the GraphQL graph.** Every logical edge is now
   traversable, so a client can fetch emails, bodies and attachment content in a
   single query instead of looping:

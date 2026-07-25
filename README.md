@@ -440,24 +440,44 @@ Configure in Claude Desktop's `claude_desktop_config.json`:
 
 Username and app password are optional - only needed for contact search (CardDAV requires app password, API tokens don't work).
 
-### HTTP transport (hosted / multi-tenant)
+### HTTP transport
 
-For remote hosting, the server can run over streamable HTTP instead of stdio:
+`--http` swaps stdio for streamable HTTP and takes an optional address
+(default `127.0.0.1:8080`). Three surfaces can share the one port, each opt-in:
 
 ```bash
-fastmail-cli mcp --http 127.0.0.1:8080   # serves at /mcp
+fastmail-cli mcp --http                              # /mcp
+fastmail-cli mcp --http --graphql                    # + /graphql
+fastmail-cli mcp --http --graphiql --browser         # + GraphiQL at /, opened for you
+fastmail-cli mcp --http 0.0.0.0:8080 --graphql       # explicit address
 ```
 
-In this mode **no token is baked in**. Each request must carry its Fastmail
-token in the `X-Fastmail-Token` header, injected by a trusted upstream after it
-has authenticated the caller. Authenticated JMAP clients are cached per token,
-so the JMAP session handshake runs once per distinct token rather than per call.
+`--graphql` requires `--http`, `--graphiql` requires `--graphql` (it is the
+IDE's endpoint), and `--browser` requires `--graphiql`; clap rejects the rest.
 
-This is the seam the hosted OAuth service builds on: it terminates the user's
-OAuth session, looks up their Fastmail token from encrypted storage, and sets the
-header before the request reaches this transport. Do **not** expose `--http`
-directly to the internet without such an auth layer in front — the header is
-trusted unconditionally.
+**Token resolution is the same everywhere:** the request's `X-Fastmail-Token`
+header wins, otherwise the configured token (or `FASTMAIL_API_TOKEN`) is used.
+Running it yourself, that means your own credentials with no ceremony. In a
+hosted deployment there is no local token, so the fallback is absent and every
+request must carry the header, injected by a trusted upstream after it has
+authenticated the caller. Authenticated JMAP clients are cached per token, so
+the JMAP session handshake runs once per distinct token rather than per call.
+
+Do **not** expose this to the internet without such an auth layer in front —
+the header is trusted unconditionally. Equally, do not run it with local
+credentials present on a non-loopback address: anything that can reach the port
+gets your mailbox without needing a token at all.
+
+The token is resolved on first query rather than at startup, so an expired one
+shows up as an error in the response pane rather than a server that won't boot —
+run `fastmail-cli auth` to refresh it. **Introspection needs no token**: it is
+answered from the schema without touching Fastmail, so GraphiQL's docs,
+autocomplete and explorer work before you have working credentials. Queries
+that select any real field still authenticate as normal.
+
+`/graphql` is plain GraphQL-over-HTTP, which is what a browser speaks; `/mcp` is
+MCP JSON-RPC, which it doesn't. That is why GraphiQL needs its own route rather
+than pointing at the MCP one.
 
 The MCP server exposes **2 tools** via a GraphQL interface:
 
