@@ -60,7 +60,7 @@ its current hosted tool set and may grow.)
 
 ```bash
 # Add to mise config
-mise use -g "github:radiosilence/fastmail-cli[exe=fastmail]"
+mise use -g "github:radiosilence/fastmail-cli"
 ```
 
 #### From Source
@@ -685,7 +685,7 @@ RUST_LOG=debug fastmail list mailboxes
 
 ## JMAP API
 
-This CLI uses Fastmail's JMAP implementation. Capabilities are filtered dynamically based on your API token's permissions — read-only tokens work fine for listing/reading, while send and masked email operations require appropriate capabilities.
+This CLI talks directly to Fastmail's JMAP server — the protocol layer is hand-rolled, there's no JMAP client library in the dependency tree. Capabilities are filtered dynamically based on your API token's permissions — read-only tokens work fine for listing/reading, while send and masked email operations require appropriate capabilities.
 
 For more on JMAP: [jmap.io](https://jmap.io/)
 
