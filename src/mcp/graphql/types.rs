@@ -367,6 +367,19 @@ pub struct GqlAttachment {
     pub part_id: Option<String>,
 }
 
+impl GqlAttachment {
+    /// The blob's bytes, through the loader so sibling fields on this
+    /// attachment — and every other attachment resolving at the same time —
+    /// share one batch of downloads rather than one each.
+    async fn bytes(&self, ctx: &Context<'_>) -> Result<std::sync::Arc<Vec<u8>>> {
+        ctx.data::<Blobs>()?
+            .load_one(self.blob_id.clone())
+            .await
+            .map_err(to_gql_error)?
+            .ok_or_else(|| async_graphql::Error::new(format!("Blob {} not found", self.blob_id)))
+    }
+}
+
 #[Object(name = "Attachment")]
 impl GqlAttachment {
     async fn blob_id(&self) -> &str {
@@ -398,89 +411,62 @@ impl GqlAttachment {
     async fn part_id(&self) -> Option<&str> {
         self.part_id.as_deref()
     }
-    /// Fetch the actual attachment content. Images are resized and base64-encoded,
-    /// documents have text extracted. Only fetched when this field is included in
-    /// the query; downloads for sibling attachments are issued concurrently.
-    async fn content(&self, ctx: &Context<'_>) -> Result<GqlAttachmentContent> {
-        let loader = ctx.data::<Blobs>()?;
+    /// The raw bytes, base64-encoded. Downloads the blob and does nothing else,
+    /// so it works for any attachment whatever its type.
+    #[graphql(complexity = "10 + child_complexity")]
+    async fn base64(&self, ctx: &Context<'_>) -> Result<String> {
+        let data = self.bytes(ctx).await?;
+        Ok(base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            data.as_slice(),
+        ))
+    }
 
-        let content_type = self
+    /// The image resized to fit `maxBytes`, then base64-encoded. Null when this
+    /// attachment is not an image — use `base64` for the untouched bytes.
+    ///
+    /// Resizing exists so a model isn't handed a 10MB photo; it costs a decode
+    /// and re-encode, so it is priced above a plain download.
+    #[graphql(complexity = "20 + child_complexity")]
+    async fn image(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Shrink the image until it fits this many bytes.")] max_bytes: Option<u32>,
+    ) -> Result<Option<String>> {
+        let name = self.name.as_deref().unwrap_or("attachment");
+        let declared = self
             .content_type
             .as_deref()
             .unwrap_or("application/octet-stream");
-        let name = self.name.as_deref().unwrap_or("attachment");
-
-        let data = loader
-            .load_one(self.blob_id.clone())
-            .await
-            .map_err(to_gql_error)?
-            .ok_or_else(|| async_graphql::Error::new(format!("Blob {} not found", self.blob_id)))?;
-
-        let mime = if crate::util::is_image(content_type, name) {
-            crate::util::infer_image_mime(name).unwrap_or(content_type)
-        } else {
-            content_type
-        };
-
-        // Images — resize and base64 encode
-        if crate::util::is_image(mime, name) {
-            return match crate::util::resize_image(&data, mime, crate::util::MCP_IMAGE_MAX_BYTES) {
-                Ok((processed_data, _mime_type)) => {
-                    let base64_data = base64::Engine::encode(
-                        &base64::engine::general_purpose::STANDARD,
-                        &processed_data,
-                    );
-                    Ok(GqlAttachmentContent {
-                        size: processed_data.len(),
-                        base64_content: Some(base64_data),
-                        text_content: None,
-                        info: None,
-                    })
-                }
-                Err(e) => Err(async_graphql::Error::new(format!(
-                    "Failed to process image: {e}"
-                ))),
-            };
+        if !crate::util::is_image(declared, name) {
+            return Ok(None);
         }
+        let mime = crate::util::infer_image_mime(name).unwrap_or(declared);
 
-        // Documents — extract text
-        match crate::util::extract_text(&data, name).await {
-            Ok(Some(text)) => {
-                return Ok(GqlAttachmentContent {
-                    size: data.len(),
-                    base64_content: None,
-                    text_content: Some(text),
-                    info: None,
-                });
-            }
-            Ok(None) => {}
-            Err(e) => {
-                return Err(async_graphql::Error::new(format!(
-                    "Failed to extract text: {e}"
-                )));
-            }
-        }
-
-        // Binary fallback
-        Ok(GqlAttachmentContent {
-            size: data.len(),
-            base64_content: None,
-            text_content: None,
-            info: Some("Binary attachment — cannot be displayed directly.".to_string()),
-        })
+        let data = self.bytes(ctx).await?;
+        let limit = max_bytes.map_or(crate::util::MCP_IMAGE_MAX_BYTES, |b| b as usize);
+        let (resized, _mime) = crate::util::resize_image(&data, mime, limit)
+            .map_err(|e| async_graphql::Error::new(format!("Failed to process image: {e}")))?;
+        Ok(Some(base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &resized,
+        )))
     }
-}
 
-#[derive(SimpleObject)]
-#[graphql(name = "AttachmentContent")]
-pub struct GqlAttachmentContent {
-    pub size: usize,
-    /// For images: base64-encoded image data
-    pub base64_content: Option<String>,
-    /// For documents: extracted text content
-    pub text_content: Option<String>,
-    /// Description when content can't be returned directly
-    pub info: Option<String>,
+    /// Text extracted from a document (PDF, DOCX, XLSX, …). Null when nothing
+    /// can be extracted — an image, or a format with no text in it.
+    ///
+    /// **This is the expensive field.** Extraction parses the whole document,
+    /// so it is priced well above the download and should only be selected when
+    /// the text is actually wanted. Nothing else on `Attachment` triggers it.
+    #[graphql(complexity = "50 + child_complexity")]
+    async fn text(&self, ctx: &Context<'_>) -> Result<Option<String>> {
+        let name = self.name.as_deref().unwrap_or("attachment");
+        let data = self.bytes(ctx).await?;
+        crate::util::extract_text(&data, name)
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("Failed to extract text: {e}")))
+    }
 }
 
 #[derive(SimpleObject)]

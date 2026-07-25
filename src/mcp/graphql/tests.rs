@@ -70,14 +70,42 @@ fn email_json(id: &str, thread: &str, with_body: bool) -> Value {
         "subject": format!("Subject {id}"),
         "from": [{ "name": "Sender", "email": "sender@example.com" }],
         "preview": "preview text",
-        "hasAttachment": false,
+        // Present in the summary property set, so a list result already knows
+        // an attachment exists without fetching its metadata.
+        "hasAttachment": true,
     });
     if with_body {
         e["textBody"] = json!([{ "partId": "1", "type": "text/plain" }]);
         e["bodyValues"] = json!({ "1": { "value": format!("Body of {id}") } });
-        e["attachments"] = json!([]);
+        e["attachments"] = json!([{
+            "partId": "2",
+            "blobId": format!("blob-att-{id}"),
+            "name": "notes.txt",
+            "type": "text/plain",
+            "size": ATTACHMENT_BYTES.len(),
+            "charset": "utf-8",
+            "disposition": "attachment",
+            "cid": format!("cid-{id}"),
+        }]);
     }
     e
+}
+
+/// Body served for every blob download in these tests.
+const ATTACHMENT_BYTES: &[u8] = b"attachment payload";
+
+/// Blob downloads are plain GETs, not JMAP method calls, so they are counted
+/// separately from [`calls`] — this is what the laziness tests assert on.
+async fn downloads(server: &MockServer) -> Vec<String> {
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.method == wiremock::http::Method::GET)
+        .map(|r| r.url.path().to_string())
+        .filter(|p| p.contains("/download/"))
+        .collect()
 }
 
 /// Mock JMAP endpoint that answers `Mailbox/get`, `Email/query`, `Email/get`
@@ -182,6 +210,12 @@ async fn mock_server(count: usize) -> MockServer {
         .mount(&server)
         .await;
 
+    // Blob downloads: one GET per blob, which the laziness tests count.
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(ATTACHMENT_BYTES))
+        .mount(&server)
+        .await;
+
     server
 }
 
@@ -252,6 +286,165 @@ async fn body_and_attachments_together_share_one_fetch() {
         detail, 1,
         "three body/attachment fields over three emails is still one fetch"
     );
+}
+
+// ============ Attachment laziness ============
+//
+// Metadata is free, each payload field does the least work that answers it, and
+// text extraction — the expensive one — happens only when asked for.
+
+#[tokio::test]
+async fn attachment_metadata_downloads_nothing() {
+    let server = mock_server(3).await;
+    let resp = run(
+        &server,
+        "{ emails { nodes { attachments { \
+            blobId name contentType size disposition cid charset partId } } } }",
+    )
+    .await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+
+    assert!(
+        downloads(&server).await.is_empty(),
+        "attachment metadata comes with the email — it must not download blobs"
+    );
+}
+
+#[tokio::test]
+async fn base64_downloads_once_per_attachment() {
+    let server = mock_server(3).await;
+    let resp = run(&server, "{ emails { nodes { attachments { base64 } } } }").await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+
+    assert_eq!(
+        downloads(&server).await.len(),
+        3,
+        "one download per attachment, no more"
+    );
+}
+
+#[tokio::test]
+async fn siblings_needing_the_same_blob_download_it_once() {
+    let server = mock_server(1).await;
+    let resp = run(
+        &server,
+        "{ emails(first: 1) { nodes { attachments { base64 text image } } } }",
+    )
+    .await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+
+    assert_eq!(
+        downloads(&server).await.len(),
+        1,
+        "three payload fields on one attachment share a single download"
+    );
+}
+
+#[tokio::test]
+async fn text_extraction_is_not_triggered_by_other_fields() {
+    // `text` is the only field that parses the document. Selecting everything
+    // else — including the other payload fields — must not reach for it.
+    let server = mock_server(1).await;
+    let resp = run(
+        &server,
+        "{ emails { nodes { attachments { name size base64 image } } } }",
+    )
+    .await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+
+    let data = resp.data.into_json().unwrap();
+    let att = &data["emails"]["nodes"][0]["attachments"][0];
+    assert!(att.get("text").is_none(), "text was not selected");
+    assert!(
+        att["base64"].is_string(),
+        "base64 should resolve for any type"
+    );
+    assert!(
+        att["image"].is_null(),
+        "a text/plain attachment is not an image"
+    );
+}
+
+#[tokio::test]
+async fn text_extracts_document_content() {
+    let server = mock_server(1).await;
+    let resp = run(
+        &server,
+        "{ emails(first: 1) { nodes { attachments { text } } } }",
+    )
+    .await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+
+    let data = resp.data.into_json().unwrap();
+    let text = data["emails"]["nodes"][0]["attachments"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        text.contains("attachment payload"),
+        "expected the extracted body, got {text:?}"
+    );
+}
+
+#[tokio::test]
+async fn text_is_priced_above_a_plain_download() {
+    // Same query shape, same page size — only the payload field differs. `text`
+    // must cost enough more than `base64` that a wide fan-out is rejected while
+    // the cheap form is allowed.
+    let server = mock_server(1).await;
+
+    let cheap = run(
+        &server,
+        "{ emails(first: 50) { nodes { attachments { base64 } } } }",
+    )
+    .await;
+    assert!(
+        cheap.errors.is_empty(),
+        "a page of raw downloads should stay under the cap: {:?}",
+        cheap.errors
+    );
+
+    let heavy = run(
+        &server,
+        "{ emails(first: 50) { nodes { attachments { text } } } }",
+    )
+    .await;
+    assert!(
+        heavy
+            .errors
+            .iter()
+            .any(|e| e.message.contains("too complex")),
+        "extraction across a full page should be rejected, got {:?}",
+        heavy.errors
+    );
+}
+
+#[tokio::test]
+async fn documented_examples_stay_under_the_complexity_cap() {
+    // The query shapes in the README and the MCP server instructions. Pricing
+    // `text` high enough to matter makes it easy to leave a documented example
+    // that the schema now refuses, so they are checked here rather than by hand.
+    let server = mock_server(10).await;
+    let documented = [
+        "{ emails(filter: { inMailbox: \"INBOX\" }, first: 10) { nodes { \
+            subject from { name email } textBody \
+            attachments { name contentType size cid text } } } }",
+        "{ mailbox(name: \"INBOX\") { name children { name unreadEmails } \
+            emails(first: 5) { nodes { subject \
+              thread { total emails { subject textBody } } \
+              mailboxes { name role } } } } }",
+        "{ emails(filter: { unread: true }, sort: [{ property: SIZE, ascending: false }], \
+            first: 20) { totalCount nodes { subject size } } }",
+    ];
+
+    for query in documented {
+        let resp = run(&server, query).await;
+        assert!(
+            resp.errors.is_empty(),
+            "documented example was rejected: {:?}\nquery: {query}",
+            resp.errors
+        );
+    }
 }
 
 #[tokio::test]
@@ -361,7 +554,7 @@ async fn depth_limit_leaves_realistic_queries_alone() {
     let resp = run(
         &server,
         "{ mailbox(name: \"INBOX\") { emails(first: 1) { nodes { thread { emails { \
-            attachments { name content { size } } } } } } } }",
+            attachments { name size } } } } } } }",
     )
     .await;
     assert!(resp.errors.is_empty(), "{:?}", resp.errors);
@@ -372,7 +565,7 @@ async fn complexity_limit_rejects_excessive_fan_out() {
     let server = mock_server(1).await;
     // 100 emails × their threads × those threads' emails and attachments.
     let query = "{ emails(first: 100) { nodes { \
-                    thread { emails { attachments { name content { size } } } } } } }";
+                    thread { emails { attachments { name text } } } } } }";
     let resp = run(&server, query).await;
     assert!(
         resp.errors

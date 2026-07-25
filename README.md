@@ -491,16 +491,29 @@ This replaces the previous 18 individual tools with a composable interface. The 
 The object graph is fully navigable, so the LLM can get everything it needs in one hit:
 
 ```
-Mailbox ──emails──▶ Email ──attachments──▶ Attachment ──content──▶ AttachmentContent
+Mailbox ──emails──▶ Email ──attachments──▶ Attachment ──base64/image/text──▶
    ▲ │                │ │
    │ └─parent/children┘ ├──thread──▶ Thread ──emails──▶ Email …
    └────mailboxes───────┘
 ```
 
+Attachment payloads are three separate fields, each doing the least work that
+answers it. Metadata (`name`, `size`, `contentType`, `cid`, …) arrives with the
+email and downloads nothing at all:
+
+- `base64` — the raw bytes, base64-encoded. Download only, any type.
+- `image(maxBytes:)` — resized then encoded, so a model isn't handed a 10MB
+  photo. Null for non-images.
+- `text` — extracted document text. **The expensive one**: it parses the whole
+  file, is priced accordingly against the complexity limit, and nothing else on
+  `Attachment` triggers it.
+
 ```graphql
-# Bodies and attachment content for a whole folder — one query, 3 API calls
+# Bodies and attachment text for a whole folder — one query, 3 API calls.
+# Note the smaller page: `text` parses every document, so it is priced high
+# enough that a full 100-email page of it is refused.
 {
-  emails(filter: { inMailbox: "INBOX" }, first: 25) {
+  emails(filter: { inMailbox: "INBOX" }, first: 10) {
     nodes {
       subject
       from { name email }
@@ -509,7 +522,8 @@ Mailbox ──emails──▶ Email ──attachments──▶ Attachment ──
         name
         contentType
         size
-        content { textContent base64Content }
+        cid
+        text
       }
     }
   }

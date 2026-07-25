@@ -276,7 +276,7 @@ impl ServerHandler for FastmailMcp {
                 { emails(filter: { inMailbox: \"INBOX\" }, first: 10) { nodes {\n\
                     subject from { email }\n\
                     textBody\n\
-                    attachments { name contentType content { textContent base64Content } }\n\
+                    attachments { name contentType text }\n\
                 } } }\n\n\
                 # Walk the graph: folder → emails → conversation → mailboxes\n\
                 { mailbox(name: \"INBOX\") { name children { name }\n\
@@ -288,6 +288,16 @@ impl ServerHandler for FastmailMcp {
                 ```\n\
                 Nesting is bounded (max depth 15, plus a query-complexity cap), so\n\
                 keep fan-out reasonable — very wide + very deep queries are rejected.\n\n\
+                ## Attachment payloads cost different amounts\n\
+                Metadata (`name`, `size`, `contentType`, `cid`) comes with the email\n\
+                and downloads nothing. Beyond that, pick the cheapest field that\n\
+                answers the question:\n\
+                - `base64` — raw bytes, any type. Download only.\n\
+                - `image(maxBytes: N)` — resized then encoded, null for non-images.\n\
+                - `text` — extracted document text. **Expensive**: it parses the\n\
+                  whole file and is priced heavily against the complexity cap.\n\
+                  Only select it when you actually need the text, and prefer a\n\
+                  small page size when you do.\n\n\
                 ## Sending Emails (ALWAYS preview first!)\n\
                 ```graphql\n\
                 # Step 1: Preview\n\
