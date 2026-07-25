@@ -17,16 +17,11 @@ use crate::jmap::normalize_date;
 ///
 /// Every scalar field set on one `EmailFilter` is combined with **AND**. Use
 /// the `and` / `or` / `not` fields to build anything more interesting; they
-/// nest arbitrarily.
+/// nest arbitrarily, which is how one filter expresses "unread, from either
+/// address, but not in Archive".
 ///
-/// ```graphql
-/// # unread, from either address, but not in Archive
-/// filter: {
-///   unread: true
-///   or:  [{ from: "alice@example.com" }, { from: "bob@example.com" }]
-///   not: [{ inMailbox: "Archive" }]
-/// }
-/// ```
+/// `inMailbox` and friends take a folder name or role, not an ID; names are
+/// resolved at every depth of the tree in a single lookup.
 #[derive(InputObject, Default, Clone)]
 #[graphql(name = "EmailFilter")]
 pub struct EmailFilter {

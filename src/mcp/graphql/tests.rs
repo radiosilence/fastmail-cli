@@ -652,6 +652,50 @@ async fn expensive_queries_are_costed_but_not_refused() {
 }
 
 #[tokio::test]
+async fn schema_prose_names_no_removed_construct() {
+    // The SDL's doc comments are what a model reads after `schema_sdl`, and
+    // they are the easiest thing in the repo to leave behind: nothing compiles
+    // them. Guard the constructs this schema has actually dropped.
+    let sdl = build_schema().sdl();
+
+    let mut prose = String::new();
+    let mut in_doc = false;
+    for line in sdl.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("\"\"\"") && !(trimmed.len() > 6 && trimmed.ends_with("\"\"\"")) {
+            in_doc = !in_doc;
+            continue;
+        }
+        if in_doc || trimmed.starts_with("\"\"\"") {
+            prose.push_str(trimmed);
+            prose.push('\n');
+        }
+    }
+
+    for (gone, replacement) in [
+        (
+            "content {",
+            "`Attachment.content` split into base64/image/text",
+        ),
+        ("textContent", "`AttachmentContent` is gone — use `text`"),
+        (
+            "base64Content",
+            "`AttachmentContent` is gone — use `base64`",
+        ),
+        ("EmailSummary", "folded into `Email`"),
+        (
+            "mailbox:",
+            "`emails(mailbox:)` is now `filter: { inMailbox: }`",
+        ),
+    ] {
+        assert!(
+            !prose.contains(gone),
+            "schema prose still mentions `{gone}` — {replacement}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn documented_examples_execute() {
     // The query shapes in the README and the MCP server instructions, run
     // against the real schema so a documented example cannot drift into being
