@@ -387,43 +387,28 @@ async fn text_extracts_document_content() {
 }
 
 #[tokio::test]
-async fn text_is_priced_above_a_plain_download() {
-    // Same query shape, same page size — only the payload field differs. `text`
-    // must cost enough more than `base64` that a wide fan-out is rejected while
-    // the cheap form is allowed.
+async fn expensive_queries_are_costed_but_not_refused() {
+    // Cost is guidance, not a gate. A wide fan-out of the most expensive field
+    // still runs — the price is declared so a caller can pick a sensible page
+    // size, not so the server can second-guess a legitimate request.
     let server = mock_server(1).await;
-
-    let cheap = run(
+    let resp = run(
         &server,
-        "{ emails(first: 50) { nodes { attachments { base64 } } } }",
+        "{ emails(first: 100) { nodes { attachments { text base64 image } } } }",
     )
     .await;
     assert!(
-        cheap.errors.is_empty(),
-        "a page of raw downloads should stay under the cap: {:?}",
-        cheap.errors
-    );
-
-    let heavy = run(
-        &server,
-        "{ emails(first: 50) { nodes { attachments { text } } } }",
-    )
-    .await;
-    assert!(
-        heavy
-            .errors
-            .iter()
-            .any(|e| e.message.contains("too complex")),
-        "extraction across a full page should be rejected, got {:?}",
-        heavy.errors
+        resp.errors.is_empty(),
+        "complexity must not refuse a query: {:?}",
+        resp.errors
     );
 }
 
 #[tokio::test]
-async fn documented_examples_stay_under_the_complexity_cap() {
-    // The query shapes in the README and the MCP server instructions. Pricing
-    // `text` high enough to matter makes it easy to leave a documented example
-    // that the schema now refuses, so they are checked here rather than by hand.
+async fn documented_examples_execute() {
+    // The query shapes in the README and the MCP server instructions, run
+    // against the real schema so a documented example cannot drift into being
+    // invalid without a test noticing.
     let server = mock_server(10).await;
     let documented = [
         "{ emails(filter: { inMailbox: \"INBOX\" }, first: 10) { nodes { \
@@ -441,7 +426,7 @@ async fn documented_examples_stay_under_the_complexity_cap() {
         let resp = run(&server, query).await;
         assert!(
             resp.errors.is_empty(),
-            "documented example was rejected: {:?}\nquery: {query}",
+            "documented example failed: {:?}\nquery: {query}",
             resp.errors
         );
     }
@@ -561,17 +546,23 @@ async fn depth_limit_leaves_realistic_queries_alone() {
 }
 
 #[tokio::test]
-async fn complexity_limit_rejects_excessive_fan_out() {
+async fn deep_cyclic_queries_are_still_refused() {
+    // Depth remains capped even though complexity is not: the graph has cycles
+    // (email -> thread -> emails -> ...) and nothing else bounds them.
     let server = mock_server(1).await;
-    // 100 emails × their threads × those threads' emails and attachments.
-    let query = "{ emails(first: 100) { nodes { \
-                    thread { emails { attachments { name text } } } } } }";
-    let resp = run(&server, query).await;
+
+    // Ten laps of the cycle is well past MAX_DEPTH without hard-coding a shape.
+    let mut inner = "subject".to_string();
+    for _ in 0..10 {
+        inner = format!("thread {{ emails {{ {inner} }} }}");
+    }
+    let resp = run(&server, &format!("{{ emails {{ nodes {{ {inner} }} }} }}")).await;
+
     assert!(
         resp.errors
             .iter()
-            .any(|e| e.message.contains("too complex")),
-        "expected a complexity-limit error, got {:?}",
+            .any(|e| e.message.contains("nested too deep")),
+        "expected a depth-limit error, got {:?}",
         resp.errors
     );
 }

@@ -24,28 +24,31 @@ pub type FastmailSchema = Schema<QueryRoot, MutationRoot, async_graphql::EmptySu
 /// for the same Fastmail token rather than re-authenticating every call.
 pub type SharedClient = std::sync::Arc<tokio::sync::Mutex<crate::jmap::JmapClient>>;
 
+/// Maximum selection-set nesting. The graph contains cycles by design — an
+/// email's thread contains emails, a mailbox's emails belong to mailboxes — so
+/// unbounded depth would let one query walk forever. 15 is far past any useful
+/// query (mailbox → emails → thread → emails → attachments → text is 6).
+const MAX_DEPTH: usize = 15;
+
 /// Build the GraphQL schema with only the process-shared preview-nonce store.
 ///
 /// The JMAP client is **not** baked in — it is supplied per request via
 /// [`async_graphql::Request::data`] so a single schema can serve many tenants,
 /// each with their own Fastmail token. The nonce store stays schema-level
 /// because send preview→confirm spans two separate requests.
-/// Maximum selection-set nesting. The graph contains cycles by design — an
-/// email's thread contains emails, a mailbox's emails belong to mailboxes — so
-/// unbounded depth would let one query walk forever. 15 is far past any useful
-/// query (mailbox → emails → thread → emails → attachments → content is 6).
-const MAX_DEPTH: usize = 15;
-
-/// Maximum query complexity. Nested list fields declare a cost proportional to
-/// their page size (see the `complexity` attributes on the resolvers), so this
-/// bounds the *fan-out* a single query can request, which depth alone does not.
-const MAX_COMPLEXITY: usize = 5_000;
-
 pub fn build_schema() -> FastmailSchema {
+    // Complexity is deliberately **not** capped. Resolvers still declare costs
+    // (the `complexity` attributes, priced so a document parse reads as far more
+    // expensive than a download) but those are guidance, surfaced in the field
+    // descriptions so a caller can choose a sensible page size — not a limit
+    // that refuses the query. Rejecting an expensive-but-legitimate request
+    // leaves the caller guessing at a threshold it cannot see.
+    //
+    // Depth stays capped: the graph contains cycles, and nothing else bounds
+    // them.
     Schema::build(QueryRoot, MutationRoot, async_graphql::EmptySubscription)
         .data(types::NonceStore::default())
         .limit_depth(MAX_DEPTH)
-        .limit_complexity(MAX_COMPLEXITY)
         .finish()
 }
 

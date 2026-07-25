@@ -286,8 +286,9 @@ impl ServerHandler for FastmailMcp {
                       mailboxes { name role }\n\
                     } } } }\n\
                 ```\n\
-                Nesting is bounded (max depth 15, plus a query-complexity cap), so\n\
-                keep fan-out reasonable — very wide + very deep queries are rejected.\n\n\
+                Nesting is capped at depth 15 (the graph has cycles). Breadth is\n\
+                not capped, so fan-out is your call — but it is real work, and\n\
+                the field descriptions say what each field costs.\n\n\
                 ## Attachment payloads cost different amounts\n\
                 Metadata (`name`, `size`, `contentType`, `cid`) comes with the email\n\
                 and downloads nothing. Beyond that, pick the cheapest field that\n\
@@ -295,9 +296,8 @@ impl ServerHandler for FastmailMcp {
                 - `base64` — raw bytes, any type. Download only.\n\
                 - `image(maxBytes: N)` — resized then encoded, null for non-images.\n\
                 - `text` — extracted document text. **Expensive**: it parses the\n\
-                  whole file and is priced heavily against the complexity cap.\n\
-                  Only select it when you actually need the text, and prefer a\n\
-                  small page size when you do.\n\n\
+                  whole file. Only select it when you actually need the text,\n\
+                  and prefer a small page size when you do.\n\n\
                 ## Sending Emails (ALWAYS preview first!)\n\
                 ```graphql\n\
                 # Step 1: Preview\n\

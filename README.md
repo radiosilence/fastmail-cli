@@ -505,13 +505,13 @@ email and downloads nothing at all:
 - `image(maxBytes:)` — resized then encoded, so a model isn't handed a 10MB
   photo. Null for non-images.
 - `text` — extracted document text. **The expensive one**: it parses the whole
-  file, is priced accordingly against the complexity limit, and nothing else on
-  `Attachment` triggers it.
+  file, is priced far above the other two, and nothing else on `Attachment`
+  triggers it. Prefer a small page when selecting it.
 
 ```graphql
 # Bodies and attachment text for a whole folder — one query, 3 API calls.
-# Note the smaller page: `text` parses every document, so it is priced high
-# enough that a full 100-email page of it is refused.
+# Note the smaller page: `text` parses every document, so a big page means a
+# lot of work. Nothing stops you asking for more; the cost is just yours.
 {
   emails(filter: { inMailbox: "INBOX" }, first: 10) {
     nodes {
@@ -648,9 +648,11 @@ per request, so referencing the same email or mailbox twice in one query costs
 one fetch; nothing is retained between requests where it could go stale.
 
 Because the graph contains cycles (`Email.thread.emails`, `Email.mailboxes.emails`),
-queries are bounded by a max nesting depth of 15 and a complexity limit that
-prices nested lists by their page size. Realistic queries are unaffected;
-pathological fan-out is rejected before any API call is made.
+nesting is capped at depth 15 — nothing else bounds a cycle. Breadth is **not**
+capped. Resolvers declare a cost (a document parse prices far above a download,
+nested lists scale with page size) but that cost is guidance for choosing a page
+size, surfaced in the field descriptions; it never refuses a query. Being told
+"too complex" without being told the threshold just makes a caller guess.
 
 All operations are available as GraphQL queries and mutations: mailboxes, emails, search, threads, identities (with signatures), attachments (with text extraction and image resizing), contacts, masked email management, and send/reply/forward with the preview/confirm safety pattern.
 
