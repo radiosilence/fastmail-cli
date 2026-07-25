@@ -677,12 +677,7 @@ async fn main() {
         }
 
         Commands::Completions { shell } => {
-            generate(
-                shell,
-                &mut Cli::command(),
-                "fastmail",
-                &mut io::stdout(),
-            );
+            generate(shell, &mut Cli::command(), "fastmail", &mut io::stdout());
             return;
         }
 
