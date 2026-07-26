@@ -328,9 +328,10 @@ enum Commands {
 
     /// Run as MCP (Model Context Protocol) server for Claude integration
     Mcp {
-        /// Serve over streamable HTTP instead of stdio, at this address.
-        /// The `X-Fastmail-Token` header overrides the configured token per
-        /// request, which is how a hosted deployment serves many users.
+        /// Serve MCP over streamable HTTP at /mcp instead of stdio, on this
+        /// address (default 127.0.0.1:8080). The `X-Fastmail-Token` header
+        /// overrides the configured token per request, which is how a hosted
+        /// deployment serves many users.
         #[arg(
             long,
             value_name = "ADDR",
@@ -339,15 +340,16 @@ enum Commands {
         )]
         http: Option<String>,
 
-        /// Also serve plain GraphQL-over-HTTP at /graphql
+        /// Serve plain GraphQL-over-HTTP at /graphql
         #[arg(long)]
         graphql: bool,
 
-        /// Also serve the GraphiQL IDE at / (implies --graphql)
+        /// Serve the GraphiQL IDE at /, and the /graphql it talks to
         #[arg(long)]
         graphiql: bool,
 
-        /// Open the GraphiQL IDE in your browser once listening (implies --graphiql)
+        /// Open the GraphiQL IDE in your browser once listening (implies
+        /// --graphiql)
         #[arg(long)]
         browser: bool,
     },

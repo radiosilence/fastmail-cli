@@ -442,19 +442,32 @@ Username and app password are optional - only needed for contact search (CardDAV
 
 ### HTTP transport
 
-`--http` swaps stdio for streamable HTTP and takes an optional address
-(default `127.0.0.1:8080`). Three surfaces can share the one port, each opt-in:
+Three independent surfaces, each opt-in, sharing one port (default
+`127.0.0.1:8080`, or pass an address to `--http`):
+
+| Flag         | Serves                                                      |
+| ------------ | ----------------------------------------------------------- |
+| `--http`     | MCP streamable-HTTP at `/mcp`                               |
+| `--graphql`  | plain GraphQL-over-HTTP at `/graphql`                       |
+| `--graphiql` | the GraphiQL IDE at `/`, and its `/graphql`                 |
+| `--browser`  | opens the IDE once the port is bound, implying `--graphiql` |
 
 ```bash
-fastmail mcp --http                        # /mcp
-fastmail mcp --graphql                     # + /graphql
-fastmail mcp --browser                     # + GraphiQL at /, opened for you
-fastmail mcp --http 0.0.0.0:8080 --graphql # explicit address
+fastmail mcp                                   # stdio MCP, no listener
+fastmail mcp --browser                         # just the IDE, opened for you
+fastmail mcp --http                            # just /mcp
+fastmail mcp --http 0.0.0.0:8080 --graphql     # both, explicit address
 ```
 
-The flags cascade rather than gate each other: `--browser` implies `--graphiql`
-implies `--graphql`, and any of them implies `--http` at its default address.
-`--http` is only needed to override the address.
+Asking for any surface binds the listener; there is nowhere to mount an HTTP
+route over stdio. Only `--http` puts MCP on it — the transport a model connects
+through and a browsable endpoint for you are separate things. `--browser`
+implies `--graphiql`, since the IDE is what it opens.
+
+`/graphql` is plain GraphQL-over-HTTP, which is what a browser speaks; `/mcp` is
+MCP JSON-RPC, which it doesn't. That is why GraphiQL needs its own route rather
+than pointing at the MCP one. Both share the schema, the client cache and the
+credential resolution below, so the IDE sees exactly what a model sees.
 
 **Token resolution is the same everywhere:** the request's `X-Fastmail-Token`
 header wins, otherwise the configured token (or `FASTMAIL_API_TOKEN`) is used.
@@ -475,10 +488,6 @@ run `fastmail auth` to refresh it. **Introspection needs no token**: it is
 answered from the schema without touching Fastmail, so GraphiQL's docs,
 autocomplete and explorer work before you have working credentials. Queries
 that select any real field still authenticate as normal.
-
-`/graphql` is plain GraphQL-over-HTTP, which is what a browser speaks; `/mcp` is
-MCP JSON-RPC, which it doesn't. That is why GraphiQL needs its own route rather
-than pointing at the MCP one.
 
 The MCP server exposes **2 tools** via a GraphQL interface:
 
