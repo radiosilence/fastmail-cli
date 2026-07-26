@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"regexp"
 	"strings"
 
@@ -315,6 +316,48 @@ func alreadyReleased(ctx context.Context, repo, tag string, token *dagger.Secret
 	return err == nil
 }
 
+// Release assets that Dagger cannot build and so has to be handed. Named
+// exactly, because a release that is quietly missing a platform is worse than a
+// failed build: it looks complete to anyone downloading it.
+var darwinArtifacts = []string{
+	"fastmail-cli-darwin-x86_64.tar.gz",
+	"fastmail-cli-darwin-aarch64.tar.gz",
+}
+
+// Resolve the macOS tarballs, failing unless every expected one is present.
+func releaseAssets(ctx context.Context, dir *dagger.Directory) ([]*dagger.File, error) {
+	if dir == nil {
+		return nil, fmt.Errorf("no darwin assets given, expected %s", strings.Join(darwinArtifacts, ", "))
+	}
+
+	// The upload/download-artifact round trip decides whether these land at the
+	// root or under a per-artifact directory, so match on name either way.
+	found, err := dir.Glob(ctx, "**/*.tar.gz")
+	if err != nil {
+		return nil, err
+	}
+	byName := make(map[string]string, len(found))
+	for _, p := range found {
+		byName[path.Base(p)] = p
+	}
+
+	var assets []*dagger.File
+	var missing []string
+	for _, want := range darwinArtifacts {
+		p, ok := byName[want]
+		if !ok {
+			missing = append(missing, want)
+			continue
+		}
+		assets = append(assets, dir.File(p))
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("missing release assets: %s (found: %s)",
+			strings.Join(missing, ", "), strings.Join(found, ", "))
+	}
+	return assets, nil
+}
+
 // Build, publish images, and cut a GitHub release for a push to main.
 //
 // Images are pushed before the release is created: this project is consumed as
@@ -331,7 +374,8 @@ func (m *FastmailCli) Deliver(
 	registryUsername string,
 	registryPassword *dagger.Secret,
 	githubToken *dagger.Secret,
-	// Release assets built outside Dagger — the macOS tarballs
+	// Release assets built outside Dagger — the macOS tarballs. Required when
+	// this version has not been released yet.
 	// +optional
 	darwinAssets *dagger.Directory,
 ) (string, error) {
@@ -342,6 +386,22 @@ func (m *FastmailCli) Deliver(
 	tag := "v" + version
 	isNew := !alreadyReleased(ctx, repo, tag, githubToken)
 
+	// Assets are resolved before anything is pushed. Publishing first and
+	// discovering a missing tarball afterwards would leave the semver and latest
+	// image tags moved with no release behind them.
+	var assets []*dagger.File
+	if isNew {
+		linux, err := m.Tarball(ctx, "linux/amd64")
+		if err != nil {
+			return "", err
+		}
+		darwin, err := releaseAssets(ctx, darwinAssets)
+		if err != nil {
+			return "", err
+		}
+		assets = append([]*dagger.File{linux}, darwin...)
+	}
+
 	refs, err := m.PublishImage(ctx, image, imageTags(version, commit, isNew), registryUsername, registryPassword)
 	if err != nil {
 		return "", err
@@ -350,21 +410,6 @@ func (m *FastmailCli) Deliver(
 
 	if !isNew {
 		return summary + "\nno release: " + tag + " is already released", nil
-	}
-
-	linux, err := m.Tarball(ctx, "linux/amd64")
-	if err != nil {
-		return "", err
-	}
-	assets := []*dagger.File{linux}
-	if darwinAssets != nil {
-		darwin, err := darwinAssets.Glob(ctx, "**/*.tar.gz")
-		if err != nil {
-			return "", err
-		}
-		for _, path := range darwin {
-			assets = append(assets, darwinAssets.File(path))
-		}
 	}
 
 	err = dag.Gh(dagger.GhOpts{Token: githubToken, Repo: repo}).
