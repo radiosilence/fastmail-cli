@@ -327,6 +327,9 @@ async fn graphql_endpoint(
     let mut request = if is_introspection_only(&req.query) {
         async_graphql::Request::new(&req.query)
     } else {
+        // Must keep honouring `mcp.default_token` here: GraphiQL runs in a
+        // browser and cannot attach the token header, so making this
+        // headers-only breaks local development.
         let Some(token) = resolve_token(Some(&headers), mcp.default_token.as_deref()) else {
             return error(format!(
                 "No Fastmail token available. Configure one via `fastmail auth` \
@@ -503,5 +506,44 @@ mod tests {
         // hosted mode with no upstream-injected token — must refuse.
         assert_eq!(resolve_token(Some(&headers_with(None)), None), None);
         assert_eq!(resolve_token(None, None), None);
+    }
+
+    /// GraphiQL runs entirely in the browser, with no way to attach the
+    /// `x-fastmail-token` header, so `/graphql` has to keep honouring the
+    /// locally configured token when a request carries none — otherwise the
+    /// IDE that exists specifically to explore the API without ceremony
+    /// becomes unusable the moment credential resolution changes.
+    #[tokio::test]
+    async fn graphql_falls_back_to_local_config_when_no_headers() {
+        let mcp = FastmailMcp::build(Some("fake-token".to_string()));
+
+        // Pre-seed the client cache with a client whose session already
+        // points at an address that refuses connections instantly, so the
+        // resolver's JMAP call fails fast instead of reaching the real
+        // Fastmail API with a fake token.
+        let client = JmapClient::with_test_session("http://127.0.0.1:1");
+        mcp.clients
+            .lock()
+            .await
+            .insert("fake-token".to_string(), Arc::new(Mutex::new(client)));
+
+        let req = HttpGraphqlRequest {
+            query: "{ session { status } }".to_string(),
+            variables: None,
+            operation_name: None,
+        };
+
+        let response = graphql_endpoint(
+            axum::extract::State(mcp),
+            http::HeaderMap::new(),
+            axum::Json(req),
+        )
+        .await;
+
+        let body = serde_json::to_string(&response.0).unwrap();
+        assert!(
+            !body.contains("No Fastmail token available"),
+            "expected the default token to be used, got: {body}"
+        );
     }
 }
