@@ -725,6 +725,40 @@ This CLI talks directly to Fastmail's JMAP server — the protocol layer is hand
 
 For more on JMAP: [jmap.io](https://jmap.io/)
 
+## Development
+
+The pipeline is a [Dagger](https://dagger.io) module in `.dagger`, so CI runs the
+same way on a laptop as it does on a runner — GitHub Actions only decides when to
+invoke it and hands it credentials.
+
+```bash
+dagger check                                   # fmt, clippy, tests
+dagger check -l                                # list them
+dagger check fastmail-cli:clippy               # just one
+dagger call binary --platform=linux/arm64 export --path=./fastmail
+dagger call image --platform=linux/arm64 as-tarball export --path=./image.tar
+```
+
+There is no Dockerfile. The release binary is the unit of caching: each platform
+is compiled once and that file is reused by both the release tarball and the
+container image, so a `docker build` rebuilding from source would be a second,
+slower source of truth. Dagger pushes the multi-platform manifest itself, so
+there are no per-architecture staging tags to assemble afterwards either.
+
+The only module dependency is `dagger/dagger/toolchains/release/gh`, which is
+maintained in the Dagger repo and pinned to the same version as the engine. The
+Rust modules on Daggerverse are all community-maintained and none handle
+cross-compilation, so the cargo invocations are spelled out here instead.
+
+macOS binaries are the exception, and it is a dependency problem rather than a
+Dagger one. Cross-compiling to darwin from a Linux container is possible in
+principle (`cargo-zigbuild` against a macOS SDK), but `aws-lc-sys` — pulled in by
+rustls, via reqwest — does not survive it: it needs macOS-specific compiler flags
+and breaks in a different way on each zig and SDK combination. CI builds the mac
+tarballs natively on a macOS runner and passes them into `deliver` as an
+argument. Moving rustls onto the `ring` backend would likely make an all-Dagger
+build viable, at the cost of changing the crypto backend.
+
 ## License
 
 MIT

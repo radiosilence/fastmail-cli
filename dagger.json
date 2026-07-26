@@ -1,0 +1,15 @@
+{
+  "name": "fastmail-cli",
+  "engineVersion": "v0.21.7",
+  "sdk": {
+    "source": "go"
+  },
+  "dependencies": [
+    {
+      "name": "gh",
+      "source": "github.com/dagger/dagger/toolchains/release/gh@v0.21.7",
+      "pin": "054f94b2d86c0ac00bef11ac4550816973c4aeef"
+    }
+  ],
+  "source": ".dagger"
+}

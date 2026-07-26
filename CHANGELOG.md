@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **CI is a Dagger module now, not a YAML program.** The pipeline lived in
+  `.github/workflows/ci.yml` as five jobs wired together by `needs:`, which meant
+  it could only be run by pushing to a branch and watching. It is a Go module in
+  `.dagger`, and the workflow is reduced to deciding when to invoke it and
+  handing it credentials — `dagger check` on a laptop is the same code the runner
+  executes. fmt, clippy and test are declared as checks rather than as steps in a
+  script, so they are listed and runnable individually and report as three
+  results instead of one.
+- **The release binary is built once and reused.** The tarball and the container
+  image were separately compiled from source: the release job ran `cargo build`,
+  and the Dockerfile then rebuilt the whole tree again inside the image build,
+  for every architecture. Both now take the same cached binary, so the compile
+  happens once per platform.
+- **The arm64 image is cross-compiled instead of built on a second runner.**
+  kreuzberg's `bundled-pdfium` downloads a prebuilt library per target rather
+  than compiling C++, so nothing in the build actually needs to execute as
+  aarch64 — only the linker needs to target it. The dedicated ARM runner and the
+  separate `main-amd64`/`main-arm64` staging tags are gone; Dagger pushes one
+  multi-platform manifest per tag directly.
+- **The release is cut through the `gh` toolchain maintained in the Dagger
+  repo**, pinned to the engine version, rather than a third-party action. The
+  release tag now points at the commit that was built rather than at whatever
+  the default branch happened to be when the job ran.
+
+### Removed
+
+- **The Dockerfile.** The image is assembled from the cached binary by
+  `dagger call image`, and keeping a second recipe that built it a different way
+  invited the two to drift. `dagger call image ... as-tarball` produces a
+  loadable image locally.
+
 ## [3.3.0] - 2026-07-26
 
 ### Added
