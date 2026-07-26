@@ -14,6 +14,12 @@ on:
 env:
   # Keep in step with engineVersion in dagger.json.
   DAGGER_VERSION: 0.21.7
+  # Runs the engine on Dagger Cloud rather than on the runner. Hosted runners
+  # are ephemeral, so an engine started on one begins every job with an empty
+  # layer cache and empty cache volumes — the cargo registry and target dirs
+  # were being rebuilt from nothing on every run. Cloud volumes are restored at
+  # the start of a run and pushed back at the end, so they survive.
+  DAGGER_FLAGS: --progress plain --cloud
 
 jobs:
   check:
@@ -26,6 +32,7 @@ jobs:
         with:
           version: ${{ env.DAGGER_VERSION }}
           verb: check
+          dagger-flags: ${{ env.DAGGER_FLAGS }}
           cloud-token: ${{ secrets.DAGGER_CLOUD_TOKEN }}
           enable-github-summary: true
 
@@ -90,6 +97,7 @@ jobs:
             --registry-password=env://GITHUB_TOKEN
             --github-token=env://GITHUB_TOKEN
             --darwin-assets=./darwin
+          dagger-flags: ${{ env.DAGGER_FLAGS }}
           cloud-token: ${{ secrets.DAGGER_CLOUD_TOKEN }}
           enable-github-summary: true
         env:

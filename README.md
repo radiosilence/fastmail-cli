@@ -745,6 +745,11 @@ container image, so a `docker build` rebuilding from source would be a second,
 slower source of truth. Dagger pushes the multi-platform manifest itself, so
 there are no per-architecture staging tags to assemble afterwards either.
 
+CI runs the engine on Dagger Cloud (`--cloud`). Hosted runners are ephemeral, so
+an engine started on one begins every job with an empty layer cache and empty
+cache volumes, which defeats the point of caching the binary at all; cloud
+volumes are restored at the start of a run and pushed back at the end.
+
 The only module dependency is `dagger/dagger/toolchains/release/gh`, which is
 maintained in the Dagger repo and pinned to the same version as the engine. The
 Rust modules on Daggerverse are all community-maintained and none handle
