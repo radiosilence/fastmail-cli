@@ -94,8 +94,15 @@ func (m *FastmailCli) base(cacheKey string) *dagger.Container {
 		// rustfmt is present. The layer is shared with every other use of this
 		// container, so adding them here costs nothing.
 		WithExec([]string{"rustup", "component", "add", "clippy", "rustfmt"}).
-		WithMountedCache("/usr/local/cargo/registry", dag.CacheVolume("cargo-registry")).
-		WithMountedCache("/usr/local/cargo/git", dag.CacheVolume("cargo-git")).
+		// Cargo serialises concurrent downloads through a lock file it keeps at
+		// the root of CARGO_HOME. Mounting only registry/ and git/ left that
+		// lock on each container's own filesystem, so containers sharing the
+		// registry could not see each other's and raced to unpack the same
+		// crate — which corrupts it. Putting all of CARGO_HOME on the volume
+		// keeps the lock beside the data it guards. The toolchain itself lives
+		// under RUSTUP_HOME and is unaffected.
+		WithEnvVariable("CARGO_HOME", "/cargo").
+		WithMountedCache("/cargo", dag.CacheVolume("cargo-home")).
 		WithWorkdir("/src").
 		WithDirectory("/src", m.Source).
 		WithMountedCache("/src/target", dag.CacheVolume("cargo-target-"+cacheKey))
