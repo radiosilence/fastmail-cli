@@ -31,11 +31,14 @@ jobs:
 
   darwin:
     name: Build ${{ matrix.name }}
-    needs: check
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     # The one piece Dagger can't take: aws-lc-sys, via rustls, does not
     # cross-compile to darwin from a Linux container. Built natively here and
     # handed to the release step as an artifact.
+    #
+    # Deliberately not gated on check: this is the long pole of a main build, so
+    # it starts immediately and overlaps with it. deliver still needs both, so a
+    # failing check cannot produce a release either way.
     runs-on: macos-latest
     strategy:
       fail-fast: false
