@@ -18,7 +18,7 @@ env:
 jobs:
   check:
     name: Check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
@@ -44,7 +44,7 @@ jobs:
   # release forever. Releases are also what consumers and update pollers read.
   version:
     name: Version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     outputs:
@@ -73,13 +73,15 @@ jobs:
   # cost a runner handoff and an artifact round-trip, and upload-artifact drops
   # the executable bit on the way through.
   #
-  # ubuntu-22.04, not ubuntu-latest, is the glibc floor: 2.35 against
-  # bookworm-slim's 2.36. Symbol versioning is forward-compatible only, so
-  # building on 24.04 (2.39) would link fine and die at exec time in the image.
-  # It also makes the published tarballs portable that much further back.
-  #
   # Runs on pull requests: nothing else builds the image, so a broken Dockerfile
   # used to surface only after merge. Pushes nothing either way.
+  #
+  # The runner is pinned rather than ubuntu-latest, and that is load-bearing:
+  # this binary is copied into a distroless image, and glibc symbol versioning
+  # is forward-compatible only, so building against a newer glibc than the base
+  # links fine and dies at exec time. cc-debian13 is 2.41, which makes 24.04
+  # (2.39) the newest usable runner — 25.10 is 2.42 and 26.04 is 2.43. A
+  # floating ubuntu-latest would break the image the day it rolls over.
   build-image:
     name: Build ${{ matrix.arch }} Image
     runs-on: ${{ matrix.runner }}
@@ -90,11 +92,11 @@ jobs:
         include:
           - arch: amd64
             platform: linux/amd64
-            runner: ubuntu-22.04
+            runner: ubuntu-24.04
             name: linux-x86_64
           - arch: arm64
             platform: linux/arm64
-            runner: ubuntu-22.04-arm
+            runner: ubuntu-24.04-arm
             name: linux-aarch64
     permissions:
       contents: read
@@ -188,7 +190,7 @@ jobs:
     name: Publish
     needs: [check, version, build-image, build-darwin]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
       packages: write
