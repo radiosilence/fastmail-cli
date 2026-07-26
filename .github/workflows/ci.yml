@@ -18,13 +18,17 @@ env:
 jobs:
   check:
     name: Check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          # Branch-scoped caches aren't readable from other branches, so a PR
+          # saving here only evicts the main entry every PR restores from.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check formatting
         run: cargo fmt -- --check
       - name: Clippy
@@ -40,7 +44,7 @@ jobs:
   # release forever. Releases are also what consumers and update pollers read.
   version:
     name: Version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     outputs:
@@ -64,51 +68,22 @@ jobs:
           fi
           echo "Cargo.toml v$VERSION, latest release ${LATEST:-none}"
 
-  # Builds run alongside the checks rather than behind them: they're the long
-  # pole, and nothing they produce escapes the workflow. Both build jobs emit
-  # artifacts and touch no registry, so there is nothing here to gate — publish
-  # is the only job that exposes anything, and it waits for check.
-  build-binaries:
-    name: Build ${{ matrix.name }}
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            name: linux-x86_64
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            name: darwin-x86_64
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            name: darwin-aarch64
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
-        with:
-          toolchain: stable
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
-      - name: Package
-        run: |
-          cd target/${{ matrix.target }}/release
-          tar -czvf ../../../fastmail-cli-${{ matrix.name }}.tar.gz fastmail
-      - name: Upload artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: bin-${{ matrix.name }}
-          path: fastmail-cli-${{ matrix.name }}.tar.gz
-
-  # Exports an image tarball instead of pushing. Publishing is one job's
-  # responsibility now, so this one produces a candidate and nothing more.
+  # One job, one compile, two outputs: this owns the Linux release build and
+  # feeds the same binary straight into the Docker build. Splitting them would
+  # cost a runner handoff and an artifact round-trip, and upload-artifact drops
+  # the executable bit on the way through.
+  #
+  # Runs on pull requests: nothing else builds the image, so a broken Dockerfile
+  # used to surface only after merge. Pushes nothing either way.
+  #
+  # The runner is pinned rather than ubuntu-latest, and that is load-bearing:
+  # this binary is copied into a distroless image, and glibc symbol versioning
+  # is forward-compatible only, so building against a newer glibc than the base
+  # links fine and dies at exec time. cc-debian13 is 2.41, which makes 24.04
+  # (2.39) the newest usable runner — 25.10 is 2.42 and 26.04 is 2.43. A
+  # floating ubuntu-latest would break the image the day it rolls over.
   build-image:
     name: Build ${{ matrix.arch }} Image
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ${{ matrix.runner }}
     strategy:
       # A transient failure on one arch shouldn't cancel the other.
@@ -117,31 +92,55 @@ jobs:
         include:
           - arch: amd64
             platform: linux/amd64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
+            name: linux-x86_64
           - arch: arm64
             platform: linux/arm64
             runner: ubuntu-24.04-arm
+            name: linux-aarch64
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: ${{ matrix.name }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang cmake pkg-config
+      - name: Build
+        run: cargo build --release --locked
+      - name: Stage binary
+        run: mkdir -p dist && cp target/release/fastmail dist/fastmail
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-      - name: Build ${{ matrix.arch }}
+      # No gha layer cache: nothing compiles in the image now, and mode=max was
+      # stuffing Rust build layers into the same repo-wide 10GB budget
+      # Swatinem/rust-cache uses, so the two evicted each other.
+      - name: Build ${{ matrix.arch }} image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: ./Dockerfile
           platforms: ${{ matrix.platform }}
           push: false
+          build-args: BIN_SOURCE=prebuilt
           # Baked into the tarball, so publish pushes what it loads untouched.
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main-${{ matrix.arch }}
           outputs: type=docker,dest=/tmp/image-${{ matrix.arch }}.tar
-          cache-from: type=gha,scope=${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
       - name: Smoke test
         run: |
           docker load -i /tmp/image-${{ matrix.arch }}.tar
           docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main-${{ matrix.arch }} --version
+      - name: Package binary
+        run: tar -czvf fastmail-cli-${{ matrix.name }}.tar.gz -C dist fastmail
+      - name: Upload binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bin-${{ matrix.name }}
+          path: fastmail-cli-${{ matrix.name }}.tar.gz
       - name: Upload image
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -150,15 +149,48 @@ jobs:
           # Only publish reads these, minutes later.
           retention-days: 1
 
+  # Release assets only — no image consumes these, so they'd be dead weight on a
+  # pull request.
+  build-darwin:
+    name: Build ${{ matrix.name }}
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            name: darwin-x86_64
+          - target: aarch64-apple-darwin
+            name: darwin-aarch64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        run: tar -czvf fastmail-cli-${{ matrix.name }}.tar.gz -C target/${{ matrix.target }}/release fastmail
+      - name: Upload binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bin-${{ matrix.name }}
+          path: fastmail-cli-${{ matrix.name }}.tar.gz
+
   # The only job that publishes anything, and the release is its last step. This
   # project is consumed as a container, so a version tag with no image behind it
   # is worse than no tag at all — an auto-updater polling releases will happily
   # pin one. Images go up first; the release announces them.
   publish:
     name: Publish
-    needs: [check, version, build-binaries, build-image]
+    needs: [check, version, build-image, build-darwin]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
       packages: write
