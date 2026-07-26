@@ -74,6 +74,7 @@ const DESIRED_CAPABILITIES: &[&str] = &[
 pub struct JmapClient {
     client: Client,
     token: String,
+    session_url: String,
     session: Option<Session>,
     available_capabilities: Vec<String>,
     cached_mailboxes: Option<Vec<Mailbox>>,
@@ -560,6 +561,7 @@ impl JmapClient {
         Self {
             client,
             token,
+            session_url: SESSION_URL.to_string(),
             session: None,
             available_capabilities: Vec::new(),
             cached_mailboxes: None,
@@ -568,10 +570,12 @@ impl JmapClient {
 
     /// Build a client that is already "authenticated" against `api_url`, so
     /// tests can point it at a mock JMAP server without going through the
-    /// hardcoded session endpoint.
+    /// real session endpoint. Re-authentication is redirected there too, so
+    /// tests can exercise the handshake itself.
     #[cfg(test)]
     pub fn with_test_session(api_url: &str) -> Self {
         let mut client = Self::new("test-token".into());
+        client.session_url = format!("{api_url}/session");
         client.available_capabilities =
             DESIRED_CAPABILITIES.iter().map(|s| s.to_string()).collect();
         client.session = Some(Session {
@@ -599,7 +603,7 @@ impl JmapClient {
         debug!("Fetching JMAP session");
         let resp = self
             .client
-            .get(SESSION_URL)
+            .get(&self.session_url)
             .bearer_auth(&self.token)
             .send()
             .await?;

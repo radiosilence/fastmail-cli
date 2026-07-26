@@ -21,7 +21,7 @@ use super::filter::{EmailFilter, EmailSort};
 use super::loaders::{Blobs, Emails, Mailboxes, Threads, to_gql_error};
 use crate::carddav::{Contact, ContactEmail, ContactPhone};
 use crate::models::{
-    Email, EmailAddress, EmailHeader, Identity, Mailbox, MailboxRights, MaskedEmail,
+    Email, EmailAddress, EmailHeader, Identity, Mailbox, MailboxRights, MaskedEmail, Session,
 };
 
 /// Page size used when a connection field names no `first`/`last`.
@@ -642,6 +642,58 @@ impl From<Identity> for GqlIdentity {
             bcc: convert_addrs(i.bcc),
         }
     }
+}
+
+/// Who the token authenticates as, and what it may reach.
+#[derive(SimpleObject)]
+#[graphql(name = "Session")]
+pub struct GqlSession {
+    /// The Fastmail account the token belongs to.
+    pub username: String,
+    /// The account mail operations run against.
+    pub primary_account_id: Option<String>,
+    /// Every account the token can see, primary or not.
+    pub accounts: Vec<GqlAccount>,
+    /// Capability URNs the server advertises for this session. A capability
+    /// missing here is one the token cannot use — masked email and submission
+    /// are the two that vary by token scope.
+    pub capabilities: Vec<String>,
+}
+
+impl From<&Session> for GqlSession {
+    fn from(s: &Session) -> Self {
+        let mut accounts: Vec<GqlAccount> = s
+            .accounts
+            .iter()
+            .map(|(id, a)| GqlAccount {
+                id: id.clone(),
+                name: a.name.clone(),
+                is_personal: a.is_personal,
+                is_read_only: a.is_read_only,
+            })
+            .collect();
+        // Both collections come out of maps, so sort for a stable response.
+        accounts.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut capabilities: Vec<String> = s.capabilities.keys().cloned().collect();
+        capabilities.sort();
+
+        Self {
+            username: s.username.clone(),
+            primary_account_id: s.primary_account_id().map(str::to_owned),
+            accounts,
+            capabilities,
+        }
+    }
+}
+
+#[derive(SimpleObject)]
+#[graphql(name = "Account")]
+pub struct GqlAccount {
+    pub id: String,
+    pub name: String,
+    /// False for shared or delegated accounts.
+    pub is_personal: bool,
+    pub is_read_only: bool,
 }
 
 #[derive(SimpleObject)]

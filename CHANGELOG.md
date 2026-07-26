@@ -1,6 +1,19 @@
 # Changelog
 
-## [Unreleased]
+## [3.3.0] - 2026-07-26
+
+### Added
+
+- **`session` query.** Nothing on the graph answered "is this token still
+  good?". Every field needs auth, so a broken token surfaced as whatever error
+  the field happened to produce, and an empty result was indistinguishable from
+  a dead credential. `session` re-runs the JMAP handshake rather than reporting
+  the cached one — clients are cached per token for the life of the process, so
+  a cached answer would keep claiming success long after a revocation — and
+  returns the username, the accounts the token reaches, and the capability URNs
+  it was granted. That last part is the only way to know whether masked email or
+  submission are available before trying to use them. Costs one API call and
+  touches no mail.
 
 ### Fixed
 

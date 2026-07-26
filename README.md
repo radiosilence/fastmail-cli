@@ -484,7 +484,13 @@ gets your mailbox without needing a token at all.
 
 The token is resolved on first query rather than at startup, so an expired one
 shows up as an error in the response pane rather than a server that won't boot —
-run `fastmail auth` to refresh it. **Introspection needs no token**: it is
+run `fastmail auth` to refresh it. `{ session { username } }` asks the question
+directly: it re-runs the handshake rather than reporting what the cached client
+was told when it was built, so a token revoked since then fails here, and it
+touches no mail, so a healthy token over an empty mailbox can't read as a broken
+one. It also reports the accounts the token reaches and the capabilities it was
+granted — which is what says whether masked email and sending are available at
+all. **Introspection needs no token**: it is
 answered from the schema without touching Fastmail, so GraphiQL's docs,
 autocomplete and explorer work before you have working credentials. Queries
 that select any real field still authenticate as normal.

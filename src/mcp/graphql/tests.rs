@@ -113,6 +113,24 @@ async fn downloads(server: &MockServer) -> Vec<String> {
         .collect()
 }
 
+fn session_json(uri: &str) -> Value {
+    json!({
+        "capabilities": {
+            "urn:ietf:params:jmap:mail": {},
+            "urn:ietf:params:jmap:core": {},
+        },
+        "accounts": {
+            "acct1": { "name": "test@example.com", "isPersonal": true, "isReadOnly": false },
+            "acct2": { "name": "Shared", "isPersonal": false, "isReadOnly": true },
+        },
+        "primaryAccounts": { "urn:ietf:params:jmap:mail": "acct1" },
+        "username": "test@example.com",
+        "apiUrl": format!("{uri}/jmap"),
+        "downloadUrl": format!("{uri}/jmap/download/{{blobId}}"),
+        "uploadUrl": format!("{uri}/jmap/upload"),
+    })
+}
+
 /// Mock JMAP endpoint that answers `Mailbox/get`, `Email/query`, `Email/get`
 /// and `Thread/get` for a fixed inbox of `count` emails.
 async fn mock_server(count: usize) -> MockServer {
@@ -219,6 +237,14 @@ async fn mock_server(count: usize) -> MockServer {
     Mock::given(method("POST"))
         .and(path("/jmap"))
         .respond_with(responder)
+        .mount(&server)
+        .await;
+
+    // The session handshake, which `session` re-runs. Mounted ahead of the
+    // catch-all GET so it is not answered with blob bytes.
+    Mock::given(method("GET"))
+        .and(path("/jmap/session"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(session_json(&server.uri())))
         .mount(&server)
         .await;
 
@@ -1433,5 +1459,72 @@ async fn keyword_sort_without_keyword_is_rejected_before_any_call() {
     assert!(
         query_args(&server).await.is_empty(),
         "an invalid comparator must not reach the server"
+    );
+}
+
+// ============ Session ============
+
+#[tokio::test]
+async fn session_reports_the_authenticated_account() {
+    let server = mock_server(1).await;
+    let resp = run(
+        &server,
+        "{ session { username primaryAccountId capabilities
+                     accounts { id name isPersonal isReadOnly } } }",
+    )
+    .await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+
+    assert_eq!(
+        resp.data.into_json().unwrap()["session"],
+        json!({
+            "username": "test@example.com",
+            "primaryAccountId": "acct1",
+            "capabilities": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            "accounts": [
+                { "id": "acct1", "name": "test@example.com",
+                  "isPersonal": true, "isReadOnly": false },
+                { "id": "acct2", "name": "Shared",
+                  "isPersonal": false, "isReadOnly": true },
+            ],
+        })
+    );
+}
+
+#[tokio::test]
+async fn session_is_a_live_check_not_a_cached_one() {
+    let server = mock_server(1).await;
+    let resp = run(&server, "{ session { username } }").await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+
+    let handshakes = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.url.path() == "/jmap/session")
+        .count();
+    assert_eq!(
+        handshakes, 1,
+        "a client built pre-authenticated must still re-verify the token"
+    );
+}
+
+#[tokio::test]
+async fn session_surfaces_a_revoked_token_as_an_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/jmap/session"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+
+    let resp = run(&server, "{ session { username } }").await;
+    assert!(
+        resp.errors
+            .iter()
+            .any(|e| e.message.contains("Invalid API token")),
+        "got {:?}",
+        resp.errors
     );
 }
