@@ -1464,20 +1464,40 @@ async fn keyword_sort_without_keyword_is_rejected_before_any_call() {
 
 // ============ Session ============
 
+const SESSION: &str = "{ session { status username primaryAccountId capabilities detail
+                                   accounts { id name isPersonal isReadOnly } } }";
+
+/// The `session` field, against a server mounting whatever the caller set up.
+/// Asserts the whole point of the field as it goes: it answers, always.
+async fn session_of(server: &MockServer) -> Value {
+    let resp = run(server, SESSION).await;
+    assert!(
+        resp.errors.is_empty(),
+        "session must report a bad connection, not raise one: {:?}",
+        resp.errors
+    );
+    resp.data.into_json().unwrap()["session"].clone()
+}
+
+/// A JMAP server that answers the handshake with `status` and nothing else.
+async fn session_endpoint(status: u16) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/jmap/session"))
+        .respond_with(ResponseTemplate::new(status))
+        .mount(&server)
+        .await;
+    server
+}
+
 #[tokio::test]
 async fn session_reports_the_authenticated_account() {
     let server = mock_server(1).await;
-    let resp = run(
-        &server,
-        "{ session { username primaryAccountId capabilities
-                     accounts { id name isPersonal isReadOnly } } }",
-    )
-    .await;
-    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
 
     assert_eq!(
-        resp.data.into_json().unwrap()["session"],
+        session_of(&server).await,
         json!({
+            "status": "CONNECTED",
             "username": "test@example.com",
             "primaryAccountId": "acct1",
             "capabilities": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
@@ -1487,6 +1507,7 @@ async fn session_reports_the_authenticated_account() {
                 { "id": "acct2", "name": "Shared",
                   "isPersonal": false, "isReadOnly": true },
             ],
+            "detail": null,
         })
     );
 }
@@ -1494,8 +1515,7 @@ async fn session_reports_the_authenticated_account() {
 #[tokio::test]
 async fn session_is_a_live_check_not_a_cached_one() {
     let server = mock_server(1).await;
-    let resp = run(&server, "{ session { username } }").await;
-    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+    assert_eq!(session_of(&server).await["status"], "CONNECTED");
 
     let handshakes = server
         .received_requests()
@@ -1511,20 +1531,36 @@ async fn session_is_a_live_check_not_a_cached_one() {
 }
 
 #[tokio::test]
-async fn session_surfaces_a_revoked_token_as_an_error() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/jmap/session"))
-        .respond_with(ResponseTemplate::new(401))
-        .mount(&server)
-        .await;
+async fn session_reports_a_revoked_token_as_data() {
+    let server = session_endpoint(401).await;
+    let session = session_of(&server).await;
 
-    let resp = run(&server, "{ session { username } }").await;
+    // The actionable half of the split: this one means re-authenticate.
+    assert_eq!(session["status"], "INVALID_CREDENTIALS");
+    assert!(session["username"].is_null());
+    assert_eq!(session["capabilities"], json!([]));
     assert!(
-        resp.errors
-            .iter()
-            .any(|e| e.message.contains("Invalid API token")),
-        "got {:?}",
-        resp.errors
+        session["detail"]
+            .as_str()
+            .unwrap()
+            .contains("Invalid API token")
     );
+}
+
+#[tokio::test]
+async fn session_reports_a_server_that_wont_answer() {
+    let server = session_endpoint(503).await;
+    let session = session_of(&server).await;
+
+    // Not INVALID_CREDENTIALS — nothing here says the token is bad, and telling
+    // the user to re-authenticate over a 503 would be a lie.
+    assert_eq!(session["status"], "UNREACHABLE");
+    assert!(session["username"].is_null());
+    assert!(!session["detail"].is_null());
+}
+
+#[tokio::test]
+async fn session_does_not_call_rate_limiting_a_credential_problem() {
+    let server = session_endpoint(429).await;
+    assert_eq!(session_of(&server).await["status"], "UNREACHABLE");
 }

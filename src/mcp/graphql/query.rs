@@ -15,16 +15,20 @@ pub struct QueryRoot;
 #[Object]
 #[allow(clippy::too_many_arguments)]
 impl QueryRoot {
-    /// Check the token still authenticates, and report the account it reaches.
+    /// Whether the token still authenticates, and the account it reaches.
     ///
-    /// This re-runs the JMAP session handshake rather than reporting what the
-    /// handshake said when this client was built, so it answers "is auth good
-    /// *now*" — a token revoked since then fails here. Costs one API call and
-    /// touches no mail. Selecting it errors when authentication fails; every
-    /// other field would fail the same way, this one just says so plainly.
+    /// Re-runs the JMAP session handshake rather than reporting what it said
+    /// when this client was built, so it answers "is auth good *now*" — a token
+    /// revoked since then shows up here. One API call, no mail touched.
+    ///
+    /// A rejected or unreachable server is reported in `status`, not raised as
+    /// an error: not being connected is the answer to this question, not a
+    /// failure to answer it. So a caller polling for connection state branches
+    /// on an enum rather than pattern-matching error prose — and a dead token
+    /// stays distinguishable from a Fastmail outage, which is the split anyone
+    /// acting on this needs.
     async fn session(&self, ctx: &Context<'_>) -> Result<GqlSession> {
-        let mut client = ctx.data::<SharedClient>()?.lock().await;
-        Ok(GqlSession::from(client.authenticate().await?))
+        Ok(GqlSession::probe(ctx.data::<SharedClient>()?).await)
     }
 
     /// List all mailboxes (folders) with unread counts. Start here to discover available folders.

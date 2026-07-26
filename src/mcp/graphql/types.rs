@@ -644,20 +644,74 @@ impl From<Identity> for GqlIdentity {
     }
 }
 
+/// Whether the token behind this connection still works.
+///
+/// The split that matters is actionable: `INVALID_CREDENTIALS` means the user
+/// must re-authenticate, `UNREACHABLE` means wait and try again.
+#[derive(Enum, Copy, Clone, Eq, PartialEq, Debug)]
+pub enum ConnectionStatus {
+    /// The handshake succeeded and the session below describes the account.
+    Connected,
+    /// Fastmail rejected the token (401). It has been revoked or mistyped.
+    InvalidCredentials,
+    /// Fastmail couldn't be reached or wouldn't answer — 5xx, rate limiting,
+    /// a timeout, DNS. Says nothing about the token, which may be perfectly
+    /// good.
+    Unreachable,
+}
+
 /// Who the token authenticates as, and what it may reach.
 #[derive(SimpleObject)]
 #[graphql(name = "Session")]
 pub struct GqlSession {
-    /// The Fastmail account the token belongs to.
-    pub username: String,
+    /// Branch on this, not on `detail` — `detail` is prose and will change.
+    pub status: ConnectionStatus,
+    /// The Fastmail account the token belongs to. Null unless connected.
+    pub username: Option<String>,
     /// The account mail operations run against.
     pub primary_account_id: Option<String>,
-    /// Every account the token can see, primary or not.
+    /// Every account the token can see, primary or not. Empty unless connected.
     pub accounts: Vec<GqlAccount>,
     /// Capability URNs the server advertises for this session. A capability
     /// missing here is one the token cannot use — masked email and submission
-    /// are the two that vary by token scope.
+    /// are the two that vary by token scope. Empty unless connected.
     pub capabilities: Vec<String>,
+    /// Why it isn't connected, in human-readable form. Null when connected.
+    pub detail: Option<String>,
+}
+
+impl GqlSession {
+    /// Re-run the JMAP handshake and report what it said.
+    ///
+    /// Deliberately not the client's cached session: MCP holds an authenticated
+    /// client per token for the life of the process, so a cached answer would
+    /// keep reporting success long after a revocation — the precise case this
+    /// exists to catch. One `GET /jmap/session`, no mail touched.
+    pub(crate) async fn probe(client: &super::SharedClient) -> Self {
+        use crate::error::Error;
+
+        let mut client = client.lock().await;
+        match client.authenticate().await {
+            Ok(session) => Self::from(session),
+            Err(e @ Error::InvalidToken(_)) => {
+                Self::disconnected(ConnectionStatus::InvalidCredentials, e)
+            }
+            // Everything else is the server, not the credential. Telling
+            // someone to re-authenticate over a 503 would be a lie.
+            Err(e) => Self::disconnected(ConnectionStatus::Unreachable, e),
+        }
+    }
+
+    fn disconnected(status: ConnectionStatus, error: crate::error::Error) -> Self {
+        Self {
+            status,
+            username: None,
+            primary_account_id: None,
+            accounts: Vec::new(),
+            capabilities: Vec::new(),
+            detail: Some(error.to_string()),
+        }
+    }
 }
 
 impl From<&Session> for GqlSession {
@@ -678,10 +732,12 @@ impl From<&Session> for GqlSession {
         capabilities.sort();
 
         Self {
-            username: s.username.clone(),
+            status: ConnectionStatus::Connected,
+            username: Some(s.username.clone()),
             primary_account_id: s.primary_account_id().map(str::to_owned),
             accounts,
             capabilities,
+            detail: None,
         }
     }
 }

@@ -484,16 +484,37 @@ gets your mailbox without needing a token at all.
 
 The token is resolved on first query rather than at startup, so an expired one
 shows up as an error in the response pane rather than a server that won't boot —
-run `fastmail auth` to refresh it. `{ session { username } }` asks the question
-directly: it re-runs the handshake rather than reporting what the cached client
-was told when it was built, so a token revoked since then fails here, and it
-touches no mail, so a healthy token over an empty mailbox can't read as a broken
-one. It also reports the accounts the token reaches and the capabilities it was
-granted — which is what says whether masked email and sending are available at
-all. **Introspection needs no token**: it is
-answered from the schema without touching Fastmail, so GraphiQL's docs,
-autocomplete and explorer work before you have working credentials. Queries
-that select any real field still authenticate as normal.
+run `fastmail auth` to refresh it, or ask `session` first. **Introspection needs
+no token**: it is answered from the schema without touching Fastmail, so
+GraphiQL's docs, autocomplete and explorer work before you have working
+credentials. Queries that select any real field still authenticate as normal.
+
+#### Checking a connection
+
+`session` answers whether a token still works, and needs no mail to exist to do
+it:
+
+```graphql
+{ session { status username primaryAccountId capabilities detail } }
+```
+
+One `GET /jmap/session` — the handshake Fastmail only completes for a request it
+has authenticated. `status` is `CONNECTED`, `INVALID_CREDENTIALS`, or
+`UNREACHABLE`, and a bad connection is reported there rather than raised as a
+GraphQL error: it is the answer to this question, not a failure to answer it.
+The split is the one a UI acts on — tell the user to re-authenticate, or tell
+them to wait. A 401 is the only thing that reads as a credential verdict;
+everything else (5xx, rate limiting, timeouts, DNS) is `UNREACHABLE`, because
+telling someone their token is dead over an outage would be a lie. `detail`
+carries the reason in prose for a tooltip; branch on `status`, which won't be
+reworded.
+
+It re-runs the handshake rather than reading the cached client — clients are
+cached per token for the life of the process, so a cached answer would keep
+reporting success long after a revocation, which is the case this exists to
+catch. When connected it also reports the accounts the token reaches and the
+capability URNs it was granted, which is what says whether masked email and
+sending are available at all.
 
 The MCP server exposes **2 tools** via a GraphQL interface:
 
