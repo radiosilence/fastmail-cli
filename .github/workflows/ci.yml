@@ -65,26 +65,63 @@ jobs:
           echo "Cargo.toml v$VERSION, latest release ${LATEST:-none}"
 
   # Builds run alongside the checks rather than behind them: they're the long
-  # pole, and nothing they produce escapes the workflow. Both build jobs emit
-  # artifacts and touch no registry, so there is nothing here to gate — publish
-  # is the only job that exposes anything, and it waits for check.
-  build-binaries:
+  # pole, and nothing they produce escapes the workflow. Only `publish` exposes
+  # anything, and it waits for `check`.
+  #
+  # Built inside rust:1-bookworm, not on the runner directly, so the glibc these
+  # link against matches the runtime image. ubuntu-latest is glibc 2.39 and
+  # bookworm is 2.36; symbol versioning only works forwards, so a runner-built
+  # binary dies at exec time in the container. It also lowers the glibc floor on
+  # the release tarballs, which is free portability.
+  build-linux:
     name: Build ${{ matrix.name }}
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ${{ matrix.runner }}
+    container: rust:1-bookworm
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+          - arch: amd64
+            runner: ubuntu-latest
             name: linux-x86_64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            name: linux-aarch64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install build deps
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends \
+            clang cmake pkg-config
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: linux-${{ matrix.arch }}
+      - name: Build
+        run: cargo build --release --locked
+      # tar, not a bare file: upload-artifact drops the executable bit, and the
+      # image build needs it back.
+      - name: Package
+        run: tar -czvf fastmail-cli-${{ matrix.name }}.tar.gz -C target/release fastmail
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bin-${{ matrix.name }}
+          path: fastmail-cli-${{ matrix.name }}.tar.gz
+
+  # Release assets only — no image consumes these, so they'd be dead weight on a
+  # pull request, and macOS runners bill at ten times the Linux rate.
+  build-darwin:
+    name: Build ${{ matrix.name }}
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
           - target: x86_64-apple-darwin
-            os: macos-latest
             name: darwin-x86_64
           - target: aarch64-apple-darwin
-            os: macos-latest
             name: darwin-aarch64
-    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
@@ -92,40 +129,48 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: ${{ matrix.target }}
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Package
-        run: |
-          cd target/${{ matrix.target }}/release
-          tar -czvf ../../../fastmail-cli-${{ matrix.name }}.tar.gz fastmail
+        run: tar -czvf fastmail-cli-${{ matrix.name }}.tar.gz -C target/${{ matrix.target }}/release fastmail
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: bin-${{ matrix.name }}
           path: fastmail-cli-${{ matrix.name }}.tar.gz
 
-  # Exports an image tarball instead of pushing. Publishing is one job's
-  # responsibility now, so this one produces a candidate and nothing more.
+  # Now just a COPY onto a base image — seconds, where compiling in Docker was
+  # the slowest thing in the pipeline. Runs on pull requests too: nothing else
+  # builds the image, so a broken Dockerfile used to surface only after merge.
+  # Exports a tarball and touches no registry.
   build-image:
     name: Build ${{ matrix.arch }} Image
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: build-linux
     runs-on: ${{ matrix.runner }}
     strategy:
-      # A transient failure on one arch shouldn't cancel the other.
       fail-fast: false
       matrix:
         include:
           - arch: amd64
             platform: linux/amd64
             runner: ubuntu-latest
+            name: linux-x86_64
           - arch: arm64
             platform: linux/arm64
             runner: ubuntu-24.04-arm
+            name: linux-aarch64
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bin-${{ matrix.name }}
+      - name: Unpack binary into build context
+        run: tar -xzvf fastmail-cli-${{ matrix.name }}.tar.gz
       - name: Build ${{ matrix.arch }}
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -136,8 +181,6 @@ jobs:
           # Baked into the tarball, so publish pushes what it loads untouched.
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main-${{ matrix.arch }}
           outputs: type=docker,dest=/tmp/image-${{ matrix.arch }}.tar
-          cache-from: type=gha,scope=${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
       - name: Smoke test
         run: |
           docker load -i /tmp/image-${{ matrix.arch }}.tar
@@ -156,7 +199,7 @@ jobs:
   # pin one. Images go up first; the release announces them.
   publish:
     name: Publish
-    needs: [check, version, build-binaries, build-image]
+    needs: [check, version, build-linux, build-darwin, build-image]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
