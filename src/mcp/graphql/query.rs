@@ -2,6 +2,7 @@
 
 use async_graphql::{Context, Object, Result};
 
+use super::SharedClient;
 use super::connection::{
     EmailConnection, ListConnection, PageArgs, emails_connection, page_complexity, paginate,
 };
@@ -14,6 +15,18 @@ pub struct QueryRoot;
 #[Object]
 #[allow(clippy::too_many_arguments)]
 impl QueryRoot {
+    /// Check the token still authenticates, and report the account it reaches.
+    ///
+    /// This re-runs the JMAP session handshake rather than reporting what the
+    /// handshake said when this client was built, so it answers "is auth good
+    /// *now*" — a token revoked since then fails here. Costs one API call and
+    /// touches no mail. Selecting it errors when authentication fails; every
+    /// other field would fail the same way, this one just says so plainly.
+    async fn session(&self, ctx: &Context<'_>) -> Result<GqlSession> {
+        let mut client = ctx.data::<SharedClient>()?.lock().await;
+        Ok(GqlSession::from(client.authenticate().await?))
+    }
+
     /// List all mailboxes (folders) with unread counts. Start here to discover available folders.
     #[graphql(complexity = "page_complexity(first, last, child_complexity)")]
     async fn mailboxes(
