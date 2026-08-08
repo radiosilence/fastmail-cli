@@ -9,6 +9,15 @@ on:
   pull_request:
     branches: [main]
     paths-ignore: ["**/*.md", "LICENSE"]
+  # GitHub evicts any cache not read for 7 days, and this repo goes quiet for
+  # longer than that between bursts of work. The first push back then compiles
+  # ~200 crates from cold on every runner, which is the slow build people
+  # actually notice. Building twice a week on main keeps the entries alive and
+  # re-saves them against the current Cargo.lock, so the cost lands on a
+  # schedule rather than on whoever opens the next pull request.
+  schedule:
+    - cron: "0 6 * * 1,4"
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -31,12 +40,13 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check formatting
         run: cargo fmt -- --check
+      # --all-targets so the tests are linted too, which the bare invocation
+      # skipped. No separate `cargo build`: `cargo test` compiles the binary as
+      # well, so it only bought a second pass over the same crates.
       - name: Clippy
-        run: cargo clippy -- -D warnings
-      - name: Build
-        run: cargo build --locked --verbose
+        run: cargo clippy --all-targets --locked -- -D warnings
       - name: Run tests
-        run: cargo test --locked --verbose
+        run: cargo test --locked
 
   # Is Cargo.toml's version ahead of what's actually been shipped? Releases are
   # the source of truth, not tags: a tag can exist without a release, or be left
@@ -136,7 +146,10 @@ jobs:
           docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main-${{ matrix.arch }} --version
       - name: Package binary
         run: tar -czvf fastmail-cli-${{ matrix.name }}.tar.gz -C dist fastmail
+      # A scheduled run compiles only to refresh the cache, so it has no reason
+      # to leave a 90-day artefact behind twice a week.
       - name: Upload binary
+        if: github.event_name != 'schedule'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: bin-${{ matrix.name }}
@@ -150,10 +163,13 @@ jobs:
           retention-days: 1
 
   # Release assets only — no image consumes these, so they'd be dead weight on a
-  # pull request.
+  # pull request. Runs on the schedule regardless, because these are the only
+  # macOS caches in the pipeline and they are wanted warm precisely when a
+  # release goes out, which is rare enough that they would otherwise always have
+  # expired by then.
   build-darwin:
     name: Build ${{ matrix.name }}
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: macos-latest
     strategy:
       fail-fast: false
@@ -177,6 +193,7 @@ jobs:
       - name: Package
         run: tar -czvf fastmail-cli-${{ matrix.name }}.tar.gz -C target/${{ matrix.target }}/release fastmail
       - name: Upload binary
+        if: github.event_name != 'schedule'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: bin-${{ matrix.name }}
