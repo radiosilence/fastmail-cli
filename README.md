@@ -495,7 +495,7 @@ credentials. Queries that select any real field still authenticate as normal.
 it:
 
 ```graphql
-{ session { status username primaryAccountId capabilities detail } }
+{ session { status username primaryAccountId capabilities carddavConfigured detail } }
 ```
 
 One `GET /jmap/session` — the handshake Fastmail only completes for a request it
@@ -516,9 +516,18 @@ catch. When connected it also reports the accounts the token reaches and the
 capability URNs it was granted, which is what says whether masked email and
 sending are available at all.
 
+`carddavConfigured` is the one thing there that `capabilities` cannot answer.
+Capabilities are what the JMAP server advertises, and contacts go over CardDAV —
+a separate protocol, with separate credentials, invisible to the handshake. So
+without it the only way to find out that `contacts` is unavailable is to run it
+and fail, halfway through a plan that assumed it. It reports whether a username
+and app password are both present, not whether they are correct, and it answers
+independently of `status`: credentials are local configuration, so a dead API
+token doesn't make contact reachability unanswerable.
+
 The MCP server exposes **2 tools** via a GraphQL interface:
 
-- **`schema_sdl`** — returns the full GraphQL schema (SDL) so the LLM can discover all available operations
+- **`schema_sdl`** — returns the GraphQL schema (SDL) so the LLM can discover available operations. Takes an optional `types` list (e.g. `["QueryRoot", "EmailFilter"]`) returning only those definitions, documentation included — the whole schema is ~27KB, most of it the doc comments that make it worth reading, and a session that only sends mail shouldn't pay for the contact surface to find one mutation. Named types come back whole but their references don't, so name those too; an unrecognised name is reported in a trailing comment alongside the type list rather than silently dropped
 - **`graphql`** — executes any GraphQL query or mutation against the Fastmail API
 
 This replaces the previous 18 individual tools with a composable interface. The LLM fetches the schema once, then constructs exactly the queries it needs — fetching multiple resources in a single round-trip, requesting only the fields it wants, and using typed arguments for filtering and pagination.

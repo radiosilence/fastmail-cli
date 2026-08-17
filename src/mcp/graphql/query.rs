@@ -2,13 +2,13 @@
 
 use async_graphql::{Context, Object, Result};
 
-use super::SharedClient;
 use super::connection::{
     EmailConnection, ListConnection, PageArgs, emails_connection, page_complexity, paginate,
 };
 use super::filter::{EmailFilter, EmailSort};
 use super::loaders::{Emails, Identities, MaskedEmails, to_gql_error};
 use super::types::*;
+use super::{CardDavCreds, SharedClient};
 
 pub struct QueryRoot;
 
@@ -28,7 +28,8 @@ impl QueryRoot {
     /// stays distinguishable from a Fastmail outage, which is the split anyone
     /// acting on this needs.
     async fn session(&self, ctx: &Context<'_>) -> Result<GqlSession> {
-        Ok(GqlSession::probe(ctx.data::<SharedClient>()?).await)
+        let carddav_configured = ctx.data::<CardDavCreds>()?.is_complete();
+        Ok(GqlSession::probe(ctx.data::<SharedClient>()?, carddav_configured).await)
     }
 
     /// List all mailboxes (folders) with unread counts. Start here to discover available folders.
@@ -333,21 +334,26 @@ impl QueryRoot {
         )
     }
 
-    /// Search contacts by name, email, or organization. Requires FASTMAIL_APP_PASSWORD.
+    /// Search contacts by name, email, or organization.
+    ///
+    /// Goes over CardDAV, not JMAP, so it needs a username and an app password
+    /// rather than the API token — check `session { carddavConfigured }` before
+    /// relying on it, since that is answerable without failing a query first.
     #[graphql(complexity = "page_complexity(first, last, child_complexity)")]
     async fn contacts(
         &self,
+        ctx: &Context<'_>,
         #[graphql(desc = "Search query — matches name, email, or organization")] query: String,
         after: Option<String>,
         before: Option<String>,
         first: Option<i32>,
         last: Option<i32>,
     ) -> Result<ListConnection<GqlContact>> {
-        let config = crate::config::Config::load()?;
-        let username = config.get_username().map_err(|_| {
+        let creds = ctx.data::<CardDavCreds>()?;
+        let username = creds.username.clone().ok_or_else(|| {
             async_graphql::Error::new("Username not configured. Set FASTMAIL_USERNAME env var.")
         })?;
-        let app_password = config.get_app_password().map_err(|_| {
+        let app_password = creds.app_password.clone().ok_or_else(|| {
             async_graphql::Error::new(
                 "App password not configured. Set FASTMAIL_APP_PASSWORD env var (API tokens don't work for CardDAV).",
             )

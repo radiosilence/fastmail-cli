@@ -1,7 +1,7 @@
 //! MCP (Model Context Protocol) server for Fastmail
 //!
 //! Exposes Fastmail functionality via two GraphQL tools:
-//! - `schema_sdl` — returns the full GraphQL SDL for introspection
+//! - `schema_sdl` — returns the GraphQL SDL, whole or sliced to named types
 //! - `graphql` — executes a GraphQL query/mutation
 
 use std::collections::HashMap;
@@ -23,8 +23,9 @@ use crate::jmap::JmapClient;
 type ToolResult = std::result::Result<CallToolResult, McpError>;
 
 pub mod graphql;
+mod sdl;
 
-use graphql::{FastmailSchema, SharedClient};
+use graphql::{CardDavCreds, FastmailSchema, SharedClient};
 
 /// Header carrying the per-request Fastmail API token in HTTP transport mode.
 /// A trusted upstream (the hosted service, after authenticating the user) sets
@@ -89,6 +90,15 @@ pub struct GraphqlRequest {
     pub variables: Option<String>,
 }
 
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct SchemaRequest {
+    /// Type names to return, e.g. `["QueryRoot", "EmailFilter"]`. Omit for the
+    /// whole schema, which is large. Each named type comes back whole, with its
+    /// documentation, but the types *it* references do not — name those too.
+    #[serde(default)]
+    pub types: Option<Vec<String>>,
+}
+
 // ============ Server Implementation ============
 
 #[derive(Clone)]
@@ -99,6 +109,11 @@ pub struct FastmailMcp {
     /// stdio; over HTTP it is whatever [`local_token`] found, so `None` in a
     /// hosted deployment and every request must bring its own.
     default_token: Option<String>,
+    /// CardDAV credentials from local config, read once at startup like
+    /// `default_token` — same lifecycle, same best-effort: absent in a hosted
+    /// deployment, where contacts are simply unavailable. Never per-request,
+    /// because unlike the token they cannot arrive in a header.
+    carddav: CardDavCreds,
     #[allow(dead_code)] // referenced by #[tool_handler] macro expansion
     tool_router: ToolRouter<Self>,
 }
@@ -109,6 +124,7 @@ impl FastmailMcp {
             schema: Arc::new(graphql::build_schema()),
             clients: Arc::new(Mutex::new(HashMap::new())),
             default_token,
+            carddav: CardDavCreds::from_local_config(),
             tool_router: Self::tool_router(),
         }
     }
@@ -151,10 +167,16 @@ impl FastmailMcp {
 impl FastmailMcp {
     #[tool(
         title = "Fastmail schema",
-        description = "Returns the full GraphQL SDL (Schema Definition Language) for the Fastmail API. Call this first to discover available queries, mutations, types, and their arguments. The schema includes all email, mailbox, identity, masked email, contact, and attachment operations."
+        description = "Returns the GraphQL SDL (Schema Definition Language) for the Fastmail API: every query, mutation, type and argument across email, mailboxes, identities, masked email, contacts and attachments. Pass `types` to return only the named types — the full schema is ~27KB, and `types: [\"QueryRoot\"]` or `[\"MutationRoot\"]` is usually enough to pick an operation, followed by the argument types it names."
     )]
-    async fn schema_sdl(&self) -> ToolResult {
-        Self::text_result(self.schema.sdl())
+    async fn schema_sdl(&self, Parameters(req): Parameters<SchemaRequest>) -> ToolResult {
+        let sdl = self.schema.sdl();
+        match req.types {
+            // An explicit empty list means "no types", which is never what a
+            // caller wants; read it as the whole schema.
+            Some(types) if !types.is_empty() => Self::text_result(sdl::slice(&sdl, &types)),
+            _ => Self::text_result(sdl),
+        }
     }
 
     #[tool(
@@ -177,7 +199,7 @@ impl FastmailMcp {
             Err(e) => return Self::error_result(format!("Fastmail authentication failed: {e}")),
         };
 
-        let mut request = graphql::request(&req.query, client);
+        let mut request = graphql::request(&req.query, client, self.carddav.clone());
 
         if let Some(ref vars) = req.variables {
             match serde_json::from_str::<serde_json::Value>(vars) {
@@ -219,9 +241,36 @@ impl ServerHandler for FastmailMcp {
             .with_server_info(server_info)
             .with_instructions(
                 "Fastmail, as a GraphQL API.\n\n\
-                Call `schema_sdl` once — every type, argument and per-field cost \
-                is documented there — then use `graphql`. Variables go as a JSON \
+                Every type, argument and per-field cost is documented in \
+                `schema_sdl`, which takes a `types` list so you can read one \
+                corner of it rather than all ~27KB. The shapes below cover most \
+                sessions without reading any of it. Variables go as a JSON \
                 string.\n\n\
+                ## Shapes\n\
+                Filters are a tree — scalar fields AND together, `and`/`or`/`not` \
+                nest:\n\
+                ```\n\
+                { emails(filter: {unread: true, inMailbox: \"INBOX\", \
+                not: {hasKeyword: \"$answered\"}, \
+                or: [{from: \"a@b.com\"}, {to: \"a@b.com\"}]}, first: 10) \
+                { totalCount nodes { id subject from { email } } } }\n\
+                ```\n\
+                Sending is two calls, and the first one sends nothing. \
+                Recipients are comma-separated strings, not lists, and the \
+                token binds `to`/`subject`/`body` — repeat them unchanged or \
+                CONFIRM is rejected:\n\
+                ```\n\
+                mutation { sendEmail(action: PREVIEW, to: \"a@b.com\", \
+                subject: \"Hi\", body: \"...\") { preview confirmationToken } }\n\
+                mutation { sendEmail(action: CONFIRM, to: \"a@b.com\", \
+                subject: \"Hi\", body: \"...\", \
+                confirmationToken: \"<from preview>\") { success emailId } }\n\
+                ```\n\
+                Check credentials before planning around them — `contacts` needs \
+                CardDAV, which the API token does not cover:\n\
+                ```\n\
+                { session { status carddavConfigured } }\n\
+                ```\n\n\
                 ## Querying well\n\
                 - The graph is fully nested and everything below a list is \
                   batched, so ask for what you need in ONE query rather than \
@@ -343,7 +392,7 @@ async fn graphql_endpoint(
             Ok(client) => client,
             Err(e) => return error(format!("Fastmail authentication failed: {e}")),
         };
-        graphql::request(&req.query, client)
+        graphql::request(&req.query, client, mcp.carddav.clone())
     };
     if let Some(vars) = req.variables {
         request = request.variables(async_graphql::Variables::from_json(vars));
@@ -471,6 +520,76 @@ mod tests {
         // stdio: no HTTP headers in the request context at all.
         let got = resolve_token(None, Some("default-tok"));
         assert_eq!(got.as_deref(), Some("default-tok"));
+    }
+
+    /// The text a tool call came back with.
+    fn text_of(result: CallToolResult) -> String {
+        result
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn schema_sdl_without_arguments_still_returns_everything() {
+        // `types` was added to a tool that took no arguments at all, and rmcp
+        // reads absent arguments as `{}` — so an existing client that sends
+        // none must keep getting the whole schema.
+        let empty: SchemaRequest = serde_json::from_str("{}").unwrap();
+        assert!(empty.types.is_none());
+
+        let sdl = text_of(
+            FastmailMcp::http()
+                .schema_sdl(Parameters(empty))
+                .await
+                .unwrap(),
+        );
+        assert!(sdl.contains("type QueryRoot {"));
+        assert!(sdl.contains("type Session {"));
+        assert!(sdl.contains("input EmailFilter {"));
+    }
+
+    #[tokio::test]
+    async fn schema_sdl_with_types_returns_only_those() {
+        let mcp = FastmailMcp::http();
+        let sliced = text_of(
+            mcp.schema_sdl(Parameters(SchemaRequest {
+                types: Some(vec!["Session".into()]),
+            }))
+            .await
+            .unwrap(),
+        );
+
+        assert!(sliced.contains("type Session {"));
+        assert!(!sliced.contains("input EmailFilter {"));
+
+        let full = text_of(
+            mcp.schema_sdl(Parameters(SchemaRequest::default()))
+                .await
+                .unwrap(),
+        );
+        assert!(
+            sliced.len() * 10 < full.len(),
+            "{} of {} is not a saving worth the argument",
+            sliced.len(),
+            full.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_types_list_is_read_as_the_whole_schema() {
+        // Never a useful request, and returning nothing would look like a bug
+        // in the schema rather than in the call.
+        let sdl = text_of(
+            FastmailMcp::http()
+                .schema_sdl(Parameters(SchemaRequest {
+                    types: Some(Vec::new()),
+                }))
+                .await
+                .unwrap(),
+        );
+        assert!(sdl.contains("type QueryRoot {"));
     }
 
     #[test]

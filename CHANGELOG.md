@@ -1,5 +1,40 @@
 # Changelog
 
+## [3.4.0] - 2026-08-17
+
+### Added
+
+- **`Session.carddavConfigured`.** Contacts go over CardDAV, which authenticates
+  with a username and an app password and rejects the API token everything else
+  uses — so `contacts` can fail on a connection where mail works perfectly.
+  `capabilities` could never report this: it lists what the JMAP server
+  advertises, and CardDAV is a separate protocol the handshake cannot see. The
+  only way to discover the gap was to run the query and fail, halfway through a
+  plan that assumed contacts were reachable. It reports whether both credentials
+  are present, not whether they work, and answers independently of `status`,
+  since credentials are local configuration and stay knowable when the token is
+  dead. Both it and `contacts` now read the same injected value rather than
+  loading the config separately, so the flag cannot disagree with the operation
+  it describes.
+
+- **`schema_sdl` takes a `types` list.** The full SDL is ~27KB, most of it the
+  doc comments that make it worth reading, and it was all-or-nothing — a session
+  that only sends mail paid for the contact and masked-email surface to find one
+  mutation, and paid again on every reconnect. `types: ["QueryRoot"]` or
+  `["MutationRoot"]` is usually enough to choose an operation, followed by the
+  argument types it names. Definitions come back whole and documented; the types
+  they reference do not, so name those too. An unrecognised name is reported in
+  a trailing SDL comment along with the full type list, rather than silently
+  returning a schema with a hole in it. Omitting `types` still returns
+  everything.
+
+- **Worked query shapes in the MCP server instructions.** The filter tree and
+  the PREVIEW→CONFIRM flow are the two things that cannot be guessed from a
+  field list, and they were costing a schema fetch each to discover. They are
+  scraped out of the instructions and executed by the test suite, so a documented
+  example cannot drift into being wrong — which it already had, in the draft of
+  this change.
+
 ## [3.3.2] - 2026-07-26
 
 ### Changed
