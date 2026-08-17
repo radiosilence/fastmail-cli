@@ -469,13 +469,26 @@ MCP JSON-RPC, which it doesn't. That is why GraphiQL needs its own route rather
 than pointing at the MCP one. Both share the schema, the client cache and the
 credential resolution below, so the IDE sees exactly what a model sees.
 
-**Token resolution is the same everywhere:** the request's `X-Fastmail-Token`
-header wins, otherwise the configured token (or `FASTMAIL_API_TOKEN`) is used.
+**Credential resolution is the same everywhere:** the request's own header
+wins, otherwise the local config (or the matching environment variable) is used.
 Running it yourself, that means your own credentials with no ceremony. In a
-hosted deployment there is no local token, so the fallback is absent and every
-request must carry the header, injected by a trusted upstream after it has
+hosted deployment there is no local config, so the fallback is absent and every
+request must carry its headers, injected by a trusted upstream after it has
 authenticated the caller. Authenticated JMAP clients are cached per token, so
 the JMAP session handshake runs once per distinct token rather than per call.
+
+| Header                     | Falls back to           | Needed for              |
+| -------------------------- | ----------------------- | ----------------------- |
+| `X-Fastmail-Token`         | `FASTMAIL_API_TOKEN`    | everything over JMAP    |
+| `X-Fastmail-Username`      | `FASTMAIL_USERNAME`     | contacts (CardDAV)      |
+| `X-Fastmail-App-Password`  | `FASTMAIL_APP_PASSWORD` | contacts (CardDAV)      |
+
+Contacts take two headers rather than riding on the token because CardDAV is a
+separate protocol that rejects API tokens outright. Each resolves on its own: a
+request carrying a username header but no password gets exactly that — half a
+credential, which `session { carddavConfigured }` reports as `false` — rather
+than quietly completing itself from the host's local config and mixing two
+users together.
 
 Do **not** expose this to the internet without such an auth layer in front —
 the header is trusted unconditionally. Equally, do not run it with local
@@ -527,8 +540,25 @@ token doesn't make contact reachability unanswerable.
 
 The MCP server exposes **2 tools** via a GraphQL interface:
 
-- **`schema_sdl`** — returns the GraphQL schema (SDL) so the LLM can discover available operations. Takes an optional `types` list (e.g. `["QueryRoot", "EmailFilter"]`) returning only those definitions, documentation included — the whole schema is ~27KB, most of it the doc comments that make it worth reading, and a session that only sends mail shouldn't pay for the contact surface to find one mutation. Named types come back whole but their references don't, so name those too; an unrecognised name is reported in a trailing comment alongside the type list rather than silently dropped
-- **`graphql`** — executes any GraphQL query or mutation against the Fastmail API
+- **`graphql`** — executes any GraphQL query or mutation. Its description carries a slimmed schema for everyday mail: the queries, the `EmailFilter` tree, the common `Email` fields, the connection shape and the PREVIEW→CONFIRM send flow
+- **`schema_sdl`** — the full SDL, with an optional `types` list (e.g. `["MutationRoot", "Attachment"]`) returning only those definitions
+
+The split is about round trips. The SDL is ~27KB, most of it the doc comments
+that make it worth reading, and it was previously the only way to learn
+anything — so reading mail cost a 27KB fetch first, and cost it again whenever
+the connection dropped. The common case is now answered where the model is
+already looking, and `schema_sdl` is for what the sketch explicitly says it
+doesn't cover: attachment payloads, masked email, contacts, identities,
+`moveEmail`, `markAsRead`, `markAsSpam`, and the remaining filter and sort
+options. `types` keeps that second hop small too. Named types come back whole
+but their references don't, so name those as well; an unrecognised name is
+reported alongside the list of names that do exist, rather than silently
+dropped.
+
+Both the worked examples and the inlined sketch are checked by the test suite —
+the examples are executed against the real schema, and every field name in the
+sketch must exist in it. A cheat sheet that outlives a rename is worse than no
+cheat sheet.
 
 This replaces the previous 18 individual tools with a composable interface. The LLM fetches the schema once, then constructs exactly the queries it needs — fetching multiple resources in a single round-trip, requesting only the fields it wants, and using typed arguments for filtering and pagination.
 

@@ -24,7 +24,7 @@ pub type FastmailSchema = Schema<QueryRoot, MutationRoot, async_graphql::EmptySu
 /// for the same Fastmail token rather than re-authenticating every call.
 pub type SharedClient = std::sync::Arc<tokio::sync::Mutex<crate::jmap::JmapClient>>;
 
-/// What the local config and environment supply for CardDAV.
+/// The credentials `contacts` needs.
 ///
 /// CardDAV authenticates with a username and an app password and rejects API
 /// tokens, so neither half comes from the JMAP credential — contacts can be
@@ -44,8 +44,10 @@ pub struct CardDavCreds {
 impl CardDavCreds {
     /// Read from `~/.config/fastmail-cli/config.toml` and the environment.
     ///
-    /// Best-effort, like the default token: a hosted deployment ships no local
-    /// config, so both halves are `None` there and `contacts` is unavailable.
+    /// The fallback for when a request carries no credential headers, exactly
+    /// as [`crate::mcp::local_token`] is for the token: running this yourself
+    /// picks up your own credentials, while a hosted deployment ships no local
+    /// config and every request must bring its own.
     pub fn from_local_config() -> Self {
         let Ok(config) = crate::config::Config::load() else {
             return Self::default();

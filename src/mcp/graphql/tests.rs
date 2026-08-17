@@ -737,21 +737,28 @@ async fn schema_prose_names_no_removed_construct() {
     }
 }
 
-/// Every operation in a fenced block of the MCP server instructions.
+/// Every operation in a fenced block of the advertised tool descriptions and
+/// server instructions.
 ///
-/// Scraped rather than copied here: these exist so a model can send them
-/// without reading the schema first, which is worth nothing if they are wrong.
-/// One operation per line, which is how they are written.
-fn instruction_examples() -> Vec<String> {
+/// Scraped from what the server actually publishes, rather than copied here:
+/// these exist so a model can compose a query without fetching the schema
+/// first, which is worth nothing if they are wrong. One operation per line,
+/// which is how they are written.
+fn documented_shapes() -> Vec<String> {
     use rmcp::ServerHandler;
 
-    let info = crate::mcp::FastmailMcp::http().get_info();
-    let instructions = info.instructions.expect("server ships instructions");
+    let mcp = crate::mcp::FastmailMcp::http();
+    let published: Vec<String> = mcp
+        .tool_router
+        .list_all()
+        .into_iter()
+        .filter_map(|t| t.description.map(|d| d.to_string()))
+        .chain(mcp.get_info().instructions)
+        .collect();
 
-    instructions
-        .split("```")
-        .skip(1)
-        .step_by(2)
+    published
+        .iter()
+        .flat_map(|text| text.split("```").skip(1).step_by(2))
         .flat_map(|block| {
             block
                 .lines()
@@ -781,10 +788,10 @@ async fn documented_examples_execute() {
             first: 20) { totalCount nodes { subject size } } }",
     ];
 
-    let scraped = instruction_examples();
+    let scraped = documented_shapes();
     assert!(
-        scraped.len() >= 4,
-        "expected the instructions to carry worked examples, found {scraped:?}"
+        scraped.len() >= 3,
+        "expected the tool descriptions to carry worked examples, found {scraped:?}"
     );
 
     for query in documented.iter().map(|q| q.to_string()).chain(scraped) {
@@ -795,6 +802,50 @@ async fn documented_examples_execute() {
             resp.errors
         );
     }
+}
+
+#[tokio::test]
+async fn the_inlined_schema_sketch_names_only_real_fields() {
+    // The `graphql` description inlines a slimmed schema so everyday mail needs
+    // no `schema_sdl` round trip at all. That trade only holds while it is
+    // true — a sketch that outlives a rename sends models at fields that no
+    // longer exist, which is worse than making them fetch the real thing.
+    let mcp = crate::mcp::FastmailMcp::http();
+    let sdl = build_schema().sdl();
+    let description = mcp
+        .tool_router
+        .list_all()
+        .into_iter()
+        .find(|t| t.name == "graphql")
+        .and_then(|t| t.description)
+        .expect("the graphql tool is described");
+
+    // Only the indented signature lines, minus their `#` comments — the prose
+    // around them mentions things like "CardDAV" that are deliberately not
+    // schema names.
+    let mut checked = 0;
+    for line in description.lines().filter(|l| l.starts_with("  ")) {
+        let code = line.split('#').next().unwrap_or_default();
+        for ident in code.split(|c: char| !c.is_alphanumeric() && c != '_') {
+            // Field and argument names only: types are capitalised, and
+            // `true`/`false` are values rather than anything to look up.
+            if ident.len() < 2
+                || !ident.starts_with(|c: char| c.is_ascii_lowercase())
+                || matches!(ident, "true" | "false" | "null")
+            {
+                continue;
+            }
+            checked += 1;
+            assert!(
+                sdl.contains(&format!("{ident}:")) || sdl.contains(&format!("{ident}(")),
+                "the inlined sketch names `{ident}`, which the schema does not define"
+            );
+        }
+    }
+    assert!(
+        checked > 50,
+        "expected a real sketch, only checked {checked}"
+    );
 }
 
 #[tokio::test]
