@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use super::{SharedClient, build_schema, request};
+use super::{CardDavCreds, SharedClient, build_schema, request};
 use crate::jmap::JmapClient;
 
 /// One `Email/get`-shaped invocation recorded from a request body.
@@ -264,8 +264,20 @@ fn client_for(server: &MockServer) -> SharedClient {
 }
 
 async fn run(server: &MockServer, query: &str) -> async_graphql::Response {
+    run_with_carddav(server, query, CardDavCreds::default()).await
+}
+
+/// As [`run`], with CardDAV credentials supplied. Injected rather than read from
+/// the environment so these tests don't depend on the machine running them.
+async fn run_with_carddav(
+    server: &MockServer,
+    query: &str,
+    carddav: CardDavCreds,
+) -> async_graphql::Response {
     let schema = build_schema();
-    schema.execute(request(query, client_for(server))).await
+    schema
+        .execute(request(query, client_for(server), carddav))
+        .await
 }
 
 #[tokio::test]
@@ -362,7 +374,11 @@ async fn mailboxes_are_refetched_for_each_request() {
 
     for _ in 0..2 {
         let resp = schema
-            .execute(request("{ mailboxes { nodes { name } } }", client.clone()))
+            .execute(request(
+                "{ mailboxes { nodes { name } } }",
+                client.clone(),
+                CardDavCreds::default(),
+            ))
             .await;
         assert!(resp.errors.is_empty(), "{:?}", resp.errors);
     }
@@ -721,6 +737,39 @@ async fn schema_prose_names_no_removed_construct() {
     }
 }
 
+/// Every operation in a fenced block of the advertised tool descriptions and
+/// server instructions.
+///
+/// Scraped from what the server actually publishes, rather than copied here:
+/// these exist so a model can compose a query without fetching the schema
+/// first, which is worth nothing if they are wrong. One operation per line,
+/// which is how they are written.
+fn documented_shapes() -> Vec<String> {
+    use rmcp::ServerHandler;
+
+    let mcp = crate::mcp::FastmailMcp::http();
+    let published: Vec<String> = mcp
+        .tool_router
+        .list_all()
+        .into_iter()
+        .filter_map(|t| t.description.map(|d| d.to_string()))
+        .chain(mcp.get_info().instructions)
+        .collect();
+
+    published
+        .iter()
+        .flat_map(|text| text.split("```").skip(1).step_by(2))
+        .flat_map(|block| {
+            block
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn documented_examples_execute() {
     // The query shapes in the README and the MCP server instructions, run
@@ -739,14 +788,64 @@ async fn documented_examples_execute() {
             first: 20) { totalCount nodes { subject size } } }",
     ];
 
-    for query in documented {
-        let resp = run(&server, query).await;
+    let scraped = documented_shapes();
+    assert!(
+        scraped.len() >= 3,
+        "expected the tool descriptions to carry worked examples, found {scraped:?}"
+    );
+
+    for query in documented.iter().map(|q| q.to_string()).chain(scraped) {
+        let resp = run(&server, &query).await;
         assert!(
             resp.errors.is_empty(),
             "documented example failed: {:?}\nquery: {query}",
             resp.errors
         );
     }
+}
+
+#[tokio::test]
+async fn the_inlined_schema_sketch_names_only_real_fields() {
+    // The `graphql` description inlines a slimmed schema so everyday mail needs
+    // no `schema_sdl` round trip at all. That trade only holds while it is
+    // true — a sketch that outlives a rename sends models at fields that no
+    // longer exist, which is worse than making them fetch the real thing.
+    let mcp = crate::mcp::FastmailMcp::http();
+    let sdl = build_schema().sdl();
+    let description = mcp
+        .tool_router
+        .list_all()
+        .into_iter()
+        .find(|t| t.name == "graphql")
+        .and_then(|t| t.description)
+        .expect("the graphql tool is described");
+
+    // Only the indented signature lines, minus their `#` comments — the prose
+    // around them mentions things like "CardDAV" that are deliberately not
+    // schema names.
+    let mut checked = 0;
+    for line in description.lines().filter(|l| l.starts_with("  ")) {
+        let code = line.split('#').next().unwrap_or_default();
+        for ident in code.split(|c: char| !c.is_alphanumeric() && c != '_') {
+            // Field and argument names only: types are capitalised, and
+            // `true`/`false` are values rather than anything to look up.
+            if ident.len() < 2
+                || !ident.starts_with(|c: char| c.is_ascii_lowercase())
+                || matches!(ident, "true" | "false" | "null")
+            {
+                continue;
+            }
+            checked += 1;
+            assert!(
+                sdl.contains(&format!("{ident}:")) || sdl.contains(&format!("{ident}(")),
+                "the inlined sketch names `{ident}`, which the schema does not define"
+            );
+        }
+    }
+    assert!(
+        checked > 50,
+        "expected a real sketch, only checked {checked}"
+    );
 }
 
 #[tokio::test]
@@ -1465,6 +1564,7 @@ async fn keyword_sort_without_keyword_is_rejected_before_any_call() {
 // ============ Session ============
 
 const SESSION: &str = "{ session { status username primaryAccountId capabilities detail
+                                   carddavConfigured
                                    accounts { id name isPersonal isReadOnly } } }";
 
 /// The `session` field, against a server mounting whatever the caller set up.
@@ -1501,6 +1601,7 @@ async fn session_reports_the_authenticated_account() {
             "username": "test@example.com",
             "primaryAccountId": "acct1",
             "capabilities": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            "carddavConfigured": false,
             "accounts": [
                 { "id": "acct1", "name": "test@example.com",
                   "isPersonal": true, "isReadOnly": false },
@@ -1563,4 +1664,90 @@ async fn session_reports_a_server_that_wont_answer() {
 async fn session_does_not_call_rate_limiting_a_credential_problem() {
     let server = session_endpoint(429).await;
     assert_eq!(session_of(&server).await["status"], "UNREACHABLE");
+}
+
+fn carddav_creds() -> CardDavCreds {
+    CardDavCreds {
+        username: Some("test@example.com".into()),
+        app_password: Some("app-password".into()),
+    }
+}
+
+/// `session { carddavConfigured }` against `carddav`, without touching mail.
+async fn carddav_configured(server: &MockServer, carddav: CardDavCreds) -> bool {
+    let resp = run_with_carddav(server, "{ session { carddavConfigured } }", carddav).await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+    resp.data.into_json().unwrap()["session"]["carddavConfigured"]
+        .as_bool()
+        .expect("carddavConfigured must be a non-null Boolean")
+}
+
+#[tokio::test]
+async fn carddav_is_reported_configured_only_when_both_halves_are_present() {
+    let server = mock_server(1).await;
+
+    assert!(carddav_configured(&server, carddav_creds()).await);
+    assert!(
+        !carddav_configured(&server, CardDavCreds::default()).await,
+        "neither half present"
+    );
+    // CardDAV rejects API tokens, so a username on its own gets nowhere —
+    // reporting it as configured would send an agent down a path that fails.
+    assert!(
+        !carddav_configured(
+            &server,
+            CardDavCreds {
+                app_password: None,
+                ..carddav_creds()
+            }
+        )
+        .await,
+        "username without an app password"
+    );
+    assert!(
+        !carddav_configured(
+            &server,
+            CardDavCreds {
+                username: None,
+                ..carddav_creds()
+            }
+        )
+        .await,
+        "app password without a username"
+    );
+}
+
+#[tokio::test]
+async fn carddav_state_survives_a_dead_token() {
+    // The whole point of answering this on `Session`: the two credentials are
+    // unrelated, so a revoked API token must not make contact reachability
+    // unanswerable — that is precisely when a caller is re-planning.
+    let server = session_endpoint(401).await;
+    let resp = run_with_carddav(
+        &server,
+        "{ session { status carddavConfigured } }",
+        carddav_creds(),
+    )
+    .await;
+
+    let session = resp.data.into_json().unwrap()["session"].clone();
+    assert_eq!(session["status"], "INVALID_CREDENTIALS");
+    assert_eq!(session["carddavConfigured"], true);
+}
+
+#[tokio::test]
+async fn contacts_and_session_agree_about_missing_credentials() {
+    let server = mock_server(1).await;
+    assert!(!carddav_configured(&server, CardDavCreds::default()).await);
+
+    // The flag exists to be trusted, so the operation it describes has to fail
+    // for the reason it advertised — and before any network call.
+    let resp = run(&server, "{ contacts(query: \"anyone\") { nodes { id } } }").await;
+    assert!(
+        resp.errors
+            .iter()
+            .any(|e| e.message.contains("Username not configured")),
+        "got {:?}",
+        resp.errors
+    );
 }

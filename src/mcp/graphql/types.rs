@@ -676,6 +676,19 @@ pub struct GqlSession {
     /// missing here is one the token cannot use — masked email and submission
     /// are the two that vary by token scope. Empty unless connected.
     pub capabilities: Vec<String>,
+    /// Whether `contacts` can run: CardDAV needs a username and an app
+    /// password, and rejects the API token everything else here uses.
+    ///
+    /// `capabilities` cannot answer this — it lists what the JMAP server
+    /// advertises, and CardDAV is a separate protocol invisible to it. So this
+    /// is the only way to find out short of running the query and failing.
+    /// Check it before planning look-up-a-contact-then-compose.
+    ///
+    /// True means both credentials are present, not that they are correct.
+    /// Independent of `status`: credentials are local configuration, so this
+    /// answers even when the token is dead. False in a hosted deployment,
+    /// which ships no local config.
+    pub carddav_configured: bool,
     /// Why it isn't connected, in human-readable form. Null when connected.
     pub detail: Option<String>,
 }
@@ -687,11 +700,11 @@ impl GqlSession {
     /// client per token for the life of the process, so a cached answer would
     /// keep reporting success long after a revocation — the precise case this
     /// exists to catch. One `GET /jmap/session`, no mail touched.
-    pub(crate) async fn probe(client: &super::SharedClient) -> Self {
+    pub(crate) async fn probe(client: &super::SharedClient, carddav_configured: bool) -> Self {
         use crate::error::Error;
 
         let mut client = client.lock().await;
-        match client.authenticate().await {
+        let mut session = match client.authenticate().await {
             Ok(session) => Self::from(session),
             Err(e @ Error::InvalidToken(_)) => {
                 Self::disconnected(ConnectionStatus::InvalidCredentials, e)
@@ -699,7 +712,12 @@ impl GqlSession {
             // Everything else is the server, not the credential. Telling
             // someone to re-authenticate over a 503 would be a lie.
             Err(e) => Self::disconnected(ConnectionStatus::Unreachable, e),
-        }
+        };
+        // Set after the handshake rather than inside it: CardDAV credentials are
+        // local config that the handshake knows nothing about, and stay
+        // reportable when it fails.
+        session.carddav_configured = carddav_configured;
+        session
     }
 
     fn disconnected(status: ConnectionStatus, error: crate::error::Error) -> Self {
@@ -709,6 +727,7 @@ impl GqlSession {
             primary_account_id: None,
             accounts: Vec::new(),
             capabilities: Vec::new(),
+            carddav_configured: false,
             detail: Some(error.to_string()),
         }
     }
@@ -737,6 +756,7 @@ impl From<&Session> for GqlSession {
             primary_account_id: s.primary_account_id().map(str::to_owned),
             accounts,
             capabilities,
+            carddav_configured: false,
             detail: None,
         }
     }
