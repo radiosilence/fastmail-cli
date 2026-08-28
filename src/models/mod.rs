@@ -318,6 +318,20 @@ impl<T: Serialize> Output<T> {
             Err(e) => eprintln!("{{\"success\":false,\"error\":\"Serialization failed: {e}\"}}"),
         }
     }
+
+    /// One line, flushed: the newline-delimited form a stream consumer reads
+    /// incrementally. Same envelope as [`Self::print`], so `jq` filters written
+    /// against any other command still apply.
+    pub fn print_compact(&self) {
+        use std::io::Write;
+        match serde_json::to_string(self) {
+            Ok(json) => {
+                println!("{json}");
+                let _ = std::io::stdout().flush();
+            }
+            Err(e) => eprintln!("{{\"success\":false,\"error\":\"Serialization failed: {e}\"}}"),
+        }
+    }
 }
 
 #[cfg(test)]

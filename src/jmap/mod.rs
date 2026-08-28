@@ -1,3 +1,5 @@
+mod events;
+
 use crate::commands::SearchFilter;
 use crate::error::{Error, Result};
 use crate::models::*;
@@ -7,6 +9,8 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::time::Duration;
 use tracing::{debug, instrument};
+
+pub use events::{EventParser, ServerEvent};
 
 const SESSION_URL: &str = "https://api.fastmail.com/jmap/session";
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -253,6 +257,19 @@ impl ComposeContext {
         }
         calls
     }
+}
+
+/// How many changes to ask for per `Email/changes` call. The server may cap it
+/// lower; `hasMoreChanges` then drives the next page.
+const CHANGES_PAGE: u32 = 100;
+
+/// What arrived since a known `Email` state.
+#[derive(Debug)]
+pub struct EmailChanges {
+    /// The state to pass as `sinceState` next time.
+    pub new_state: String,
+    /// IDs created in that window, oldest change first.
+    pub created: Vec<String>,
 }
 
 // Shared JMAP response types used across multiple methods
@@ -885,6 +902,27 @@ impl JmapClient {
     /// email DataLoader.
     #[instrument(skip(self))]
     pub async fn get_emails(&self, ids: &[String]) -> Result<Vec<Email>> {
+        self.get_email_records(ids, EMAIL_FULL_PROPERTIES, true)
+            .await
+    }
+
+    /// Summary records for known IDs — the cheap counterpart to [`Self::get_emails`].
+    ///
+    /// `Email/query` already returns summaries for the page it matched; this is
+    /// for the callers that arrive holding IDs from somewhere else, such as
+    /// `Email/changes`.
+    #[instrument(skip(self))]
+    pub async fn get_email_summaries(&self, ids: &[String]) -> Result<Vec<Email>> {
+        self.get_email_records(ids, EMAIL_SUMMARY_PROPERTIES, false)
+            .await
+    }
+
+    async fn get_email_records(
+        &self,
+        ids: &[String],
+        properties: &[&str],
+        fetch_bodies: bool,
+    ) -> Result<Vec<Email>> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -896,9 +934,9 @@ impl JmapClient {
                 {
                     "accountId": account_id,
                     "ids": ids,
-                    "properties": EMAIL_FULL_PROPERTIES,
-                    "fetchTextBodyValues": true,
-                    "fetchHTMLBodyValues": true
+                    "properties": properties,
+                    "fetchTextBodyValues": fetch_bodies,
+                    "fetchHTMLBodyValues": fetch_bodies
                 },
                 "g0"
             ])])
@@ -908,6 +946,148 @@ impl JmapClient {
             Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/get")?;
 
         Ok(resp.list)
+    }
+
+    /// The account's current `Email` state string: the cursor
+    /// [`Self::email_changes`] reads forward from.
+    ///
+    /// Fetched with an empty `ids` list, so the server returns the state and no
+    /// mail.
+    #[instrument(skip(self))]
+    pub async fn email_state(&self) -> Result<String> {
+        let account_id = self.account_id()?;
+
+        let responses = self
+            .request(vec![json!([
+                "Email/get",
+                { "accountId": account_id, "ids": [] },
+                "s0"
+            ])])
+            .await?;
+
+        #[derive(Deserialize)]
+        struct StateOnly {
+            state: String,
+        }
+
+        let resp: StateOnly =
+            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/get")?;
+        Ok(resp.state)
+    }
+
+    /// IDs of emails created since `since_state`, and the state they leave the
+    /// caller at.
+    ///
+    /// Follows `hasMoreChanges` to the end, so the returned state is always
+    /// current: a partial read would silently drop everything past the first
+    /// page on the next call. Only creations are reported — a watcher wants
+    /// arrivals, and updates would replay every flag change as news.
+    ///
+    /// Fails with a `cannotCalculateChanges` JMAP error when the server has
+    /// discarded history back that far; the caller resyncs via
+    /// [`Self::email_state`].
+    #[instrument(skip(self))]
+    pub async fn email_changes(&self, since_state: &str) -> Result<EmailChanges> {
+        let account_id = self.account_id()?;
+        let mut state = since_state.to_string();
+        let mut created = Vec::new();
+
+        loop {
+            let responses = self
+                .request(vec![json!([
+                    "Email/changes",
+                    {
+                        "accountId": account_id,
+                        "sinceState": state,
+                        "maxChanges": CHANGES_PAGE
+                    },
+                    "c0"
+                ])])
+                .await?;
+
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct ChangesResponse {
+                new_state: String,
+                #[serde(default)]
+                has_more_changes: bool,
+                #[serde(default)]
+                created: Vec<String>,
+            }
+
+            let resp: ChangesResponse =
+                Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/changes")?;
+
+            created.extend(resp.created);
+            state = resp.new_state;
+
+            if !resp.has_more_changes {
+                return Ok(EmailChanges {
+                    new_state: state,
+                    created,
+                });
+            }
+        }
+    }
+
+    /// Open the JMAP push channel and return the live response to read frames
+    /// from.
+    ///
+    /// `last_event_id` asks the server to replay from where a dropped
+    /// connection left off. Missing it is not a correctness problem — the
+    /// caller holds its own `Email` state and reconciles through
+    /// [`Self::email_changes`] — but it saves a round trip.
+    #[instrument(skip(self))]
+    pub async fn open_event_stream(
+        &self,
+        ping: u32,
+        last_event_id: Option<&str>,
+    ) -> Result<reqwest::Response> {
+        let template = self
+            .session()?
+            .event_source_url
+            .as_deref()
+            .ok_or_else(|| {
+                Error::Config(
+                    "Server advertises no eventSourceUrl for push. Use --poll to fall back to \
+                     periodic checks."
+                        .into(),
+                )
+            })?
+            .to_string();
+
+        let url = template
+            .replace("{types}", "Email")
+            .replace("{closeafter}", "no")
+            .replace("{ping}", &ping.to_string());
+
+        // The shared client caps every request at 30s; a push channel is meant
+        // to stay open for days. A read timeout of a few ping intervals stands
+        // in for it, so silence reads as a dead connection rather than an idle
+        // one — the difference between reconnecting and hanging forever.
+        let client = Client::builder()
+            .read_timeout(Duration::from_secs(u64::from(ping) * 3))
+            .build()?;
+
+        let mut req = client
+            .get(&url)
+            .bearer_auth(&self.token)
+            .header("Accept", "text/event-stream");
+        if let Some(id) = last_event_id {
+            req = req.header("Last-Event-ID", id);
+        }
+
+        debug!(url = %url, "Opening JMAP event source");
+        let resp = req.send().await?;
+
+        match resp.status().as_u16() {
+            401 => return Err(Error::InvalidToken("Token expired or invalid")),
+            429 => return Err(Error::RateLimited),
+            500..=599 => return Err(Error::Server(format!("Server error: {}", resp.status()))),
+            _ => {}
+        }
+
+        Ok(resp)
     }
 
     #[instrument(skip(self))]
@@ -2080,6 +2260,193 @@ mod tests {
     }
 
     // ============ upload_blob mock test ============
+
+    /// Build a client pointed at a mock JMAP server.
+    fn mock_client(uri: &str) -> JmapClient {
+        let mut client = JmapClient::new("test-token".to_string());
+        let mut session = create_test_session(vec![
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:mail",
+        ]);
+        session.api_url = format!("{uri}/jmap");
+        client.available_capabilities = session.capabilities.keys().cloned().collect();
+        client.session = Some(session);
+        client
+    }
+
+    /// One `methodResponses` envelope around a single method result.
+    fn jmap_response(method: &str, result: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "methodResponses": [[method, result, "c0"]] })
+    }
+
+    #[tokio::test]
+    async fn test_email_state_reads_state_without_fetching_mail() {
+        use wiremock::matchers::{body_string_contains, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(body_string_contains(r#""ids":[]"#))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jmap_response(
+                "Email/get",
+                serde_json::json!({ "state": "state-42", "list": [], "notFound": [] }),
+            )))
+            .mount(&mock_server)
+            .await;
+
+        let client = mock_client(&mock_server.uri());
+        assert_eq!(client.email_state().await.unwrap(), "state-42");
+    }
+
+    #[tokio::test]
+    async fn test_email_changes_follows_has_more_changes() {
+        use wiremock::matchers::{body_string_contains, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+
+        // Each page is matched by the state it was asked to start from, so the
+        // test asserts the cursor actually advances rather than trusting order.
+        Mock::given(method("POST"))
+            .and(body_string_contains(r#""sinceState":"s0""#))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jmap_response(
+                "Email/changes",
+                serde_json::json!({
+                    "oldState": "s0",
+                    "newState": "s1",
+                    "hasMoreChanges": true,
+                    "created": ["e1", "e2"],
+                    "updated": [],
+                    "destroyed": []
+                }),
+            )))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(body_string_contains(r#""sinceState":"s1""#))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jmap_response(
+                "Email/changes",
+                serde_json::json!({
+                    "oldState": "s1",
+                    "newState": "s2",
+                    "hasMoreChanges": false,
+                    "created": ["e3"],
+                    "updated": [],
+                    "destroyed": []
+                }),
+            )))
+            .mount(&mock_server)
+            .await;
+
+        let client = mock_client(&mock_server.uri());
+        let changes = client.email_changes("s0").await.unwrap();
+
+        assert_eq!(changes.created, vec!["e1", "e2", "e3"]);
+        assert_eq!(changes.new_state, "s2");
+    }
+
+    #[tokio::test]
+    async fn test_email_changes_surfaces_cannot_calculate_changes() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jmap_response(
+                "error",
+                serde_json::json!({ "type": "cannotCalculateChanges" }),
+            )))
+            .mount(&mock_server)
+            .await;
+
+        let client = mock_client(&mock_server.uri());
+        let err = client.email_changes("ancient").await.unwrap_err();
+
+        // The watcher keys its resync off this type, so it has to survive the
+        // trip through parse_response intact.
+        assert!(
+            matches!(&err, Error::Jmap { error_type, .. } if error_type == "cannotCalculateChanges"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_email_summaries_skips_body_values() {
+        use wiremock::matchers::{body_string_contains, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+
+        // Bodies are the expensive half of Email/get; a watcher fetching them
+        // by default would make every arrival cost a full document parse.
+        Mock::given(method("POST"))
+            .and(body_string_contains(r#""fetchTextBodyValues":false"#))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jmap_response(
+                "Email/get",
+                serde_json::json!({
+                    "state": "s1",
+                    "list": [{ "id": "e1", "subject": "hi" }],
+                    "notFound": []
+                }),
+            )))
+            .mount(&mock_server)
+            .await;
+
+        let client = mock_client(&mock_server.uri());
+        let emails = client
+            .get_email_summaries(&["e1".to_string()])
+            .await
+            .unwrap();
+
+        assert_eq!(emails.len(), 1);
+        assert_eq!(emails[0].subject.as_deref(), Some("hi"));
+    }
+
+    #[tokio::test]
+    async fn test_open_event_stream_fills_the_url_template() {
+        use wiremock::matchers::{header, method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+
+        // The session hands back a URI template; getting any placeholder wrong
+        // fails silently as "push just never fires".
+        Mock::given(method("GET"))
+            .and(path("/jmap/event-source/"))
+            .and(query_param("types", "Email"))
+            .and(query_param("closeafter", "no"))
+            .and(query_param("ping", "30"))
+            .and(header("Authorization", "Bearer test-token"))
+            .and(header("Last-Event-ID", "evt-7"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "text/event-stream")
+                    .set_body_string(": ping\n\n"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let mut client = mock_client(&mock_server.uri());
+        client.session.as_mut().unwrap().event_source_url = Some(format!(
+            "{}/jmap/event-source/?types={{types}}&closeafter={{closeafter}}&ping={{ping}}",
+            mock_server.uri()
+        ));
+
+        let resp = client.open_event_stream(30, Some("evt-7")).await.unwrap();
+        assert!(resp.status().is_success());
+    }
+
+    #[tokio::test]
+    async fn test_open_event_stream_without_a_url_points_at_poll() {
+        // create_test_session advertises no eventSourceUrl, standing in for a
+        // server that does not offer push.
+        let client = mock_client("https://api.example.com");
+        let err = client.open_event_stream(30, None).await.unwrap_err();
+        assert!(err.to_string().contains("--poll"), "unhelpful error: {err}");
+    }
 
     #[tokio::test]
     async fn test_upload_blob_success() {

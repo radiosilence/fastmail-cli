@@ -13,6 +13,7 @@ CLI for Fastmail's JMAP API. Read, search, send, and manage emails from your ter
 | **Text Extraction**   | 56 formats via [kreuzberg](https://github.com/kreuzberg-dev/kreuzberg) |
 | **Image Resizing**    | `--max-size` to resize images on download                              |
 | **Masked Email**      | Create, list, enable/disable aliases                                   |
+| **Watch**             | Stream arriving mail as NDJSON over JMAP push, for real-time loops     |
 | **MCP Server**        | Claude integration via Model Context Protocol                          |
 | **Shell Completions** | Bash, Zsh, Fish, PowerShell                                            |
 | **JSON Output**       | All commands output JSON for scripting                                 |
@@ -168,6 +169,44 @@ fastmail search --from "boss" --has-attachment --after 2024-06-01 --limit 20
 ```
 
 Available flags: `--text`, `--from`, `--to`, `--cc`, `--bcc`, `--subject`, `--body`, `--mailbox`, `--has-attachment`, `--min-size`, `--max-size`, `--before`, `--after`, `--unread`, `--flagged`
+
+### Watch for New Mail
+
+Block and emit one JSON object per line as mail arrives, so a shell loop can act
+on it:
+
+```bash
+# Everything that arrives, anywhere in the account
+fastmail watch
+
+# Just the inbox
+fastmail watch --mailbox inbox
+
+# Pipe into a loop
+fastmail watch --mailbox inbox | while read -r line; do
+  echo "$line" | jq -r '.data.subject'
+done
+
+# Include bodies and attachment metadata, not just summaries
+fastmail watch --full
+
+# Fall back to polling every 60s where a long-lived connection won't survive
+fastmail watch --poll 60
+```
+
+Output is the same `{"success":true,"data":{...}}` envelope as every other
+command, one compact line per email, flushed as it is written — so `jq` filters
+and `read` loops both work unbuffered.
+
+It uses JMAP's push channel (`eventSourceUrl`), but treats a notification purely
+as a signal to look again: the state cursor lives in the CLI, and each wake-up
+runs `Email/changes` against it. Dropped connections are reconciled on reconnect
+and `--poll` takes the identical path, so a missed notification costs latency
+rather than mail. Only *new* messages are reported — flag and folder changes to
+existing mail are not arrivals.
+
+Reconnects, and the rare case where the server has discarded change history and
+the cursor has to resync, are reported on stderr; stdout stays pure NDJSON.
 
 ### List Identities
 
