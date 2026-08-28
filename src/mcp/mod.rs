@@ -266,6 +266,11 @@ mutation { sendEmail(action: PREVIEW, to: \"a@b.com\", subject: \"Hi\", body: \"
 mutation { sendEmail(action: CONFIRM, to: \"a@b.com\", subject: \"Hi\", body: \"...\", confirmationToken: \"<from preview>\") { success emailId } }
 ```
 
+SUBSCRIPTIONS are not available through this tool — it is request/response, and
+a subscription never returns. The schema defines one (`emails`, streaming mail
+as it arrives) for callers on the HTTP surface, which serves it over SSE at
+`/graphql/stream`; `fastmail watch` is the same thing as a CLI.
+
 NOT LISTED ABOVE — ask `schema_sdl` for these rather than guessing: attachment
 payloads (base64/image/text), masked email, contacts and contact CRUD (CardDAV,
 so check `session { carddavConfigured }` first), identities, moveEmail,
@@ -424,20 +429,17 @@ fn is_introspection_only(query: &str) -> bool {
     })
 }
 
-/// Plain GraphQL-over-HTTP, for browsers and anything else that speaks it
-/// directly rather than through MCP's JSON-RPC envelope. Shares the server's
-/// schema, client cache and token resolution with the `graphql` tool.
-async fn graphql_endpoint(
-    axum::extract::State(mcp): axum::extract::State<FastmailMcp>,
-    headers: http::HeaderMap,
-    axum::Json(req): axum::Json<HttpGraphqlRequest>,
-) -> axum::Json<async_graphql::Response> {
-    let error = |msg: String| {
-        axum::Json(async_graphql::Response::from_errors(vec![
-            async_graphql::ServerError::new(msg, None),
-        ]))
-    };
-
+/// Resolve credentials and build the GraphQL request an HTTP body describes.
+///
+/// Shared by the query and subscription endpoints so they cannot drift on which
+/// token wins or what counts as introspection. The error case is a message for
+/// the caller, not a status code — GraphQL reports its own failures in the
+/// response body.
+async fn build_http_request(
+    mcp: &FastmailMcp,
+    headers: &http::HeaderMap,
+    req: HttpGraphqlRequest,
+) -> std::result::Result<async_graphql::Request, String> {
     // Introspection is answered from the schema, so it neither needs a token nor
     // touches the network — the IDE stays usable while credentials are wrong.
     let mut request = if is_introspection_only(&req.query) {
@@ -446,8 +448,8 @@ async fn graphql_endpoint(
         // Must keep honouring `mcp.default_token` here: GraphiQL runs in a
         // browser and cannot attach the token header, so making this
         // headers-only breaks local development.
-        let Some(token) = resolve_token(Some(&headers), mcp.default_token.as_deref()) else {
-            return error(format!(
+        let Some(token) = resolve_token(Some(headers), mcp.default_token.as_deref()) else {
+            return Err(format!(
                 "No Fastmail token available. Configure one via `fastmail auth` \
                  or send the {TOKEN_HEADER} header."
             ));
@@ -455,14 +457,13 @@ async fn graphql_endpoint(
         // Authenticated on first use rather than at startup, so a missing or
         // expired token surfaces in the response pane instead of stopping the
         // server booting.
-        let client = match client_for(&mcp.clients, &token).await {
-            Ok(client) => client,
-            Err(e) => return error(format!("Fastmail authentication failed: {e}")),
-        };
+        let client = client_for(&mcp.clients, &token)
+            .await
+            .map_err(|e| format!("Fastmail authentication failed: {e}"))?;
         graphql::request(
             &req.query,
             client,
-            resolve_carddav(Some(&headers), &mcp.default_carddav),
+            resolve_carddav(Some(headers), &mcp.default_carddav),
         )
     };
     if let Some(vars) = req.variables {
@@ -471,7 +472,60 @@ async fn graphql_endpoint(
     if let Some(name) = req.operation_name {
         request = request.operation_name(name);
     }
-    axum::Json(mcp.schema.execute(request).await)
+    Ok(request)
+}
+
+/// Plain GraphQL-over-HTTP, for browsers and anything else that speaks it
+/// directly rather than through MCP's JSON-RPC envelope. Shares the server's
+/// schema, client cache and token resolution with the `graphql` tool.
+async fn graphql_endpoint(
+    axum::extract::State(mcp): axum::extract::State<FastmailMcp>,
+    headers: http::HeaderMap,
+    axum::Json(req): axum::Json<HttpGraphqlRequest>,
+) -> axum::Json<async_graphql::Response> {
+    match build_http_request(&mcp, &headers, req).await {
+        Ok(request) => axum::Json(mcp.schema.execute(request).await),
+        Err(msg) => axum::Json(async_graphql::Response::from_errors(vec![
+            async_graphql::ServerError::new(msg, None),
+        ])),
+    }
+}
+
+/// GraphQL subscriptions over Server-Sent Events, one event per response.
+///
+/// SSE rather than WebSockets because the only subscription here is a
+/// server-to-client firehose: nothing is ever sent back up the socket, and SSE
+/// reconnects on its own. It is also the same shape the CLI consumes from
+/// Fastmail, which keeps one mental model for the whole path.
+async fn graphql_stream_endpoint(
+    axum::extract::State(mcp): axum::extract::State<FastmailMcp>,
+    headers: http::HeaderMap,
+    axum::Json(req): axum::Json<HttpGraphqlRequest>,
+) -> axum::response::Response {
+    use async_graphql::futures_util::stream::StreamExt;
+    use axum::response::{IntoResponse, Sse, sse};
+
+    let request = match build_http_request(&mcp, &headers, req).await {
+        Ok(request) => request,
+        Err(msg) => {
+            return axum::Json(async_graphql::Response::from_errors(vec![
+                async_graphql::ServerError::new(msg, None),
+            ]))
+            .into_response();
+        }
+    };
+
+    let events = mcp.schema.execute_stream(request).map(|response| {
+        let data = serde_json::to_string(&response)
+            .unwrap_or_else(|e| format!(r#"{{"errors":[{{"message":"{e}"}}]}}"#));
+        Ok::<_, std::convert::Infallible>(sse::Event::default().data(data))
+    });
+
+    // Proxies drop connections that go quiet, and a mail subscription is quiet
+    // most of the time.
+    Sse::new(events)
+        .keep_alive(sse::KeepAlive::default())
+        .into_response()
 }
 
 /// Which surfaces [`run_http_server`] mounts alongside MCP at `/mcp`.
@@ -522,8 +576,14 @@ pub async fn run_http_server(addr: &str, surfaces: HttpSurfaces) -> anyhow::Resu
     tracing::info!("MCP streamable-HTTP listening on http://{addr}/mcp");
 
     if surfaces.graphql || surfaces.graphiql {
-        router = router.route("/graphql", axum::routing::post(graphql_endpoint));
+        router = router
+            .route("/graphql", axum::routing::post(graphql_endpoint))
+            .route(
+                "/graphql/stream",
+                axum::routing::post(graphql_stream_endpoint),
+            );
         tracing::info!("GraphQL endpoint on http://{addr}/graphql");
+        tracing::info!("GraphQL subscriptions (SSE) on http://{addr}/graphql/stream");
     }
 
     if surfaces.graphiql {

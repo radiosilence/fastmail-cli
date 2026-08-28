@@ -65,6 +65,8 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3"
+# `test-util` for the paused clock, so backoff tests assert timing without waiting it out.
+tokio = { version = "1", features = ["test-util"] }
 wiremock = "0.6"
 
 [profile.release]

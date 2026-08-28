@@ -59,6 +59,21 @@ enum Commands {
         email_id: String,
     },
 
+    /// Stream newly arrived emails as newline-delimited JSON, until interrupted
+    Watch {
+        /// Only report mail landing in this mailbox (name or role)
+        #[arg(short, long)]
+        mailbox: Option<String>,
+
+        /// Include bodies and attachment metadata, not just summaries
+        #[arg(long)]
+        full: bool,
+
+        /// Check every N seconds instead of holding a push connection open
+        #[arg(long, value_name = "SECONDS")]
+        poll: Option<u64>,
+    },
+
     /// Get all emails in a thread/conversation
     Thread {
         /// Email ID (will fetch entire thread this email belongs to)
@@ -527,6 +542,19 @@ async fn main() {
         Commands::Get { email_id } => commands::get_email(&email_id).await,
 
         Commands::Thread { email_id } => commands::get_thread(&email_id).await,
+
+        Commands::Watch {
+            mailbox,
+            full,
+            poll,
+        } => {
+            commands::watch(commands::WatchOptions {
+                mailbox,
+                full,
+                poll,
+            })
+            .await
+        }
 
         Commands::Search {
             text,

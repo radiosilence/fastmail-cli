@@ -13,6 +13,7 @@ CLI for Fastmail's JMAP API. Read, search, send, and manage emails from your ter
 | **Text Extraction**   | 56 formats via [kreuzberg](https://github.com/kreuzberg-dev/kreuzberg) |
 | **Image Resizing**    | `--max-size` to resize images on download                              |
 | **Masked Email**      | Create, list, enable/disable aliases                                   |
+| **Watch**             | Stream arriving mail as NDJSON over JMAP push, for real-time loops     |
 | **MCP Server**        | Claude integration via Model Context Protocol                          |
 | **Shell Completions** | Bash, Zsh, Fish, PowerShell                                            |
 | **JSON Output**       | All commands output JSON for scripting                                 |
@@ -168,6 +169,44 @@ fastmail search --from "boss" --has-attachment --after 2024-06-01 --limit 20
 ```
 
 Available flags: `--text`, `--from`, `--to`, `--cc`, `--bcc`, `--subject`, `--body`, `--mailbox`, `--has-attachment`, `--min-size`, `--max-size`, `--before`, `--after`, `--unread`, `--flagged`
+
+### Watch for New Mail
+
+Block and emit one JSON object per line as mail arrives, so a shell loop can act
+on it:
+
+```bash
+# Everything that arrives, anywhere in the account
+fastmail watch
+
+# Just the inbox
+fastmail watch --mailbox inbox
+
+# Pipe into a loop
+fastmail watch --mailbox inbox | while read -r line; do
+  echo "$line" | jq -r '.data.subject'
+done
+
+# Include bodies and attachment metadata, not just summaries
+fastmail watch --full
+
+# Fall back to polling every 60s where a long-lived connection won't survive
+fastmail watch --poll 60
+```
+
+Output is the same `{"success":true,"data":{...}}` envelope as every other
+command, one compact line per email, flushed as it is written — so `jq` filters
+and `read` loops both work unbuffered.
+
+It uses JMAP's push channel (`eventSourceUrl`), but treats a notification purely
+as a signal to look again: the state cursor lives in the CLI, and each wake-up
+runs `Email/changes` against it. Dropped connections are reconciled on reconnect
+and `--poll` takes the identical path, so a missed notification costs latency
+rather than mail. Only *new* messages are reported — flag and folder changes to
+existing mail are not arrivals.
+
+Reconnects, and the rare case where the server has discarded change history and
+the cursor has to resync, are reported on stderr; stdout stays pure NDJSON.
 
 ### List Identities
 
@@ -448,7 +487,7 @@ Three independent surfaces, each opt-in, sharing one port (default
 | Flag         | Serves                                                      |
 | ------------ | ----------------------------------------------------------- |
 | `--http`     | MCP streamable-HTTP at `/mcp`                               |
-| `--graphql`  | plain GraphQL-over-HTTP at `/graphql`                       |
+| `--graphql`  | plain GraphQL-over-HTTP at `/graphql`, subscriptions at `/graphql/stream` |
 | `--graphiql` | the GraphiQL IDE at `/`, and its `/graphql`                 |
 | `--browser`  | opens the IDE once the port is bound, implying `--graphiql` |
 
@@ -468,6 +507,23 @@ implies `--graphiql`, since the IDE is what it opens.
 MCP JSON-RPC, which it doesn't. That is why GraphiQL needs its own route rather
 than pointing at the MCP one. Both share the schema, the client cache and the
 credential resolution below, so the IDE sees exactly what a model sees.
+
+`/graphql/stream` carries subscriptions over Server-Sent Events — POST the
+operation, read events off the response:
+
+```bash
+curl -N http://127.0.0.1:8080/graphql/stream \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"subscription { emails(mailbox: \"inbox\") { id subject from { email } } }"}'
+```
+
+SSE rather than WebSockets because the only subscription is a server-to-client
+firehose: nothing is ever sent back up the socket, and SSE reconnects on its
+own. Body fields (`textBody`, `attachments`) want `full: true` — a subscription
+has no request boundary at which the batching loaders reset, so the lazy path
+resolves through a loader that lives as long as the subscription. `pollSeconds`
+is the same fallback as the CLI's `--poll`. MCP has no equivalent: tools are
+request/response, and a subscription never returns.
 
 **Credential resolution is the same everywhere:** the request's own header
 wins, otherwise the local config (or the matching environment variable) is used.
@@ -747,6 +803,8 @@ size, surfaced in the field descriptions; it never refuses a query. Being told
 "too complex" without being told the threshold just makes a caller guess.
 
 All operations are available as GraphQL queries and mutations: mailboxes, emails, search, threads, identities (with signatures), attachments (with text extraction and image resizing), contacts, masked email management, and send/reply/forward with the preview/confirm safety pattern.
+
+One subscription, `emails`, streams arrivals over the same machinery as `fastmail watch`.
 
 Token can be set via `FASTMAIL_API_TOKEN` env var or config file.
 

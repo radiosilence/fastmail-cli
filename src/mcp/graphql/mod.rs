@@ -10,19 +10,21 @@ pub mod filter;
 pub mod loaders;
 mod mutation;
 mod query;
+mod subscription;
 #[cfg(test)]
 mod tests;
 pub mod types;
 
 use mutation::MutationRoot;
 use query::QueryRoot;
+use subscription::SubscriptionRoot;
 
-pub type FastmailSchema = Schema<QueryRoot, MutationRoot, async_graphql::EmptySubscription>;
+pub type FastmailSchema = Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
 
 /// The per-request JMAP client, injected into each GraphQL execution as request
 /// data. Shared (`Arc`) so an authenticated client can be reused across requests
 /// for the same Fastmail token rather than re-authenticating every call.
-pub type SharedClient = std::sync::Arc<tokio::sync::Mutex<crate::jmap::JmapClient>>;
+pub type SharedClient = crate::jmap::SharedJmapClient;
 
 /// The credentials `contacts` needs.
 ///
@@ -87,7 +89,7 @@ pub fn build_schema() -> FastmailSchema {
     //
     // Depth stays capped: the graph contains cycles, and nothing else bounds
     // them.
-    Schema::build(QueryRoot, MutationRoot, async_graphql::EmptySubscription)
+    Schema::build(QueryRoot, MutationRoot, SubscriptionRoot)
         .data(types::NonceStore::default())
         .limit_depth(MAX_DEPTH)
         .finish()

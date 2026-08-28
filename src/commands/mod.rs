@@ -12,6 +12,7 @@ mod search;
 mod send;
 mod spam;
 mod thread;
+mod watch;
 
 pub use auth::*;
 pub use contacts::*;
@@ -27,3 +28,4 @@ pub use search::*;
 pub use send::*;
 pub use spam::*;
 pub use thread::*;
+pub use watch::*;
