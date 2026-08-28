@@ -511,8 +511,9 @@ fn pick_identity(identities: Vec<Identity>, from: Option<&str>) -> Result<Identi
 /// requested and filtering out the sending identity.
 ///
 /// Returns `(to, cc)` where:
-/// - `to` always starts with `original.from`. When `reply_all` is set, the
-///   original `To` recipients are appended (minus `my_email` if provided).
+/// - `to` starts with `original.reply_to` when the sender set one, otherwise
+///   `original.from`. When `reply_all` is set, the original `To` recipients are
+///   appended (minus `my_email` if provided).
 /// - `cc` starts with the caller-supplied `extra_cc`. When `reply_all` is
 ///   set, the original `Cc` recipients are appended (minus `my_email`).
 ///
@@ -538,7 +539,16 @@ pub fn expand_reply_recipients(
             .is_some_and(|m| addr.email.eq_ignore_ascii_case(m))
     };
 
-    let mut to_addrs: Vec<EmailAddress> = original.from.clone().unwrap_or_default();
+    // Reply-To wins over From, as in any mail client. Transactional and support
+    // senders routinely put a branded, undeliverable address in From and the
+    // inbox that actually receives mail in Reply-To — replying to From then
+    // bounces.
+    let mut to_addrs: Vec<EmailAddress> = original
+        .reply_to
+        .clone()
+        .filter(|addrs| !addrs.is_empty())
+        .or_else(|| original.from.clone())
+        .unwrap_or_default();
     if reply_all && let Some(ref orig_to) = original.to {
         for addr in orig_to {
             if !is_me(addr) {
@@ -1986,6 +1996,47 @@ mod tests {
             expand_reply_recipients(&original, false, Some("me@x"), vec![addr("user@x")]);
         assert_eq!(emails(&to), vec!["sender@x"]);
         assert_eq!(emails(&cc), vec!["user@x"]);
+    }
+
+    #[test]
+    fn test_expand_reply_prefers_reply_to_over_from() {
+        // The shape that bounces in the wild: a branded From on a domain with
+        // no MX record, and the real inbox in Reply-To.
+        let mut original = reply_fixture(vec!["noreply@branded.invalid"], vec![], vec![]);
+        original.reply_to = Some(vec![addr("support@real")]);
+
+        let (to, _) = expand_reply_recipients(&original, false, Some("me@x"), vec![]);
+        assert_eq!(emails(&to), vec!["support@real"]);
+    }
+
+    #[test]
+    fn test_expand_reply_all_uses_reply_to_as_the_sender() {
+        let mut original = reply_fixture(
+            vec!["noreply@branded.invalid"],
+            vec!["recip1@x", "me@x"],
+            vec!["cc1@x"],
+        );
+        original.reply_to = Some(vec![addr("support@real")]);
+
+        let (to, cc) = expand_reply_recipients(&original, true, Some("me@x"), vec![]);
+        // Reply-To replaces From, it does not join it: the branded address is
+        // still undeliverable on a reply-all.
+        assert_eq!(emails(&to), vec!["support@real", "recip1@x"]);
+        assert_eq!(emails(&cc), vec!["cc1@x"]);
+    }
+
+    #[test]
+    fn test_expand_reply_falls_back_to_from_when_reply_to_is_absent_or_empty() {
+        let original = reply_fixture(vec!["sender@x"], vec![], vec![]);
+        let (to, _) = expand_reply_recipients(&original, false, None, vec![]);
+        assert_eq!(emails(&to), vec!["sender@x"]);
+
+        // An empty list is not a Reply-To. Treating it as one would reply to
+        // nobody.
+        let mut empty = reply_fixture(vec!["sender@x"], vec![], vec![]);
+        empty.reply_to = Some(vec![]);
+        let (to, _) = expand_reply_recipients(&empty, false, None, vec![]);
+        assert_eq!(emails(&to), vec!["sender@x"]);
     }
 
     #[test]
