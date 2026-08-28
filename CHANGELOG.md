@@ -1,11 +1,12 @@
 # Changelog
 
-## [Unreleased]
+## [3.5.1] - 2026-08-28
 
 ### Fixed
 
 - **`reply` now prefers `Reply-To` over `From`**
-  ([#67](https://github.com/radiosilence/fastmail-cli/issues/67), reported by
+  ([#68](https://github.com/radiosilence/fastmail-cli/pull/68), closes
+  [#67](https://github.com/radiosilence/fastmail-cli/issues/67), reported by
   Kendell). Transactional and support senders routinely put a branded address in
   `From` and the inbox that actually receives mail in `Reply-To`; replying to
   `From` then bounces off a domain with no MX record, which is how this was
