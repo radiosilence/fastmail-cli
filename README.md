@@ -1,6 +1,6 @@
 # fastmail-cli
 
-CLI for Fastmail's JMAP API. Read, search, send, and manage emails from your terminal or AI assistant.
+CLI for Fastmail's JMAP API. Read, search, send, manage and *watch* email from your terminal or AI assistant.
 
 ## Features
 
@@ -8,12 +8,12 @@ CLI for Fastmail's JMAP API. Read, search, send, and manage emails from your ter
 | --------------------- | ---------------------------------------------------------------------- |
 | **Email**             | List, search, read, send, reply, forward, threads, identity selection, HTML bodies, file attachments |
 | **Mailboxes**         | List folders, move emails, mark spam/read                              |
+| **Real-time**         | `fastmail watch` streams arriving mail as NDJSON over JMAP push — pipe it into a shell loop. Also a GraphQL subscription |
 | **Contacts**          | Search, create, update, delete contacts via CardDAV                    |
 | **Attachments**       | Download files, extract text, resize images                            |
 | **Text Extraction**   | 56 formats via [kreuzberg](https://github.com/kreuzberg-dev/kreuzberg) |
 | **Image Resizing**    | `--max-size` to resize images on download                              |
 | **Masked Email**      | Create, list, enable/disable aliases                                   |
-| **Watch**             | Stream arriving mail as NDJSON over JMAP push, for real-time loops     |
 | **MCP Server**        | Claude integration via Model Context Protocol                          |
 | **Shell Completions** | Bash, Zsh, Fish, PowerShell                                            |
 | **JSON Output**       | All commands output JSON for scripting                                 |
@@ -25,8 +25,9 @@ Fastmail [ships an official MCP server](https://www.fastmail.com/blog/an-mcp-ser
 zero-setup and covers more of Fastmail's suite — calendar, notes, and org
 directory that `fastmail-cli` doesn't touch. `fastmail-cli` is the self-hosted
 alternative: a CLI *and* an MCP server you run yourself, open source, with
-masked email, attachment text extraction, and spam-filter training the official
-server doesn't offer — plus full custody of the data path.
+masked email, attachment text extraction, spam-filter training, and a real-time
+stream of incoming mail the official server doesn't offer — plus full custody of
+the data path.
 
 |                                                            | `fastmail-cli`                     | Fastmail official MCP            |
 | ---------------------------------------------------------- | ---------------------------------- | -------------------------------- |
@@ -38,6 +39,7 @@ server doesn't offer — plus full custody of the data path.
 | Email: read / search / threads                             | ✅ (rich search filters)           | ✅                               |
 | Send / reply / forward (preview → confirm/draft)           | ✅                                 | ✅                               |
 | Move / archive / mark read                                 | ✅                                 | ✅                               |
+| Real-time stream of incoming mail                          | ✅ (CLI + GraphQL subscription)    | —                                |
 | Mark as spam (+ trains the filter)                         | ✅                                 | —                                |
 | Masked Email (create / enable / disable / delete)          | ✅                                 | —                                |
 | Attachments: text extraction (56 formats) + image resize   | ✅                                 | —                                |
@@ -48,8 +50,11 @@ server doesn't offer — plus full custody of the data path.
 | Identities / signatures                                    | ✅                                 | ✅                               |
 
 Use Fastmail's for zero maintenance and the wider suite (calendar, notes);
-use `fastmail-cli` for a scriptable CLI, the masked-email / attachment-extraction
-/ spam-training tooling, or to self-host and keep the data path yours.
+use `fastmail-cli` for a scriptable CLI, mail that streams as it arrives, the
+masked-email / attachment-extraction / spam-training tooling, or to self-host and
+keep the data path yours. Streaming is the one difference that isn't a matter of
+scope: MCP tools are request/response, so a hosted MCP server cannot hand you a
+subscription that never returns, whichever tools it grows.
 (`fastmail-cli`'s column is verified against its GraphQL schema; Fastmail's is
 its current hosted tool set and may grow.)
 
