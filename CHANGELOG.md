@@ -24,6 +24,19 @@
   change and folder move as an arrival, which is not what a mail loop means by
   "new".
 
+- **The `emails` GraphQL subscription**, at `/graphql/stream` over Server-Sent
+  Events when the HTTP surface is up. Same watcher as `fastmail watch`, so the
+  cursor semantics are identical rather than merely similar — the CLI and the
+  subscription are two front ends on one implementation, which is the only way
+  they stay that way.
+
+  SSE rather than WebSockets: the subscription is a server-to-client firehose,
+  nothing is ever sent back up the socket, and SSE reconnects on its own.
+
+  MCP deliberately has none of this. Tools are request/response and a
+  subscription never returns, so the `graphql` tool's description says so and
+  points at the other two ways to get it.
+
 ## [3.4.0] - 2026-08-17
 
 ### Added

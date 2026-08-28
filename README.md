@@ -487,7 +487,7 @@ Three independent surfaces, each opt-in, sharing one port (default
 | Flag         | Serves                                                      |
 | ------------ | ----------------------------------------------------------- |
 | `--http`     | MCP streamable-HTTP at `/mcp`                               |
-| `--graphql`  | plain GraphQL-over-HTTP at `/graphql`                       |
+| `--graphql`  | plain GraphQL-over-HTTP at `/graphql`, subscriptions at `/graphql/stream` |
 | `--graphiql` | the GraphiQL IDE at `/`, and its `/graphql`                 |
 | `--browser`  | opens the IDE once the port is bound, implying `--graphiql` |
 
@@ -507,6 +507,23 @@ implies `--graphiql`, since the IDE is what it opens.
 MCP JSON-RPC, which it doesn't. That is why GraphiQL needs its own route rather
 than pointing at the MCP one. Both share the schema, the client cache and the
 credential resolution below, so the IDE sees exactly what a model sees.
+
+`/graphql/stream` carries subscriptions over Server-Sent Events — POST the
+operation, read events off the response:
+
+```bash
+curl -N http://127.0.0.1:8080/graphql/stream \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"subscription { emails(mailbox: \"inbox\") { id subject from { email } } }"}'
+```
+
+SSE rather than WebSockets because the only subscription is a server-to-client
+firehose: nothing is ever sent back up the socket, and SSE reconnects on its
+own. Body fields (`textBody`, `attachments`) want `full: true` — a subscription
+has no request boundary at which the batching loaders reset, so the lazy path
+resolves through a loader that lives as long as the subscription. `pollSeconds`
+is the same fallback as the CLI's `--poll`. MCP has no equivalent: tools are
+request/response, and a subscription never returns.
 
 **Credential resolution is the same everywhere:** the request's own header
 wins, otherwise the local config (or the matching environment variable) is used.
@@ -786,6 +803,8 @@ size, surfaced in the field descriptions; it never refuses a query. Being told
 "too complex" without being told the threshold just makes a caller guess.
 
 All operations are available as GraphQL queries and mutations: mailboxes, emails, search, threads, identities (with signatures), attachments (with text extraction and image resizing), contacts, masked email management, and send/reply/forward with the preview/confirm safety pattern.
+
+One subscription, `emails`, streams arrivals over the same machinery as `fastmail watch`.
 
 Token can be set via `FASTMAIL_API_TOKEN` env var or config file.
 

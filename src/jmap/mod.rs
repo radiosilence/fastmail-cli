@@ -1,4 +1,5 @@
 mod events;
+mod watch;
 
 use crate::commands::SearchFilter;
 use crate::error::{Error, Result};
@@ -11,6 +12,7 @@ use std::time::Duration;
 use tracing::{debug, instrument};
 
 pub use events::{EventParser, ServerEvent};
+pub use watch::{ArrivalWatcher, Arrivals, SharedJmapClient};
 
 const SESSION_URL: &str = "https://api.fastmail.com/jmap/session";
 const TIMEOUT: Duration = Duration::from_secs(30);
