@@ -252,12 +252,19 @@ is only computed when selected.
 
 MUTATIONS — sendEmail, replyToEmail and forwardEmail all take
 `action: PREVIEW | CONFIRM | DRAFT`. PREVIEW sends nothing and returns a
-confirmationToken; CONFIRM repeats the same to/subject/body plus that token, and
-is rejected if they differ. Recipients are comma-separated strings, not lists.
+confirmationToken; CONFIRM repeats exactly the same arguments plus that token,
+and is rejected if any differ. Recipients are comma-separated strings, not lists.
   sendEmail(action: SendAction!, to: String!, subject: String!, body: String!,
             cc: String, bcc: String, from: String, htmlBody: String,
             confirmationToken: String): ComposeResult!
   ComposeResult { success emailId preview confirmationToken error }
+
+Saved drafts (find them with `emails(filter: {inMailbox: \"drafts\"})`):
+  updateDraft(emailId: String!, to: String, cc: String, bcc: String,
+              subject: String, body: String): ComposeResult!  # returns the NEW emailId
+  sendDraft(action: SendDraftAction!, emailId: String!,
+            confirmationToken: String): ComposeResult!    # PREVIEW then CONFIRM
+  deleteDraft(emailId: String!): Status!                  # moves to Trash
 
 EXAMPLES
 ```

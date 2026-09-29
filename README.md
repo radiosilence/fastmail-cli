@@ -38,6 +38,7 @@ the data path.
 | Source                                                     | open source (MIT), extensible      | proprietary                      |
 | Email: read / search / threads                             | ✅ (rich search filters)           | ✅                               |
 | Send / reply / forward (preview → confirm/draft)           | ✅                                 | ✅                               |
+| Drafts: edit / send / discard                              | ✅ (MCP)                           | —                                |
 | Move / archive / mark read                                 | ✅                                 | ✅                               |
 | Real-time stream of incoming mail                          | ✅ (CLI + GraphQL subscription)    | —                                |
 | Mark as spam (+ trains the filter)                         | ✅                                 | —                                |
