@@ -2,9 +2,12 @@
 
 ## [Unreleased]
 
+## [3.6.0] - 2026-09-29
+
 ### Added
 
-- **Draft editing over MCP: `updateDraft`, `sendDraft`, `deleteDraft`.** A
+- **Draft editing over MCP: `updateDraft`, `sendDraft`, `deleteDraft`**
+  ([#73](https://github.com/radiosilence/fastmail-cli/pull/73)). A
   draft saved with `action: DRAFT` could not be changed, sent or discarded
   afterwards. JMAP emails are immutable apart from keywords and mailboxes, so
   `updateDraft` saves an edited copy and then destroys the original, in two
@@ -17,7 +20,8 @@
 
 ### Fixed
 
-- **CONFIRM tokens now cover every compose parameter.** The token issued by
+- **CONFIRM tokens now cover every compose parameter**
+  ([#73](https://github.com/radiosilence/fastmail-cli/pull/73)). The token issued by
   PREVIEW fingerprinted only `to`/`subject`/`body` (for replies, only the
   email ID and body), so a CONFIRM could add `cc`/`bcc`, change `from` or the
   HTML body, or turn a reply into reply-all without the user having seen it.
