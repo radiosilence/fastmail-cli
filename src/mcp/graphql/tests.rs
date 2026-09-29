@@ -75,6 +75,11 @@ fn email_json(id: &str, thread: &str, with_body: bool) -> Value {
         // an attachment exists without fetching its metadata.
         "hasAttachment": true,
     });
+    if id.starts_with("draft") {
+        e["keywords"] = json!({ "$draft": true, "$seen": true });
+        e["to"] = json!([{ "email": "to@example.com" }]);
+        e["inReplyTo"] = json!(["<orig@example.com>"]);
+    }
     if with_body {
         e["textBody"] = json!([{ "partId": "1", "type": "text/plain" }]);
         e["bodyValues"] = json!({ "1": { "value": format!("Body of {id}") } });
@@ -163,7 +168,8 @@ async fn mock_server(count: usize) -> MockServer {
                         "maySetKeywords": true, "mayCreateChild": false,
                         "mayRename": false, "mayDelete": false, "maySubmit": true
                     }
-                }] }),
+                }, { "id": "mbS", "name": "Sent", "role": "sent" },
+                   { "id": "mbT", "name": "Trash", "role": "trash" }] }),
                 "Email/query" => {
                     let total = ids.len() as i64;
                     let limit = args.get("limit").and_then(Value::as_i64).unwrap_or(total) as usize;
@@ -226,6 +232,14 @@ async fn mock_server(count: usize) -> MockServer {
                     })
                 }
                 "Thread/get" => json!({ "list": [{ "id": "t1", "emailIds": ids }] }),
+                "Identity/get" => json!({ "list": [{
+                    "id": "ident1", "name": "Sender", "email": "sender@example.com"
+                }] }),
+                "Email/set" => json!({
+                    "created": args.get("create").map(|_| json!({ "email": { "id": "new1" } })),
+                    "destroyed": args.get("destroy"),
+                }),
+                "EmailSubmission/set" => json!({ "created": { "submission": { "id": "sub1" } } }),
                 _ => json!({ "list": [], "notFound": [] }),
             };
             responses.push(json!([name, payload, tag]));
@@ -1749,5 +1763,205 @@ async fn contacts_and_session_agree_about_missing_credentials() {
             .any(|e| e.message.contains("Username not configured")),
         "got {:?}",
         resp.errors
+    );
+}
+
+// ============ Compose and drafts ============
+
+/// The arguments of every recorded call to `name`, in order.
+async fn call_args(server: &MockServer, name: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    for req in server.received_requests().await.unwrap_or_default() {
+        let Ok(body) = serde_json::from_slice::<Value>(&req.body) else {
+            continue;
+        };
+        for mc in body["methodCalls"].as_array().into_iter().flatten() {
+            if mc[0] == name {
+                out.push(mc[1].clone());
+            }
+        }
+    }
+    out
+}
+
+async fn exec(schema: &super::FastmailSchema, client: &SharedClient, query: &str) -> Value {
+    let resp = schema
+        .execute(request(query, client.clone(), CardDavCreds::default()))
+        .await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+    resp.data.into_json().unwrap()
+}
+
+#[tokio::test]
+async fn confirm_rejects_params_the_preview_did_not_show() {
+    // A token vouches for what the user saw. Anything that changes who gets
+    // the message or what it says must invalidate it, not just to/subject/body.
+    let server = mock_server(1).await;
+    let client = client_for(&server);
+    let schema = build_schema();
+
+    for (preview_extra, confirm_extra) in [
+        ("", ", bcc: \"x@evil.com\""),
+        ("", ", cc: \"x@evil.com\""),
+        ("", ", htmlBody: \"<p>other</p>\""),
+        (", bcc: \"a@b.com\"", ", bcc: \"x@evil.com\""),
+    ] {
+        let preview = exec(
+            &schema,
+            &client,
+            &format!(
+                "mutation {{ sendEmail(action: PREVIEW, to: \"a@b.com\", subject: \"s\", \
+                 body: \"b\"{preview_extra}) {{ confirmationToken }} }}"
+            ),
+        )
+        .await;
+        let token = preview["sendEmail"]["confirmationToken"].as_str().unwrap();
+        let confirm = exec(
+            &schema,
+            &client,
+            &format!(
+                "mutation {{ sendEmail(action: CONFIRM, to: \"a@b.com\", subject: \"s\", \
+                 body: \"b\"{confirm_extra}, confirmationToken: \"{token}\") \
+                 {{ success error }} }}"
+            ),
+        )
+        .await;
+        assert_eq!(confirm["sendEmail"]["success"], false, "{confirm_extra}");
+    }
+
+    let preview = exec(
+        &schema,
+        &client,
+        "mutation { replyToEmail(action: PREVIEW, emailId: \"e0\", body: \"b\") \
+         { confirmationToken } }",
+    )
+    .await;
+    let token = preview["replyToEmail"]["confirmationToken"]
+        .as_str()
+        .unwrap();
+    let confirm = exec(
+        &schema,
+        &client,
+        &format!(
+            "mutation {{ replyToEmail(action: CONFIRM, emailId: \"e0\", body: \"b\", \
+             all: true, confirmationToken: \"{token}\") {{ success }} }}"
+        ),
+    )
+    .await;
+    assert_eq!(confirm["replyToEmail"]["success"], false);
+
+    assert!(call_args(&server, "Email/set").await.is_empty());
+}
+
+#[tokio::test]
+async fn update_draft_creates_the_edit_before_destroying_the_original() {
+    let server = mock_server(1).await;
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "mutation { updateDraft(emailId: \"draft1\", subject: \"New\", cc: \"c@d.com\") \
+         { success emailId error } }",
+    )
+    .await;
+    assert_eq!(data["updateDraft"]["success"], true, "{data}");
+    assert_eq!(data["updateDraft"]["emailId"], "new1");
+
+    let sets = call_args(&server, "Email/set").await;
+    assert_eq!(
+        sets.len(),
+        2,
+        "create and destroy must be separate requests"
+    );
+    let created = &sets[0]["create"]["email"];
+    assert_eq!(created["subject"], "New");
+    assert_eq!(created["cc"][0]["email"], "c@d.com");
+    // Untouched fields come from the original.
+    assert_eq!(created["to"][0]["email"], "to@example.com");
+    assert_eq!(created["inReplyTo"][0], "<orig@example.com>");
+    assert_eq!(created["keywords"]["$draft"], true);
+    assert_eq!(created["bodyValues"]["textBody"]["value"], "Body of draft1");
+    assert_eq!(
+        created["bodyStructure"]["subParts"][1]["blobId"],
+        "blob-att-draft1"
+    );
+    assert!(sets[0].get("destroy").is_none());
+    assert_eq!(sets[1]["destroy"][0], "draft1");
+}
+
+#[tokio::test]
+async fn draft_mutations_refuse_sent_mail() {
+    let server = mock_server(1).await;
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "mutation { \
+           updateDraft(emailId: \"e0\", subject: \"x\") { success error } \
+           sendDraft(action: PREVIEW, emailId: \"e0\") { success error } \
+           deleteDraft(emailId: \"e0\") { success error } }",
+    )
+    .await;
+    for field in ["updateDraft", "sendDraft", "deleteDraft"] {
+        assert_eq!(data[field]["success"], false, "{field}: {data}");
+    }
+    assert!(call_args(&server, "Email/set").await.is_empty());
+    assert!(call_args(&server, "EmailSubmission/set").await.is_empty());
+}
+
+#[tokio::test]
+async fn send_draft_submits_it_and_files_it_in_sent() {
+    let server = mock_server(1).await;
+    let client = client_for(&server);
+    let schema = build_schema();
+
+    let preview = exec(
+        &schema,
+        &client,
+        "mutation { sendDraft(action: PREVIEW, emailId: \"draft1\") \
+         { preview confirmationToken } }",
+    )
+    .await;
+    let text = preview["sendDraft"]["preview"].as_str().unwrap();
+    assert!(
+        text.contains("to@example.com") && text.contains("notes.txt"),
+        "{text}"
+    );
+    assert!(call_args(&server, "EmailSubmission/set").await.is_empty());
+
+    let token = preview["sendDraft"]["confirmationToken"].as_str().unwrap();
+    let confirm = exec(
+        &schema,
+        &client,
+        &format!(
+            "mutation {{ sendDraft(action: CONFIRM, emailId: \"draft1\", \
+             confirmationToken: \"{token}\") {{ success error }} }}"
+        ),
+    )
+    .await;
+    assert_eq!(confirm["sendDraft"]["success"], true, "{confirm}");
+
+    let subs = call_args(&server, "EmailSubmission/set").await;
+    assert_eq!(subs.len(), 1);
+    assert_eq!(subs[0]["create"]["submission"]["emailId"], "draft1");
+    assert_eq!(subs[0]["create"]["submission"]["identityId"], "ident1");
+    let on_success = &subs[0]["onSuccessUpdateEmail"]["#submission"];
+    assert_eq!(on_success["mailboxIds"], json!({ "mbS": true }));
+    assert_eq!(on_success["keywords/$draft"], Value::Null);
+}
+
+#[tokio::test]
+async fn delete_draft_moves_it_to_trash() {
+    let server = mock_server(1).await;
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "mutation { deleteDraft(emailId: \"draft1\") { success error } }",
+    )
+    .await;
+    assert_eq!(data["deleteDraft"]["success"], true, "{data}");
+    let sets = call_args(&server, "Email/set").await;
+    assert_eq!(sets.len(), 1);
+    assert_eq!(
+        sets[0]["update"]["draft1"]["mailboxIds"],
+        json!({ "mbT": true })
     );
 }

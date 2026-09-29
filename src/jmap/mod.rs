@@ -112,6 +112,20 @@ pub struct ComposeParams<'a> {
     pub attachments: Vec<AttachmentData>,
 }
 
+/// Changes to apply to a draft. `None` keeps the draft's current value; an
+/// empty address list clears that header.
+#[derive(Default)]
+pub struct DraftEdit {
+    pub to: Option<Vec<EmailAddress>>,
+    pub cc: Option<Vec<EmailAddress>>,
+    pub bcc: Option<Vec<EmailAddress>>,
+    /// Identity email to send as.
+    pub from: Option<String>,
+    pub subject: Option<String>,
+    pub body: Option<String>,
+    pub html_body: Option<String>,
+}
+
 /// Threading headers for reply/forward
 struct ThreadingHeaders {
     in_reply_to: Vec<String>,
@@ -136,6 +150,8 @@ struct UploadedAttachment {
     blob_id: String,
     filename: String,
     content_type: String,
+    /// Content-ID of an inline part, which an HTML body references as `cid:`.
+    inline_cid: Option<String>,
 }
 
 /// Build bodyValues and body structure fields on `email_create`.
@@ -172,12 +188,17 @@ fn apply_body_structure(
 
         let mut sub_parts = vec![content_part];
         for att in attachments {
-            sub_parts.push(json!({
+            let mut part = json!({
                 "blobId": att.blob_id,
                 "name": att.filename,
                 "type": att.content_type,
                 "disposition": "attachment"
-            }));
+            });
+            if let Some(ref cid) = att.inline_cid {
+                part["disposition"] = json!("inline");
+                part["cid"] = json!(cid);
+            }
+            sub_parts.push(part);
         }
 
         email_create.insert(
@@ -434,6 +455,12 @@ struct EmailSetResponse {
     created: Option<HashMap<String, Value>>,
     #[serde(rename = "notCreated")]
     not_created: Option<HashMap<String, Value>>,
+}
+
+#[derive(Deserialize)]
+struct DestroyResponse {
+    #[serde(rename = "notDestroyed")]
+    not_destroyed: Option<HashMap<String, Value>>,
 }
 
 #[derive(Deserialize)]
@@ -1333,6 +1360,7 @@ impl JmapClient {
                 blob_id,
                 filename: att.filename,
                 content_type: att.content_type,
+                inline_cid: None,
             });
         }
 
@@ -1633,6 +1661,184 @@ impl JmapClient {
             },
         )
         .await
+    }
+
+    /// Rewrite a draft. JMAP emails are immutable apart from their keywords
+    /// and mailboxes, so this creates the edited copy and then destroys the
+    /// original. The two happen in separate requests: in a single `Email/set`
+    /// the destroy would still run when the create failed, losing the draft.
+    ///
+    /// Everything `edit` leaves as `None` is carried over, including threading
+    /// headers, keywords, mailboxes and attachments (by blob, so nothing is
+    /// re-uploaded). Returns the new draft's ID.
+    #[instrument(skip(self, draft, edit))]
+    pub async fn replace_draft(&self, draft: &Email, edit: DraftEdit) -> Result<String> {
+        if !draft.is_draft() {
+            return Err(Error::NotADraft(draft.id.clone()));
+        }
+        let account_id = self.account_id()?;
+
+        let from = match edit.from {
+            Some(ref email) => {
+                let identity = self.resolve_identity(Some(email)).await?;
+                Some(vec![EmailAddress {
+                    name: Some(identity.name),
+                    email: identity.email,
+                }])
+            }
+            None => draft.from.clone(),
+        };
+
+        // A new plain-text body replaces the HTML alternative too, unless one
+        // is supplied alongside it: keeping the old HTML would leave the two
+        // parts saying different things.
+        let (text, html) = match (edit.body, edit.html_body) {
+            (Some(text), html) => (text, html),
+            (None, Some(html)) => (draft.text_content().unwrap_or_default(), Some(html)),
+            (None, None) => (
+                draft.text_content().unwrap_or_default(),
+                draft.html_content(),
+            ),
+        };
+
+        let attachments: Vec<UploadedAttachment> = draft
+            .attachments
+            .iter()
+            .flatten()
+            .filter_map(|part| {
+                Some(UploadedAttachment {
+                    blob_id: part.blob_id.clone()?,
+                    filename: part.name.clone().unwrap_or_else(|| "attachment".into()),
+                    content_type: part
+                        .content_type
+                        .clone()
+                        .unwrap_or_else(|| "application/octet-stream".into()),
+                    inline_cid: part
+                        .cid
+                        .clone()
+                        .filter(|_| part.disposition.as_deref() == Some("inline")),
+                })
+            })
+            .collect();
+
+        let mut email_create: HashMap<String, Value> = HashMap::new();
+        email_create.insert("mailboxIds".into(), json!(draft.mailbox_ids));
+        email_create.insert("keywords".into(), json!(draft.keywords));
+        let fields = [
+            ("from", from),
+            ("to", edit.to.or_else(|| draft.to.clone())),
+            ("cc", edit.cc.or_else(|| draft.cc.clone())),
+            ("bcc", edit.bcc.or_else(|| draft.bcc.clone())),
+            ("replyTo", draft.reply_to.clone()),
+        ];
+        for (key, addrs) in fields {
+            if let Some(addrs) = addrs.filter(|a| !a.is_empty()) {
+                email_create.insert(key.into(), json!(addrs));
+            }
+        }
+        email_create.insert(
+            "subject".into(),
+            json!(
+                edit.subject
+                    .or_else(|| draft.subject.clone())
+                    .unwrap_or_default()
+            ),
+        );
+        if let Some(ref ids) = draft.in_reply_to {
+            email_create.insert("inReplyTo".into(), json!(ids));
+        }
+        if let Some(ref ids) = draft.references {
+            email_create.insert("references".into(), json!(ids));
+        }
+        apply_body_structure(&mut email_create, &text, html.as_deref(), &attachments);
+
+        let responses = self
+            .request(vec![json!([
+                "Email/set",
+                { "accountId": account_id, "create": { "email": email_create } },
+                "d0"
+            ])])
+            .await?;
+        let new_id = Self::parse_email_create_response(&responses)?;
+
+        let responses = self
+            .request(vec![json!([
+                "Email/set",
+                { "accountId": account_id, "destroy": [draft.id] },
+                "d1"
+            ])])
+            .await?;
+        let resp: DestroyResponse =
+            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/set")?;
+        if let Some(err) = resp.not_destroyed.as_ref().and_then(|m| m.get(&draft.id)) {
+            return Err(Error::Jmap {
+                method: "Email/set".into(),
+                error_type: err["type"].as_str().unwrap_or("unknown").into(),
+                description: format!(
+                    "saved the edit as {new_id} but could not remove the original draft {}: {}",
+                    draft.id,
+                    err["description"].as_str().unwrap_or("no description")
+                ),
+            });
+        }
+
+        debug!(old = %draft.id, new = %new_id, "Draft replaced");
+        Ok(new_id)
+    }
+
+    /// Submit an existing draft. On success the server moves it to Sent and
+    /// drops `$draft`, which is what the web client does.
+    #[instrument(skip(self, draft))]
+    pub async fn send_draft(&mut self, draft: &Email) -> Result<()> {
+        self.require_capability("urn:ietf:params:jmap:submission", "Email sending")?;
+        if !draft.is_draft() {
+            return Err(Error::NotADraft(draft.id.clone()));
+        }
+        let from = draft.from.as_ref().and_then(|f| f.first()).ok_or_else(|| {
+            Error::Config(format!(
+                "Draft {} has no From address. Set one by editing the draft first.",
+                draft.id
+            ))
+        })?;
+        let identity = self.resolve_identity(Some(&from.email)).await?;
+        let sent = self.find_mailbox("sent").await?;
+        let account_id = self.account_id()?;
+
+        let responses = self
+            .request(vec![json!([
+                "EmailSubmission/set",
+                {
+                    "accountId": account_id,
+                    "create": {
+                        "submission": { "identityId": identity.id, "emailId": draft.id }
+                    },
+                    "onSuccessUpdateEmail": {
+                        "#submission": {
+                            "mailboxIds": { (sent.id): true },
+                            "keywords/$draft": null,
+                            "keywords/$seen": true
+                        }
+                    }
+                },
+                "s0"
+            ])])
+            .await?;
+
+        let resp: EmailSetResponse = Self::parse_response(
+            responses.first().unwrap_or(&Value::Null),
+            "EmailSubmission/set",
+        )?;
+        if let Some(err) = resp.not_created.as_ref().and_then(|m| m.get("submission")) {
+            return Err(Error::Jmap {
+                method: "EmailSubmission/set".into(),
+                error_type: err["type"].as_str().unwrap_or("unknown").into(),
+                description: err["description"]
+                    .as_str()
+                    .unwrap_or("Draft submission failed")
+                    .into(),
+            });
+        }
+        Ok(())
     }
 
     #[instrument(skip(self))]
@@ -2221,6 +2427,7 @@ mod tests {
             blob_id: "Gblob123".into(),
             filename: "report.pdf".into(),
             content_type: "application/pdf".into(),
+            inline_cid: None,
         }];
         apply_body_structure(&mut email, "See attached", None, &attachments);
 
@@ -2253,6 +2460,7 @@ mod tests {
             blob_id: "Gblob456".into(),
             filename: "_DSF1117.jpg".into(),
             content_type: "image/jpeg".into(),
+            inline_cid: None,
         }];
         apply_body_structure(
             &mut email,
@@ -2296,12 +2504,14 @@ mod tests {
                 blob_id: "Ga".into(),
                 filename: "a.pdf".into(),
                 content_type: "application/pdf".into(),
+                inline_cid: None,
             },
             UploadedAttachment {
                 blob_id: "Gb".into(),
                 filename: "b.xlsx".into(),
                 content_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     .into(),
+                inline_cid: None,
             },
         ];
         apply_body_structure(&mut email, "docs attached", None, &attachments);

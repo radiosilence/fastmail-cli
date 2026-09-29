@@ -873,6 +873,14 @@ pub enum SendAction {
 }
 
 #[derive(Enum, Copy, Clone, Eq, PartialEq)]
+pub enum SendDraftAction {
+    /// Show the draft as it will be sent — ALWAYS do this first
+    Preview,
+    /// Send the draft (requires prior preview)
+    Confirm,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
 pub enum SpamAction {
     /// Preview what will happen
     Preview,

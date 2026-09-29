@@ -35,6 +35,9 @@ pub enum Error {
     #[error("Email not found: {0}")]
     EmailNotFound(String),
 
+    #[error("Email {0} is not a draft")]
+    NotADraft(String),
+
     #[error("Identity not found for sending")]
     IdentityNotFound,
 
