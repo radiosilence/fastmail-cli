@@ -1,14 +1,15 @@
 name: CI/CD
 
 # Doc-only changes don't need the build/test/release pipeline — skip it when a
-# push/PR touches nothing but Markdown or the licence.
+# push/PR touches nothing but Markdown or the licence. The changelog is
+# Markdown too, but its fragments are checked here, so they still trigger it.
 on:
   push:
     branches: [main]
-    paths-ignore: ["**/*.md", "LICENSE"]
+    paths: ["**", "!**/*.md", "!LICENSE", "changelog.d/**", "CHANGELOG.md"]
   pull_request:
     branches: [main]
-    paths-ignore: ["**/*.md", "LICENSE"]
+    paths: ["**", "!**/*.md", "!LICENSE", "changelog.d/**", "CHANGELOG.md"]
   # GitHub evicts any cache not read for 7 days, and this repo goes quiet for
   # longer than that between bursts of work. The first push back then compiles
   # ~200 crates from cold on every runner, which is the slow build people
@@ -17,7 +18,16 @@ on:
   # schedule rather than on whoever opens the next pull request.
   schedule:
     - cron: "0 6 * * 1,4"
+  # Releases whatever version is not yet released: how a failed release is
+  # retried.
   workflow_dispatch:
+
+# A pull request's newer push cancels its older run. Runs on main are never
+# cancelled, since any of them may be publishing a release, and a manual run
+# is in a group of its own.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -48,35 +58,64 @@ jobs:
       - name: Run tests
         run: cargo test --locked
 
-  # Is Cargo.toml's version ahead of what's actually been shipped? Releases are
-  # the source of truth, not tags: a tag can exist without a release, or be left
-  # behind by a run that failed after tagging, and either would suppress the
-  # release forever. Releases are also what consumers and update pollers read.
+  # CHANGELOG.md is generated from changelog.d/ (scripts/changelog.py). A pull
+  # request adds fragments without regenerating it, so only its fragments and
+  # the released versions are checked; one that writes CHANGELOG.md, as a
+  # release does, must write exactly what the fragments make.
+  changelog:
+    name: Changelog
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+      - run: python3 -m unittest scripts/test_changelog.py
+      - env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = "pull_request" ] && git diff --name-only HEAD^1 HEAD | grep -qx CHANGELOG.md; then
+            python3 scripts/changelog.py --check
+          else
+            python3 scripts/changelog.py --lint
+          fi
+
+  # A push releases only when it changes the version. Comparing with the latest
+  # GitHub release alone would let a push that lands while a release is still
+  # running (the release appears at its end) release the same version a second
+  # time. A manual run releases whatever is unreleased, which is how a failed
+  # release is retried. Releases rather than tags are the record of what has
+  # shipped, since consumers and update pollers read them.
   version:
     name: Version
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
     outputs:
-      version: ${{ steps.v.outputs.version }}
-      tag: ${{ steps.v.outputs.tag }}
-      is_new: ${{ steps.v.outputs.is_new }}
+      should_release: ${{ steps.check.outputs.should_release }}
+      version: ${{ steps.check.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - id: v
+        with:
+          fetch-depth: 2
+      - id: check
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
         run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          LATEST=$(gh release view --json tagName -q .tagName 2>/dev/null || echo "")
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
-          if [ "v$VERSION" = "$LATEST" ]; then
-            echo "is_new=false" >> $GITHUB_OUTPUT
+          version_of() { sed -n 's/^version = "\(.*\)"/\1/p' | head -1; }
+          VERSION=$(version_of < Cargo.toml)
+          PREVIOUS=$(git show HEAD^:Cargo.toml 2>/dev/null | version_of || true)
+          LATEST=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || echo "")
+          if [ "$VERSION" = "${LATEST#v}" ]; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT" = "workflow_dispatch" ] || [ "$VERSION" != "$PREVIOUS" ]; then
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
           else
-            echo "is_new=true" >> $GITHUB_OUTPUT
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
           fi
-          echo "Cargo.toml v$VERSION, latest release ${LATEST:-none}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Cargo.toml $VERSION (was ${PREVIOUS:-none}), latest release ${LATEST:-none}"
 
   # One job, one compile, two outputs: this owns the Linux release build and
   # feeds the same binary straight into the Docker build. Splitting them would
@@ -218,13 +257,25 @@ jobs:
   # pin one. Images go up first; the release announces them.
   publish:
     name: Publish
-    needs: [check, version, build-image, build-darwin]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [check, changelog, version, build-image, build-darwin]
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
       packages: write
     steps:
+      # Before anything is pushed: the release is created with RELEASE_TOKEN,
+      # and semver image tags with no release behind them would wait for a
+      # manual retry.
+      - name: Check the release token
+        if: needs.version.outputs.should_release == 'true'
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          if [ -z "$RELEASE_TOKEN" ]; then
+            echo "::error::RELEASE_TOKEN is not set; the release cannot be created"
+            exit 1
+          fi
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: image-*
@@ -252,7 +303,7 @@ jobs:
               ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main-arm64
           done
       - name: Create semver manifests
-        if: needs.version.outputs.is_new == 'true'
+        if: needs.version.outputs.should_release == 'true'
         run: |
           VERSION=${{ needs.version.outputs.version }}
           for tag in "v$VERSION" "v$(echo $VERSION | cut -d. -f1,2)" "v$(echo $VERSION | cut -d. -f1)" latest; do
@@ -262,16 +313,36 @@ jobs:
               ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main-arm64
           done
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        if: needs.version.outputs.is_new == 'true'
+        if: needs.version.outputs.should_release == 'true'
         with:
           pattern: bin-*
           path: artifacts
           merge-multiple: true
-      - name: Create Release
-        if: needs.version.outputs.is_new == 'true'
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: needs.version.outputs.should_release == 'true'
         with:
-          tag_name: ${{ needs.version.outputs.tag }}
-          name: ${{ needs.version.outputs.tag }}
+          path: src
+      - name: Release notes
+        if: needs.version.outputs.should_release == 'true'
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          awk -v h="## $VERSION" '$0==h{f=1;next} f&&/^## /{exit} f' src/CHANGELOG.md > notes.md
+          if ! grep -q . notes.md; then
+            echo "::error::CHANGELOG.md has no section for $VERSION"
+            exit 1
+          fi
+      # The action creates the tag through the API, on the commit that was
+      # built: GitHub refuses a git push of it from the workflow token for any
+      # commit that changes a workflow. A re-run finds the release and tag and
+      # fills in what is missing.
+      - name: Create Release
+        if: needs.version.outputs.should_release == 'true'
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          token: ${{ secrets.RELEASE_TOKEN }}
+          tag_name: v${{ needs.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: v${{ needs.version.outputs.version }}
+          body_path: notes.md
           files: artifacts/*.tar.gz
-          generate_release_notes: true

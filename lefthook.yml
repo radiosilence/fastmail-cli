@@ -1,0 +1,8 @@
+# Formatting is fixed before a commit. Lint and tests are CI's, which every
+# pull request waits on, so a push is not held up running them locally.
+pre-commit:
+  commands:
+    fmt:
+      glob: "*.rs"
+      run: cargo fmt
+      stage_fixed: true
