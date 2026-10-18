@@ -1,0 +1,1 @@
+- **Release pull requests build the macOS tarball.** A pull request that changes the version builds and packages the Apple silicon tarball, unsigned, so a broken macOS build fails before the release merges. Signing and the upload still happen only on the release itself.

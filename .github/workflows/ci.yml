@@ -85,14 +85,18 @@ jobs:
   # time. A manual run releases whatever is unreleased, which is how a failed
   # release is retried. Releases rather than tags are the record of what has
   # shipped, since consumers and update pollers read them.
+  #
+  # On a pull request nothing releases; `bumps` marks a release pull request
+  # (one that changes the version), so the macOS build runs before it merges.
   version:
     name: Version
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
+      bumps: ${{ steps.check.outputs.bumps }}
       version: ${{ steps.check.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -107,9 +111,12 @@ jobs:
           VERSION=$(version_of < Cargo.toml)
           PREVIOUS=$(git show HEAD^:Cargo.toml 2>/dev/null | version_of || true)
           LATEST=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || echo "")
-          if [ "$VERSION" = "${LATEST#v}" ]; then
+          BUMPS=false
+          [ "$VERSION" != "$PREVIOUS" ] && BUMPS=true
+          echo "bumps=${BUMPS}" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT" = "pull_request" ] || [ "$VERSION" = "${LATEST#v}" ]; then
             echo "should_release=false" >> "$GITHUB_OUTPUT"
-          elif [ "$EVENT" = "workflow_dispatch" ] || [ "$VERSION" != "$PREVIOUS" ]; then
+          elif [ "$EVENT" = "workflow_dispatch" ] || [ "$BUMPS" = "true" ]; then
             echo "should_release=true" >> "$GITHUB_OUTPUT"
           else
             echo "should_release=false" >> "$GITHUB_OUTPUT"
@@ -201,16 +208,27 @@ jobs:
           # Only publish reads these, minutes later.
           retention-days: 1
 
-  # Release assets only, so a pull request or a push that does not release
-  # never takes one of the account's few macOS runners: nothing here is
+  # Release assets only, so an ordinary pull request or a push that does not
+  # release never takes one of the account's few macOS runners: nothing here is
   # Apple-specific, and Check covers the code on Linux. Apple silicon only.
-  # Also runs on the schedule, compiling without signing or uploading, because
-  # this is the only macOS cache in the pipeline and releases are rare enough
-  # that it would otherwise always have expired by the time one goes out.
+  #
+  # A release pull request builds and packages the tarball unsigned, so a
+  # broken macOS build fails before the version merges rather than half way
+  # through publishing it. Signing and the upload happen only on the release
+  # itself, where signing is mandatory: the notarise action fails when its
+  # secrets are missing rather than letting an unsigned binary ship.
+  #
+  # Also runs on the schedule, compiling without packaging, because this is the
+  # only macOS cache in the pipeline (saved from main, where the schedule and
+  # releases build the same release profile) and releases are rare enough that
+  # it would otherwise always have expired by the time one goes out.
   build-darwin:
     name: Build darwin-aarch64
     needs: version
-    if: needs.version.outputs.should_release == 'true' || github.event_name == 'schedule'
+    if: >-
+      needs.version.outputs.should_release == 'true'
+      || github.event_name == 'schedule'
+      || (github.event_name == 'pull_request' && needs.version.outputs.bumps == 'true')
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -221,12 +239,13 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: aarch64-apple-darwin
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build
         run: cargo build --release --locked --target aarch64-apple-darwin
       # Developer ID signed and notarised, so the tarball runs from a browser
       # download without clearing quarantine.
       - name: Sign and notarise
-        if: github.event_name != 'schedule'
+        if: needs.version.outputs.should_release == 'true'
         uses: radiosilence/blit-workflows/macos-notarise@c8a650dfa5a0fbe012c61eab28f615c1983aee18
         with:
           binaries: |
@@ -240,7 +259,7 @@ jobs:
         if: github.event_name != 'schedule'
         run: tar -czvf fastmail-cli-darwin-aarch64.tar.gz -C target/aarch64-apple-darwin/release fastmail
       - name: Upload binary
-        if: github.event_name != 'schedule'
+        if: needs.version.outputs.should_release == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: bin-darwin-aarch64

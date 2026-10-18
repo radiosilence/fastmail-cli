@@ -14,7 +14,7 @@ A CLI for Fastmail over JMAP (email) and CardDAV (contacts), installed as the `f
 
 ## Releasing
 
-`just release patch|minor|major` (or an exact `X.Y.Z`) branches from main, bumps `Cargo.toml` and `Cargo.lock`, turns the unreleased fragments into the version and opens the release PR; the Release workflow does the same from GitHub. Merging it is the release: CI pushes the `vX.Y.Z`, `vX.Y`, `vX` and `latest` image tags, then creates the GitHub release with the binaries and the changelog section as notes. The image goes first because consumers poll releases and would pin a version with no image behind it. A push releases only when it changes the version; `gh workflow run ci.yml` on main retries a release that failed part way.
+`just release patch|minor|major` (or an exact `X.Y.Z`) branches from main, bumps `Cargo.toml` and `Cargo.lock`, turns the unreleased fragments into the version and opens the release PR; the Release workflow does the same from GitHub. Merging it is the release: CI pushes the `vX.Y.Z`, `vX.Y`, `vX` and `latest` image tags, then creates the GitHub release with the binaries and the changelog section as notes. The image goes first because consumers poll releases and would pin a version with no image behind it. The release PR builds the macOS tarball unsigned, so a broken macOS build shows before the version merges; ordinary PRs and pushes take no macOS runner. A push releases only when it changes the version; `gh workflow run ci.yml` on main retries a release that failed part way.
 
 ## Check
 
