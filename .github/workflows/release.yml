@@ -49,9 +49,6 @@ jobs:
       - uses: jdx/mise-action@9149ea85001c7435d5a66bb127d6a1b6227cb0a5 # v5.0.0
         with:
           install_args: rust just
-      # release.sh refreshes Cargo.lock offline, which resolves against the
-      # local registry cache: a fresh runner has none.
-      - run: cargo fetch --locked
       - name: Release
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
