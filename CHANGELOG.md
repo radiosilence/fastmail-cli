@@ -1,8 +1,14 @@
 # Changelog
 
-## [Unreleased]
+## Unreleased
 
-## [3.7.1] - 2026-10-13
+### Internal
+
+- **Releases are cut through a release pull request.** `just release patch|minor|major` (or the Release workflow) bumps the version, turns the changelog fragments in `changelog.d/` into the release and opens the PR; merging it publishes the container image and the GitHub release with the binaries and the version's changelog section as notes. A push releases only when it changes the version, and a manual run of CI retries a release that failed part way. Pull requests add a fragment instead of editing CHANGELOG.md, so they no longer conflict on it.
+
+## 3.7.1
+
+Released 2026-10-13.
 
 ### Changed
 
@@ -13,7 +19,9 @@
   the bytes. A CONFIRM could then have carried different content under the
   same token.
 
-## [3.7.0] - 2026-10-13
+## 3.7.0
+
+Released 2026-10-13.
 
 ### Added
 
@@ -35,7 +43,9 @@
   went out as `application/octet-stream` and mail clients showed it as a file
   rather than an image.
 
-## [3.6.0] - 2026-09-29
+## 3.6.0
+
+Released 2026-09-29.
 
 ### Added
 
@@ -60,7 +70,9 @@
   HTML body, or turn a reply into reply-all without the user having seen it.
   Any difference from the preview is now rejected.
 
-## [3.5.1] - 2026-09-29
+## 3.5.1
+
+Released 2026-09-29.
 
 ### Changed
 
@@ -81,7 +93,9 @@
   together and are fixed together — including the send preview, which had been
   reporting the address it was about to fail to deliver to.
 
-## [3.5.0] - 2026-08-28
+## 3.5.0
+
+Released 2026-08-28.
 
 ### Added
 
@@ -121,7 +135,9 @@
   subscription never returns, so the `graphql` tool's description says so and
   points at the other two ways to get it.
 
-## [3.4.0] - 2026-08-17
+## 3.4.0
+
+Released 2026-08-17.
 
 ### Added
 
@@ -170,7 +186,9 @@
   that outlives a rename is worse than no cheat sheet — the first draft of this
   one had already invented a `nonce` field and list-valued recipients.
 
-## [3.3.2] - 2026-07-26
+## 3.3.2
+
+Released 2026-07-26.
 
 ### Changed
 
@@ -184,7 +202,9 @@
   minutes to ~45 seconds on the first build; incremental rebuilds are similar.
   Codegen units bumped to 16 (from 1) to parallelise optimisation.
 
-## [3.3.1] - 2026-07-26
+## 3.3.1
+
+Released 2026-07-26.
 
 ### Changed
 
@@ -205,7 +225,9 @@
   built against an older glibc than before, which widens the range of
   distributions they run on.
 
-## [3.3.0] - 2026-07-26
+## 3.3.0
+
+Released 2026-07-26.
 
 ### Added
 
@@ -238,7 +260,9 @@
   for the image builds as well as the tarballs. Previously they ran in parallel,
   so a failed image build still produced a GitHub release with nothing to pull.
 
-## [3.2.1] - 2026-07-26
+## 3.2.1
+
+Released 2026-07-26.
 
 ### Changed
 
@@ -252,7 +276,9 @@
   flags. This matches `caldav-cli`, `tfl-mcp` and `mainlynorfolk-mcp`, where the
   surfaces were already independent.
 
-## [3.2.0] - 2026-07-25
+## 3.2.0
+
+Released 2026-07-25.
 
 ### Changed
 
@@ -266,7 +292,9 @@
   after the repository. The config directory stays at `~/.config/fastmail-cli/`
   — nobody has to re-authenticate.
 
-## [3.1.3] - 2026-07-25
+## 3.1.3
+
+Released 2026-07-25.
 
 ### Changed
 
@@ -277,7 +305,9 @@
   that transport, when the address already had a default. `--http` now earns its
   place only when you want a different address.
 
-## [3.1.2] - 2026-07-25
+## 3.1.2
+
+Released 2026-07-25.
 
 ### Fixed
 
@@ -292,7 +322,9 @@
   what each field costs — is what stays. A test now fails if the schema's prose
   names a construct the schema no longer has.
 
-## [3.1.1] - 2026-07-25
+## 3.1.1
+
+Released 2026-07-25.
 
 ### Fixed
 
@@ -319,7 +351,9 @@
   existing prompts and configs keep working. (`title` is a 2025-06-18 field,
   which the protocol cap above was suppressing.)
 
-## [3.1.0] - 2026-07-25
+## 3.1.0
+
+Released 2026-07-25.
 
 ### Added
 
@@ -461,7 +495,9 @@
   official server (zero-setup, OAuth, and a wider suite: calendar, notes, org
   directory).
 
-## [3.0.0] - 2026-07-24
+## 3.0.0
+
+Released 2026-07-24.
 
 Hosted MCP: `fastmail-cli` can now run as a remote MCP backend behind an OAuth
 gateway ([`jaritanet-mcp-gateway`](https://github.com/radiosilence/jaritanet-mcp-gateway)),
@@ -486,14 +522,18 @@ in addition to the unchanged local stdio mode.
 Bumped to a major version because the MCP server gained a new transport and a
 public library surface; the stdio CLI behaviour is backward-compatible.
 
-## [2.2.2] - 2026-04-18
+## 2.2.2
+
+Released 2026-04-18.
 
 ### Changed
 
 - **NonceStore is now bounded** ([#27](https://github.com/radiosilence/fastmail-cli/pull/27)): 15-minute TTL per nonce and a hard cap of 256 outstanding nonces. Closes [#25](https://github.com/radiosilence/fastmail-cli/issues/25) — follow-up from the v2.2.1 security audit.
 - **Dep bumps**: `kreuzberg` 4.4 → 4.8, `toml` 0.8 → 1.1, `rmcp` 0.12 → 1.5, `schemars` 0.8 → 1.2. The rmcp 1.0 `#[non_exhaustive]` model-struct fallout moved `get_info()` onto the builder API (`ServerInfo::new().with_*()` instead of struct literals) — cleaner read, same behaviour.
 
-## [2.2.1] - 2026-04-18
+## 2.2.1
+
+Released 2026-04-18.
 
 ### Fixed
 
@@ -521,7 +561,9 @@ public library surface; the stdio CLI behaviour is backward-compatible.
 
 Security audit contributed by [@dylanbyars](https://github.com/dylanbyars) ([#23](https://github.com/radiosilence/fastmail-cli/pull/23)).
 
-## [2.2.0] - 2026-04-11
+## 2.2.0
+
+Released 2026-04-11.
 
 ### Added
 
@@ -537,7 +579,9 @@ Security audit contributed by [@dylanbyars](https://github.com/dylanbyars) ([#23
 - Update merges fields: only provided fields are overwritten, existing fields are preserved.
 - Delete requires `-y` confirmation flag (consistent with `masked delete` and `spam`).
 
-## [2.1.0] - 2026-04-11
+## 2.1.0
+
+Released 2026-04-11.
 
 ### Added
 
@@ -554,7 +598,9 @@ Security audit contributed by [@dylanbyars](https://github.com/dylanbyars) ([#23
 - `bodyValues` keys changed from `"body"` to `"textBody"` / `"htmlBody"` for clarity.
 - Pinned GitHub Actions to commit SHAs.
 
-## [2.0.1] - 2026-03-26
+## 2.0.1
+
+Released 2026-03-26.
 
 ### Fixed
 
@@ -576,7 +622,9 @@ Security audit contributed by [@dylanbyars](https://github.com/dylanbyars) ([#23
 - **Removed `#[allow(dead_code)]`** on `impl Email` — removed unused `sender_display` method
 - **Use Display trait**: Forward email sender formatting now uses `EmailAddress::Display` instead of manual format logic
 
-## [2.0.0] - 2026-03-22
+## 2.0.0
+
+Released 2026-03-22.
 
 ### Breaking
 
@@ -607,7 +655,9 @@ Security audit contributed by [@dylanbyars](https://github.com/dylanbyars) ([#23
 
 - Pin kreuzberg to ~4.4 — 4.5.3 has compile errors with `pdf` feature (filed upstream: kreuzberg-dev/kreuzberg#550).
 
-## [1.8.1] - 2026-03-20
+## 1.8.1
+
+Released 2026-03-20.
 
 ### Fixed
 
@@ -625,7 +675,9 @@ Security audit contributed by [@dylanbyars](https://github.com/dylanbyars) ([#23
 
 Thanks to [@thrawny](https://github.com/thrawny) (Jonas Lergell) for the original PR (#9).
 
-## [1.8.0] - 2026-02-27
+## 1.8.0
+
+Released 2026-02-27.
 
 ### Added
 
@@ -640,7 +692,9 @@ Thanks to [@thrawny](https://github.com/thrawny) (Jonas Lergell) for the origina
 
 Thanks to [@bgilly](https://github.com/bgilly) for the original PR (#6).
 
-## [1.7.2] - 2026-02-27
+## 1.7.2
+
+Released 2026-02-27.
 
 ### Fixed
 
@@ -656,7 +710,9 @@ Thanks to [@bgilly](https://github.com/bgilly) for the original PR (#6).
 
 Thanks to [@kylehowells](https://github.com/kylehowells) for the original PR (#4).
 
-## [1.7.0] - 2026-01-11
+## 1.7.0
+
+Released 2026-01-11.
 
 ### Changed
 
@@ -668,7 +724,9 @@ Thanks to [@kylehowells](https://github.com/kylehowells) for the original PR (#4
 
 Documents (PDF, DOC, DOCX, ODT, RTF), Spreadsheets (XLS, XLSX, ODS, CSV), Presentations (PPT, PPTX), eBooks (EPUB, FB2), Markup (HTML, XML, Markdown, RST, Org), Data (JSON, YAML, TOML), Email (EML, MSG), Archives (ZIP, TAR, GZ, 7z), Academic (BibTeX, LaTeX, Typst, Jupyter notebooks)
 
-## [1.6.0] - 2026-01-11
+## 1.6.0
+
+Released 2026-01-11.
 
 ### Changed
 
@@ -694,7 +752,9 @@ username = "..."
 app_password = "..."
 ```
 
-## [1.5.0] - 2026-01-11
+## 1.5.0
+
+Released 2026-01-11.
 
 ### Added
 
@@ -707,13 +767,17 @@ app_password = "..."
 - CardDAV requires an app password - Fastmail's API tokens only work for JMAP
 - Generate app password at Fastmail Settings > Privacy & Security > Integrations > App passwords
 
-## [1.4.1] - 2026-01-11
+## 1.4.1
+
+Released 2026-01-11.
 
 ### Fixed
 
 - Sending emails no longer leaves a draft behind - emails are created directly in Sent folder
 
-## [1.4.0] - 2026-01-11
+## 1.4.0
+
+Released 2026-01-11.
 
 ### Added
 
@@ -730,7 +794,9 @@ app_password = "..."
 - Consolidated text extraction and image processing into shared utilities
 - Removed tesseract/OCR dependency (send images to Claude instead)
 
-## [1.3.0] - 2026-01-11
+## 1.3.0
+
+Released 2026-01-11.
 
 ### Added
 
@@ -744,7 +810,9 @@ app_password = "..."
 
 - Search now uses explicit flags instead of query string parsing
 
-## [1.2.0] - 2026-01-11
+## 1.2.0
+
+Released 2026-01-11.
 
 ### Added
 
@@ -754,20 +822,26 @@ app_password = "..."
 - DOCX extraction via `docx-lite` (pure Rust)
 - DOC extraction via `textutil` (macOS) / `antiword` / `catdoc`
 
-## [1.1.0] - 2026-01-11
+## 1.1.0
+
+Released 2026-01-11.
 
 ### Added
 
 - Feature table in README
 
-## [1.0.0] - 2026-01-11
+## 1.0.0
+
+Released 2026-01-11.
 
 ### Added
 
 - Masked email support (`masked list`, `create`, `enable`, `disable`, `delete`)
 - `https://www.fastmail.com/dev/maskedemail` JMAP capability
 
-## [0.4.0] - 2026-01-11
+## 0.4.0
+
+Released 2026-01-11.
 
 ### Added
 
@@ -776,21 +850,27 @@ app_password = "..."
 - `--all` flag for reply-all
 - CC/BCC support on reply and forward
 
-## [0.3.0] - 2026-01-10
+## 0.3.0
+
+Released 2026-01-10.
 
 ### Added
 
 - Shell completions (bash, zsh, fish, powershell)
 - `completions` command
 
-## [0.2.0] - 2026-01-10
+## 0.2.0
+
+Released 2026-01-10.
 
 ### Added
 
 - `download` command for attachments
 - Blob download via JMAP
 
-## [0.1.0] - 2026-01-10
+## 0.1.0
+
+Released 2026-01-10.
 
 ### Added
 

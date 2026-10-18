@@ -1,0 +1,4 @@
+[tools]
+rust = { version = "1", components = "rustfmt,clippy" }
+just = "latest"
+lefthook = "latest"
