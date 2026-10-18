@@ -1,0 +1,1 @@
+- **No Intel macOS tarball.** Releases no longer include `fastmail-cli-darwin-x86_64.tar.gz`; the macOS build is Apple silicon only. CI builds it only for a release, so pull requests and ordinary pushes to main no longer wait on the account's small pool of macOS runners.

@@ -201,55 +201,50 @@ jobs:
           # Only publish reads these, minutes later.
           retention-days: 1
 
-  # Release assets only — no image consumes these, so they'd be dead weight on a
-  # pull request. Runs on the schedule regardless, because these are the only
-  # macOS caches in the pipeline and they are wanted warm precisely when a
-  # release goes out, which is rare enough that they would otherwise always have
-  # expired by then.
+  # Release assets only, so a pull request or a push that does not release
+  # never takes one of the account's few macOS runners: nothing here is
+  # Apple-specific, and Check covers the code on Linux. Apple silicon only.
+  # Also runs on the schedule, compiling without signing or uploading, because
+  # this is the only macOS cache in the pipeline and releases are rare enough
+  # that it would otherwise always have expired by the time one goes out.
   build-darwin:
-    name: Build ${{ matrix.name }}
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    name: Build darwin-aarch64
+    needs: version
+    if: needs.version.outputs.should_release == 'true' || github.event_name == 'schedule'
     runs-on: macos-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-apple-darwin
-            name: darwin-x86_64
-          - target: aarch64-apple-darwin
-            name: darwin-aarch64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: stable
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          key: ${{ matrix.target }}
+          key: aarch64-apple-darwin
       - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: cargo build --release --locked --target aarch64-apple-darwin
       # Developer ID signed and notarised, so the tarball runs from a browser
-      # download without clearing quarantine. Pull requests stay ad-hoc signed.
-      - name: Sign and notarise (macOS)
-        if: runner.os == 'macOS' && github.event_name != 'schedule'
+      # download without clearing quarantine.
+      - name: Sign and notarise
+        if: github.event_name != 'schedule'
         uses: radiosilence/blit-workflows/macos-notarise@c8a650dfa5a0fbe012c61eab28f615c1983aee18
         with:
           binaries: |
-            target/${{ matrix.target }}/release/fastmail
+            target/aarch64-apple-darwin/release/fastmail
           certificate-p12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
           certificate-password: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           api-key-p8: ${{ secrets.APPLE_API_KEY_P8 }}
           api-key-id: ${{ secrets.APPLE_API_KEY_ID }}
           api-issuer-id: ${{ secrets.APPLE_API_ISSUER_ID }}
       - name: Package
-        run: tar -czvf fastmail-cli-${{ matrix.name }}.tar.gz -C target/${{ matrix.target }}/release fastmail
+        if: github.event_name != 'schedule'
+        run: tar -czvf fastmail-cli-darwin-aarch64.tar.gz -C target/aarch64-apple-darwin/release fastmail
       - name: Upload binary
         if: github.event_name != 'schedule'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: bin-${{ matrix.name }}
-          path: fastmail-cli-${{ matrix.name }}.tar.gz
+          name: bin-darwin-aarch64
+          path: fastmail-cli-darwin-aarch64.tar.gz
 
   # The only job that publishes anything, and the release is its last step. This
   # project is consumed as a container, so a version tag with no image behind it
@@ -258,7 +253,12 @@ jobs:
   publish:
     name: Publish
     needs: [check, changelog, version, build-image, build-darwin]
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # build-darwin is skipped on a push that does not release, which would
+    # otherwise skip this job too and leave :main unpublished.
+    if: >-
+      !cancelled() && !contains(needs.*.result, 'failure')
+      && github.ref == 'refs/heads/main'
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
