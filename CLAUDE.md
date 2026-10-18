@@ -1,6 +1,6 @@
 # fastmail-cli
 
-A CLI for Fastmail over JMAP (email) and CardDAV (contacts), installed as the `fastmail` binary, which also serves a GraphQL API as an MCP server over stdio or HTTP. It ships as release tarballs for Linux and macOS and as a multi-arch container image on GHCR, which the MCP gateway runs as a backend and an updater tracks by its GitHub releases.
+A CLI for Fastmail over JMAP (email) and CardDAV (contacts), installed as the `fastmail` binary, which also serves a GraphQL API as an MCP server over stdio or HTTP. It ships as release tarballs for Linux (x86_64 and aarch64) and Apple silicon macOS, and as a multi-arch container image on GHCR, which the MCP gateway runs as a backend and an updater tracks by its GitHub releases.
 
 ## Git
 
