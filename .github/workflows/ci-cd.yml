@@ -430,16 +430,18 @@ jobs:
   # default, which would skip it whenever any job upstream was skipped.
 
   # `main` follows the newest commit whose checks passed, which the MCP gateway
-  # runs; `sha-<short>` names it for good. A release run is never cancelled and
-  # can finish after a later push's run, so `main` moves only when this commit
-  # descends from (or is) the commit `main` holds, read from the image's
-  # revision label; an image without one is replaced.
+  # runs; `sha-<short>` names it for good.
   image-main:
     name: Container image (main)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: [checks, image-push]
     if: ${{ !cancelled() && needs.checks.result == 'success' && needs.image-push.result == 'success' }}
+    # One at a time across runs: two that read the tag together could both
+    # see their commit ahead, and the one finishing last would win.
+    concurrency:
+      group: image-main
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write
@@ -450,32 +452,59 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # A release run is never cancelled and can finish after a later push's
+      # run, so `main` moves only forward: not onto a commit behind the one the
+      # tag holds now, read from its revision label. Main's head is no guide,
+      # since a later push that builds no image moves it without retagging.
+      #
+      # A missing tag, a tag without the label, or a labelled commit that
+      # history no longer leads to (gone, or diverged after a force-push)
+      # retags. Any other failure is retried, then fails the job: retagging on
+      # a guess can move `main` backwards. `sha-<short>` is always tagged.
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Only a missing tag, a missing label, or a labelled commit that no
-          # longer exists (a 404 from compare) lets `main` move without the
-          # ancestry check; any other error fails rather than guessing.
-          held=
-          if image=$(docker buildx imagetools inspect "$IMAGE:main" --format '{{json .Image}}' 2>&1); then
-            held=$(jq -r '[.. | objects | .Labels? | objects | .["org.opencontainers.image.revision"] | strings] | first // empty' <<< "$image")
-          elif [ "$(grep -c ': not found' <<< "$image")" -eq 0 ]; then
-            echo "::error::cannot read the main tag: $image"
-            exit 1
-          fi
-          tags=(-t "$IMAGE:sha-${GITHUB_SHA::7}")
-          status=none
-          if [ -n "$held" ] && ! status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$held...$GITHUB_SHA" --jq .status 2>&1); then
-            if [ "$(grep -c 'HTTP 404' <<< "$status")" -eq 0 ]; then
-              echo "::error::cannot compare with $held: $status"
-              exit 1
+          attempt() {
+            local n
+            for n in 1 2 3; do
+              "$@" && return 0
+              sleep $((n * 10))
+            done
+            return 1
+          }
+          read_tag() {
+            if docker buildx imagetools inspect "$IMAGE:main" --format '{{json .Image}}' > tag.json 2> tag.err; then
+              current=$(jq -r '[.. | objects | .config.Labels?["org.opencontainers.image.revision"]? // empty][0] // empty' tag.json)
+            elif grep -qF "$IMAGE:main: not found" tag.err; then
+              current=
+            else
+              cat tag.err >&2
+              return 1
             fi
-            status=gone
+          }
+          compare() {
+            if gh api "repos/$GITHUB_REPOSITORY/compare/$current...$GITHUB_SHA" --jq .status > compare.out 2> compare.err; then
+              status=$(cat compare.out)
+            elif grep -q 'HTTP 404' compare.err; then
+              status=gone
+            else
+              cat compare.err >&2
+              return 1
+            fi
+          }
+          tags=(-t "$IMAGE:sha-${GITHUB_SHA::7}" -t "$IMAGE:main")
+          attempt read_tag || { echo "::error::cannot read $IMAGE:main"; exit 1; }
+          if [ -n "$current" ] && [ "$current" != "$GITHUB_SHA" ]; then
+            attempt compare || { echo "::error::cannot compare $current with $GITHUB_SHA"; exit 1; }
+            case "$status" in
+              ahead) ;;
+              gone|diverged) echo "::notice::main holds $current, which history no longer leads to ($status); retagging" ;;
+              *)
+                echo "::notice::main holds $current, which this commit does not descend from ($status); leaving it"
+                tags=(-t "$IMAGE:sha-${GITHUB_SHA::7}")
+                ;;
+            esac
           fi
-          case "$status" in
-            none|gone|ahead|identical) tags+=(-t "$IMAGE:main") ;;
-            *) echo "::notice::main holds $held, which this commit does not descend from ($status); leaving the main tag" ;;
-          esac
           docker buildx imagetools create "${tags[@]}" "$IMAGE:$GITHUB_SHA"
 
   # The Apple silicon binary, Developer ID signed and notarised, so the tarball
