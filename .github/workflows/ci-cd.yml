@@ -123,22 +123,23 @@ jobs:
             fi
           fi
           # Whether this run releases, the one answer every release job reads.
-          # A pull request: a release PR (branch `release-*`, or a version
+          # A pull request: a release PR (branch `release-v*`, or a version
           # change), which runs everything. A push to main: it changes the
-          # version and that version is not out yet, so a push landing while a
-          # release runs does not release that version a second time. A manual
+          # version (against the commit before, not the diff base) and that
+          # version is not out yet, so a push landing while a release runs does
+          # not release that version a second time. A manual
           # run on main, which is how a failed release is
           # retried: whatever version is not out yet. Releases rather than
           # tags are the record of what has shipped, since consumers and
           # update pollers read them.
           version=$(version_of < Cargo.toml)
           bumped=false
-          if [ "$(git show "${base:-HEAD^1}:Cargo.toml" 2>/dev/null | version_of)" != "$version" ]; then
+          if [ "$(git show HEAD^1:Cargo.toml 2>/dev/null | version_of)" != "$version" ]; then
             bumped=true
           fi
           case "$EVENT" in
             pull_request)
-              case "$HEAD_REF" in release-*) bumped=true ;; esac
+              case "$HEAD_REF" in release-v*) bumped=true ;; esac
               release=$bumped
               ;;
             push|workflow_dispatch)
@@ -217,7 +218,7 @@ jobs:
             if [ "$event" = push ]; then
               status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$sha...$GITHUB_SHA" --jq .status || true)
               [ "$status" = ahead ] || continue
-              files=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha" --jq '.files[].filename' || echo Cargo.toml)
+              files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$sha" --jq '.files[].filename' || echo Cargo.toml)
               [ "$(grep -cx Cargo.toml <<< "$files")" -eq 0 ] || continue
             fi
             echo "cancelling run $id"
@@ -400,6 +401,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ env.IMAGE }}:${{ github.sha }}
+          # Read by `image-main` to tell which commit `main` holds.
+          labels: org.opencontainers.image.revision=${{ github.sha }}
 
   # The one status the ruleset requires. Skipped jobs are domains the change
   # does not touch and pass; anything failed or cancelled fails it.
@@ -428,8 +431,9 @@ jobs:
 
   # `main` follows the newest commit whose checks passed, which the MCP gateway
   # runs; `sha-<short>` names it for good. A release run is never cancelled and
-  # can finish after a later push's run, so `main` moves only while this
-  # commit is still main's head.
+  # can finish after a later push's run, so `main` moves only when this commit
+  # descends from (or is) the commit `main` holds, read from the image's
+  # revision label; an image without one is replaced.
   image-main:
     name: Container image (main)
     runs-on: ubuntu-24.04
@@ -449,13 +453,17 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          head=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          held=$(docker buildx imagetools inspect "$IMAGE:main" --format '{{json .Image}}' 2>/dev/null \
+            | jq -r '[.. | objects | .Labels? | objects | .["org.opencontainers.image.revision"] | strings] | first // empty' || true)
           tags=(-t "$IMAGE:sha-${GITHUB_SHA::7}")
-          if [ "$head" = "$GITHUB_SHA" ]; then
-            tags+=(-t "$IMAGE:main")
-          else
-            echo "::notice::main has moved on to $head; leaving the main tag"
+          status=
+          if [ -n "$held" ]; then
+            status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$held...$GITHUB_SHA" --jq .status)
           fi
+          case "${held:-none}:$status" in
+            none:|*:ahead|*:identical) tags+=(-t "$IMAGE:main") ;;
+            *) echo "::notice::main holds $held, which this commit does not descend from ($status); leaving the main tag" ;;
+          esac
           docker buildx imagetools create "${tags[@]}" "$IMAGE:$GITHUB_SHA"
 
   # The Apple silicon binary, Developer ID signed and notarised, so the tarball
