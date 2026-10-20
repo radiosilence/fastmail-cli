@@ -118,9 +118,9 @@ jobs:
           # Whether this run releases, the one answer every release job reads.
           # A pull request: a release PR (branch `release-*`, or a version
           # change), which runs everything. A push to main: it changes the
-          # version and that version is not out yet; comparing with the latest
-          # release alone let a push landing while a release ran release it
-          # again. A manual run on main, which is how a failed release is
+          # version and that version is not out yet, so a push landing while a
+          # release runs does not release that version a second time. A manual
+          # run on main, which is how a failed release is
           # retried: whatever version is not out yet. Releases rather than
           # tags are the record of what has shipped, since consumers and
           # update pollers read them.
@@ -159,7 +159,7 @@ jobs:
             # image only when the recipe changed; main whenever what they
             # contain did, since CD ships them.
             if [ "$EVENT" = "pull_request" ] || [ "$rust" = false ]; then
-              touches '^(Dockerfile|\.dockerignore)$|^\.github/' || docker=false
+              touches '^Dockerfile$|^\.github/' || docker=false
             fi
             printf '%s\n' "$files" | grep -qE '^changelog\.d/|^CHANGELOG\.md$|^scripts/(test_)?changelog\.py$|^\.github/' || changelog=false
           fi
@@ -172,9 +172,11 @@ jobs:
           } | tee -a "$GITHUB_OUTPUT"
 
   # A release cancels this repository's pull request runs, which are re-run
-  # from their page or by the next push, and main's earlier non-release runs,
-  # which a newer one supersedes, so the release's builds find the runners
-  # free. A job of its own, so only it holds a token that can cancel runs.
+  # from their page or by the next push, and main's non-release runs on
+  # commits before it, which the release supersedes, so the release's builds
+  # find the runners free. Runs on later commits carry changes the release
+  # does not, and are left to move `main` themselves. A job of its own, so
+  # only it holds a token that can cancel runs.
   make-room:
     name: Make room for the release
     runs-on: ubuntu-24.04
@@ -183,6 +185,7 @@ jobs:
     if: github.event_name != 'pull_request' && needs.changes.outputs.release == 'true'
     permissions:
       actions: write
+      contents: read
     steps:
       - env:
           GH_TOKEN: ${{ github.token }}
@@ -190,10 +193,14 @@ jobs:
         run: |
           for status in requested queued pending waiting in_progress; do
             gh run list --repo "$GITHUB_REPOSITORY" --workflow ci-cd.yml --status "$status" --limit 100 \
-              --json databaseId,event,headBranch,displayTitle \
-              --jq '.[] | select(.event == "pull_request" or (.event == "push" and .headBranch == "main" and (.displayTitle | startswith("release: ") | not))) | .databaseId'
-          done | sort -u | while read -r id; do
+              --json databaseId,event,headBranch,headSha,displayTitle \
+              --jq '.[] | select(.event == "pull_request" or (.event == "push" and .headBranch == "main" and (.displayTitle | startswith("release: ") | not))) | "\(.databaseId) \(.event) \(.headSha)"'
+          done | sort -u | while read -r id event sha; do
             [ "$id" = "$SELF" ] && continue
+            if [ "$event" = push ] \
+              && [ "$(gh api "repos/$GITHUB_REPOSITORY/compare/$sha...$GITHUB_SHA" --jq .status 2>/dev/null)" != ahead ]; then
+              continue
+            fi
             echo "cancelling run $id"
             gh run cancel "$id" --repo "$GITHUB_REPOSITORY" || true
           done
@@ -384,6 +391,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ env.IMAGE }}:${{ github.sha }}
+          # Read by `image-main` to tell which commit `main` holds.
+          labels: org.opencontainers.image.revision=${{ github.sha }}
 
   # The one status the ruleset requires. Skipped jobs are domains the change
   # does not touch and pass; anything failed or cancelled fails it.
@@ -410,14 +419,21 @@ jobs:
   # job here states the results it depends on rather than relying on the
   # default, which would skip it whenever any job upstream was skipped.
 
-  # `main` follows the last commit whose checks passed, which the MCP gateway
-  # runs; `sha-<short>` names it for good.
+  # `main` follows the newest commit whose checks passed, which the MCP gateway
+  # runs; `sha-<short>` names it for good. Runs on main overlap (a release, a
+  # manual run and a `Cargo.toml` change are never cancelled, and a release
+  # waits on notarisation), so a run that finishes after a newer commit's has
+  # moved `main` leaves it there and tags only its own `sha-<short>`. One at a
+  # time, so that comparison and the retag are not interleaved.
   image-main:
     name: Container image (main)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: [checks, image-push]
     if: ${{ !cancelled() && needs.checks.result == 'success' && needs.image-push.result == 'success' }}
+    concurrency:
+      group: image-main
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write
@@ -428,7 +444,19 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - run: docker buildx imagetools create -t "$IMAGE:main" -t "$IMAGE:sha-${GITHUB_SHA::7}" "$IMAGE:$GITHUB_SHA"
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          current=$(docker buildx imagetools inspect "$IMAGE:main" --format '{{json .Image}}' 2>/dev/null \
+            | jq -r '[.. | objects | .Labels? | objects | .["org.opencontainers.image.revision"] | strings] | first // empty' || true)
+          tags=(-t "$IMAGE:sha-${GITHUB_SHA::7}")
+          if [ -n "$current" ] && [ "$current" != "$GITHUB_SHA" ] \
+            && [ "$(gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...$current" --jq .status 2>/dev/null)" = ahead ]; then
+            echo "::notice::main already holds $current, which is newer; leaving it there."
+          else
+            tags+=(-t "$IMAGE:main")
+          fi
+          docker buildx imagetools create "${tags[@]}" "$IMAGE:$GITHUB_SHA"
 
   # The Apple silicon binary, Developer ID signed and notarised, so the tarball
   # runs from a browser download without clearing quarantine. Nothing here is
@@ -491,9 +519,9 @@ jobs:
   # The image this commit already pushed, tagged with the release's version
   # and `latest` once every build the release ships has passed: consumers poll
   # releases, and a tag with no release behind it, or a release with no image,
-  # is what this order and the next job's prevent. Skipped, with a notice,
-  # without RELEASE_TOKEN, since the release could not follow these tags.
-  # Retagging needs no rebuild, and repeats safely.
+  # is what this order and the next job's prevent. Without RELEASE_TOKEN it
+  # tags nothing and says so, and the release is skipped, since it could not
+  # follow these tags. Retagging needs no rebuild, and repeats safely.
   image-release:
     name: Container image (release tags)
     runs-on: ubuntu-24.04
@@ -503,6 +531,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      ready: ${{ steps.token.outputs.ready }}
     env:
       VERSION: ${{ needs.changes.outputs.version }}
       RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
@@ -540,38 +570,26 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: [changes, linux-build, darwin-build, image-release]
-    if: ${{ !cancelled() && needs.image-release.result == 'success' && needs.changes.outputs.release == 'true' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && !contains(needs.*.result, 'skipped') }}
+    if: ${{ !cancelled() && needs.image-release.result == 'success' && needs.image-release.outputs.ready == 'true' && needs.changes.outputs.release == 'true' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && !contains(needs.*.result, 'skipped') }}
     permissions:
       contents: write
     env:
       VERSION: ${{ needs.changes.outputs.version }}
-      RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
     steps:
-      - id: token
-        run: |
-          if [ -n "$RELEASE_TOKEN" ]; then
-            echo "ready=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice::RELEASE_TOKEN is not set; skipping the release."
-          fi
-      - if: steps.token.outputs.ready == 'true'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - if: steps.token.outputs.ready == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: fastmail-cli-*
           path: artifacts
           merge-multiple: true
       - name: Release notes
-        if: steps.token.outputs.ready == 'true'
         run: |
           awk -v h="## $VERSION" '$0==h{f=1;next} f&&/^## /{exit} f' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
           if ! grep -q . "$RUNNER_TEMP/notes.md"; then
             echo "::error::CHANGELOG.md has no section for $VERSION"
             exit 1
           fi
-      - if: steps.token.outputs.ready == 'true'
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           token: ${{ secrets.RELEASE_TOKEN }}
           tag_name: v${{ env.VERSION }}
