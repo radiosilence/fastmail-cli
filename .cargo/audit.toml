@@ -1,0 +1,10 @@
+[advisories]
+# zip 8.x reaches the build only through kreuzberg -> calamine, which reads
+# spreadsheet entries into memory and never calls ZipArchive::extract or
+# ZipStreamReader::extract, the APIs these advisories concern. Remove once
+# kreuzberg moves to a calamine release built on zip 9.
+ignore = [
+  "RUSTSEC-2026-0367",
+  "RUSTSEC-2026-0368",
+  "RUSTSEC-2026-0369",
+]
