@@ -574,7 +574,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: [changes, checks, image-push, darwin-build]
-    if: ${{ !cancelled() && needs.checks.result == 'success' && needs.changes.outputs.release == 'true' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && !contains(needs.*.result, 'skipped') }}
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.image-push.result == 'success' && needs.darwin-build.result == 'success' && needs.checks.result == 'success' && needs.changes.outputs.release == 'true' }}
     permissions:
       contents: read
       packages: write
@@ -617,7 +617,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: [changes, linux-build, darwin-build, image-release]
-    if: ${{ !cancelled() && needs.image-release.result == 'success' && needs.image-release.outputs.ready == 'true' && needs.changes.outputs.release == 'true' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && !contains(needs.*.result, 'skipped') }}
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.linux-build.result == 'success' && needs.darwin-build.result == 'success' && needs.image-release.result == 'success' && needs.image-release.outputs.ready == 'true' && needs.changes.outputs.release == 'true' }}
     permissions:
       contents: write
     env:
