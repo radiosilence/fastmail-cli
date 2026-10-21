@@ -10,7 +10,7 @@ use std::sync::Arc;
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo},
+    model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig},
     schemars,
     service::RequestContext,
     tool, tool_handler, tool_router,
@@ -190,11 +190,13 @@ impl FastmailMcp {
     }
 
     fn text_result(text: impl Into<String>) -> ToolResult {
-        Ok(CallToolResult::success(vec![Content::text(text.into())]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            text.into(),
+        )]))
     }
 
     fn error_result(msg: impl Into<String>) -> ToolResult {
-        Ok(CallToolResult::error(vec![Content::text(msg.into())]))
+        Ok(CallToolResult::error(vec![ContentBlock::text(msg.into())]))
     }
 }
 
@@ -337,7 +339,7 @@ markAsRead, markAsSpam, and the remaining filter and sort options."
 
 #[tool_handler]
 impl ServerHandler for FastmailMcp {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         let server_info = Implementation::new("fastmail", env!("CARGO_PKG_VERSION"))
             .with_title("Fastmail MCP Server")
             .with_website_url("https://github.com/radiosilence/fastmail-cli");
@@ -347,7 +349,7 @@ impl ServerHandler for FastmailMcp {
         // client's. The declared version is therefore a *ceiling* — pinning an
         // old one (this was stuck on 2024-11-05) caps every client to it, which
         // is how `title` on a tool went unused.
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(server_info)
             .with_instructions(
                 "Fastmail, as a GraphQL API.\n\n\
