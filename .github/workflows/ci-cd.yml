@@ -1,0 +1,646 @@
+name: CI/CD
+
+# Two halves in one run, so the second ships what the first built.
+#
+# CI checks the change and ends in `Checks`, the one status the ruleset
+# requires. Each job runs only for the domains the change touches (see
+# `changes`); a skipped job passes `Checks`, a failed or cancelled one fails
+# it. Jobs can therefore be added, renamed or skipped without touching branch
+# protection.
+#
+# CD runs on main after `Checks` has passed. Every push whose image changed
+# moves the image's `main` tag onto it; a push that changes the version also
+# releases: the image's version tags and `latest`, then the GitHub release
+# with the binaries. The Linux binaries are built once, in `linux-build`: the
+# image holds them and the release attaches them. The macOS binary, which CI
+# has no use for, builds alongside the checks on a release and publishes
+# nothing; the publishing waits for both.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # GitHub evicts any cache not read for 7 days, and this repo goes quiet for
+  # longer than that between bursts of work. The first push back then compiles
+  # ~200 crates from cold on every runner, which is the slow build people
+  # notice. Building twice a week on main keeps the entries alive and re-saves
+  # them against the current Cargo.lock, so the cost lands on a schedule rather
+  # than on whoever opens the next pull request. A scheduled run checks and
+  # builds everything and delivers nothing.
+  schedule:
+    - cron: "0 6 * * 1,4"
+  # Releases whatever version is not yet released: how a failed release is
+  # retried.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  IMAGE: ghcr.io/radiosilence/fastmail-cli
+
+# A pull request's newer push cancels its older run; on main, a newer push
+# cancels an older one that releases nothing. A run that may release is in a
+# group of its own and is never cancelled, and nor is a manual run, which is
+# how a failed release is retried. The group is chosen before any job runs, so
+# it cannot ask `changes`. A push may release when its head commit is titled
+# `release: ` (as `just release` names its pull request) or changes
+# `Cargo.toml`: the second catches a version bump merged under any other
+# title, at the cost of also keeping a dependency change from being cancelled.
+concurrency:
+  group: "ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'workflow_dispatch' && format('dispatch-{0}', github.run_id) || (startsWith(github.event.head_commit.message, 'release: ') || contains(github.event.head_commit.modified, 'Cargo.toml')) && format('release-{0}', github.sha) || 'main' }}"
+  cancel-in-progress: "${{ github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.event.head_commit.message, 'release: ') && !contains(github.event.head_commit.modified, 'Cargo.toml')) }}"
+
+jobs:
+  # ── CI ──────────────────────────────────────────────────────────────────
+
+  changes:
+    name: Changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      docker: ${{ steps.filter.outputs.docker }}
+      changelog: ${{ steps.filter.outputs.changelog }}
+      release: ${{ steps.filter.outputs.release }}
+      version: ${{ steps.filter.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+      - id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        # The domains a change touches, from its diff. A pull request's is
+        # against its base. A push's is against the last commit on main whose
+        # run passed, so a push whose run was cancelled by the next one still
+        # reaches CD with it. A manual or scheduled run, a push with no
+        # passed run within reach, or a diff that cannot be worked out, runs
+        # everything.
+        #
+        # Allowlists, so the question is "did any source of this domain
+        # change?" rather than "was everything recognisably irrelevant?". The
+        # cost is that a new top-level directory of code is invisible here
+        # until it is added below. Markdown is documentation wherever it sits,
+        # except to the changelog, whose fragments are Markdown.
+        #
+        # Steps run under `bash -e`, where grep finding nothing is a failing
+        # command rather than an answer, so every question is asked in a
+        # condition.
+        run: |
+          rust=true docker=true changelog=true release=false
+          version_of() { sed -n 's/^version = "\(.*\)"/\1/p' | head -1; }
+          # A pull request merged or closed as its run was created: the
+          # cancelling workflow can look before this run is listed, and the
+          # run would otherwise hold runners for a change that is already in.
+          # Unanswered, it counts as open.
+          state=OPEN
+          if [ "$EVENT" = "pull_request" ]; then
+            state=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json state --jq .state 2>/dev/null || echo OPEN)
+          fi
+          # Empty when it cannot be found: then everything runs, since a
+          # narrower diff could leave a cancelled push's changes undelivered.
+          base=HEAD^1
+          if [ "$EVENT" = "push" ]; then
+            base=
+            passed=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci-cd.yml --branch main --event push \
+              --status success --limit 1 --json headSha --jq '.[0].headSha // empty' || true)
+            if [ "$passed" = "$(git rev-parse HEAD)" ]; then
+              base=HEAD^1
+            elif [ -n "$passed" ] && git fetch -q --deepen=200 origin main && git merge-base --is-ancestor "$passed" HEAD; then
+              base=$passed
+            else
+              echo "::notice::no passed run on main within reach -- running everything"
+            fi
+          fi
+          # Whether this run releases, the one answer every release job reads.
+          # A pull request: a release PR (branch `release-v*`, or a version
+          # change), which runs everything. A push to main: it changes the
+          # version (against the commit before, not the diff base) and that
+          # version is not out yet, so a push landing while a release runs does
+          # not release that version a second time. A manual
+          # run on main, which is how a failed release is
+          # retried: whatever version is not out yet. Releases rather than
+          # tags are the record of what has shipped, since consumers and
+          # update pollers read them.
+          version=$(version_of < Cargo.toml)
+          bumped=false
+          if [ "$(git show HEAD^1:Cargo.toml 2>/dev/null | version_of)" != "$version" ]; then
+            bumped=true
+          fi
+          case "$EVENT" in
+            pull_request)
+              case "$HEAD_REF" in release-v*) bumped=true ;; esac
+              release=$bumped
+              ;;
+            push|workflow_dispatch)
+              # Only a 404 means the version is not out. Any other failure
+              # stops the run: guessing either way releases twice or never.
+              if [ "$REF" = refs/heads/main ] && { [ "$EVENT" = workflow_dispatch ] || [ "$bumped" = true ]; }; then
+                if ! out=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$version" 2>&1); then
+                  if [ "$(grep -c 'HTTP 404' <<< "$out")" -gt 0 ]; then
+                    release=true
+                  else
+                    echo "::error::cannot tell whether v$version is released: $out"
+                    exit 1
+                  fi
+                fi
+              fi
+              ;;
+          esac
+          touches() { [ "$(grep -E "$1" <<< "$files" | grep -cvE '\.md$')" -gt 0 ]; }
+          if [ "$state" != "OPEN" ]; then
+            echo "pull request #$PR is no longer open -- skipping everything"
+            rust=false docker=false changelog=false release=false
+          elif [ "$release" = true ]; then
+            echo "a release -- running everything"
+          elif { [ "$EVENT" = push ] || [ "$EVENT" = pull_request ]; } && [ -n "$base" ] && files=$(git diff --name-only "$base" HEAD); then
+            echo "changes since $(git rev-parse --short "$base"):"
+            printf '%s\n' "$files" | sed 's/^/  /'
+            # Anything cargo compiles or that decides how. askama compiles
+            # templates/ into the binary.
+            touches '^src/|^templates/|^Cargo\.(toml|lock)$|^build\.rs$|^\.cargo/|^rust-toolchain|^\.github/' || rust=false
+            # The image is the Linux binaries in a runtime layer. Check already
+            # covers the code, so a pull request builds the binaries and the
+            # image only when the recipe changed; main whenever what they
+            # contain did, since CD ships them.
+            if [ "$EVENT" = "pull_request" ] || [ "$rust" = false ]; then
+              touches '^Dockerfile$|^\.github/' || docker=false
+            fi
+            [ "$(grep -cE '^changelog\.d/|^CHANGELOG\.md$|^scripts/(test_)?changelog\.py$|^\.github/' <<< "$files")" -gt 0 ] || changelog=false
+          fi
+          {
+            echo "rust=$rust"
+            echo "docker=$docker"
+            echo "changelog=$changelog"
+            echo "release=$release"
+            echo "version=$version"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  # A release cancels this repository's pull request runs, which are re-run
+  # from their page or by the next push, and main's non-release runs on
+  # commits before it, which the release supersedes, so the release's macOS
+  # build finds a runner free. Runs on later commits carry changes the release
+  # does not, and a push that changes Cargo.toml may itself release (the
+  # concurrency rule above), so both are left alone. Best effort: a run it
+  # cannot list, compare or cancel only waits longer for a runner, and the
+  # macOS build needs this job. A job of its own, so only it holds a token
+  # that can cancel runs.
+  make-room:
+    name: Make room for the release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    needs: changes
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && needs.changes.outputs.release == 'true'
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          SELF: ${{ github.run_id }}
+        run: |
+          for status in requested queued pending waiting in_progress; do
+            gh run list --repo "$GITHUB_REPOSITORY" --workflow ci-cd.yml --status "$status" --limit 100 \
+              --json databaseId,event,headBranch,headSha,displayTitle \
+              --jq '.[] | select(.event == "pull_request" or (.event == "push" and .headBranch == "main" and (.displayTitle | startswith("release: ") | not))) | "\(.databaseId) \(.event) \(.headSha)"' || true
+          done | sort -u | while read -r id event sha; do
+            [ "$id" = "$SELF" ] && continue
+            if [ "$event" = push ]; then
+              status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$sha...$GITHUB_SHA" --jq .status || true)
+              [ "$status" = ahead ] || continue
+              files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$sha" --jq '.files[].filename' || echo Cargo.toml)
+              [ "$(grep -cx Cargo.toml <<< "$files")" -eq 0 ] || continue
+            fi
+            echo "cancelling run $id"
+            gh run cancel "$id" --repo "$GITHUB_REPOSITORY" || true
+          done
+
+  check:
+    name: Check
+    runs-on: ubuntu-24.04
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - id: cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: check
+          # Branch-scoped caches aren't readable from other branches, so a PR
+          # saving here only evicts the main entry every PR restores from.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # A failing check would otherwise leave the cache unsaved.
+          cache-on-failure: true
+      - name: Check formatting
+        run: cargo fmt -- --check
+      # --all-targets so the tests are linted too. No separate `cargo build`:
+      # `cargo test` compiles the binary as well. Each check runs however an
+      # earlier one went, so one push reports every failure.
+      - name: Clippy
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Run tests
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        run: cargo test --locked
+
+  # CHANGELOG.md is generated from changelog.d/ (scripts/changelog.py). A pull
+  # request adds fragments without regenerating it, so only its fragments and
+  # the released versions are checked; one that writes CHANGELOG.md, as a
+  # release does, must write exactly what the fragments make.
+  changelog:
+    name: Changelog
+    runs-on: ubuntu-24.04
+    needs: changes
+    if: needs.changes.outputs.changelog == 'true'
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+      - run: python3 -m unittest scripts/test_changelog.py
+      - env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = "pull_request" ] && git diff --name-only HEAD^1 HEAD | grep -qx CHANGELOG.md; then
+            python3 scripts/changelog.py --check
+          else
+            python3 scripts/changelog.py --lint
+          fi
+
+  # The Linux binaries, in release, once: the image is built from them and a
+  # release attaches them. Built on the runners, each on its own architecture,
+  # with the Rust cache.
+  #
+  # The runners are pinned rather than -latest, and that is load-bearing: the
+  # image's distroless base must have at least the glibc these link against,
+  # since symbol versioning is forward-compatible only and a binary built
+  # against a newer glibc links fine and dies at exec time. cc-debian13 is
+  # 2.41, which makes 24.04 (2.39) the newest usable runner.
+  linux-build:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    needs: changes
+    if: needs.changes.outputs.docker == 'true'
+    timeout-minutes: 45
+    strategy:
+      # A transient failure on one arch shouldn't cancel the other.
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-24.04
+          - name: linux-aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: ${{ matrix.name }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      # clang and cmake are for the kreuzberg / bundled-pdfium native build.
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang cmake pkg-config
+      # Tarred, because an artifact does not keep the executable bit; the
+      # tarball is the release's download as it stands.
+      - run: |
+          cargo build --release --locked
+          tar -czvf fastmail-cli-${{ matrix.name }}.tar.gz -C target/release fastmail
+      # A release keeps its tarballs long enough for a late re-run of a failed
+      # publish to find them.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fastmail-cli-${{ matrix.name }}
+          path: fastmail-cli-${{ matrix.name }}.tar.gz
+          retention-days: ${{ needs.changes.outputs.release == 'true' && 90 || 7 }}
+
+  # The binaries above in the runtime image, run once per architecture to prove
+  # the image starts: the base supplies the loader, libc and C++ runtime that
+  # pdfium needs, which no other job checks. arm64 runs under QEMU, which costs
+  # seconds for `--version`. Pushes nothing, so it holds no token that can.
+  image:
+    name: Container image
+    runs-on: ubuntu-24.04
+    needs: [changes, linux-build]
+    if: ${{ !cancelled() && needs.linux-build.result == 'success' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: fastmail-cli-linux-*
+      - name: Stage the binaries by Docker architecture
+        run: |
+          mkdir -p dist/amd64 dist/arm64
+          tar -xzf fastmail-cli-linux-x86_64/fastmail-cli-linux-x86_64.tar.gz -C dist/amd64
+          tar -xzf fastmail-cli-linux-aarch64/fastmail-cli-linux-aarch64.tar.gz -C dist/arm64
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Smoke test
+        run: |
+          for arch in amd64 arm64; do
+            docker buildx build --platform "linux/$arch" --load -t "fastmail-smoke:$arch" -f Dockerfile dist
+            docker run --rm --platform "linux/$arch" "fastmail-smoke:$arch" --version
+          done
+
+  # The same image, multi-arch, pushed under the commit in parallel with the
+  # checks. Main only, so the token that writes packages never runs a pull
+  # request's Dockerfile. Nothing deploys a commit tag; CD moves `main`, and a
+  # release's version tags, onto it once `Checks` has passed. Retagging needs
+  # no rebuild. No layer cache: the image is one COPY onto the base.
+  image-push:
+    name: Container image (push commit)
+    runs-on: ubuntu-24.04
+    needs: [changes, linux-build]
+    if: ${{ !cancelled() && needs.linux-build.result == 'success' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: fastmail-cli-linux-*
+      - run: |
+          mkdir -p dist/amd64 dist/arm64
+          tar -xzf fastmail-cli-linux-x86_64/fastmail-cli-linux-x86_64.tar.gz -C dist/amd64
+          tar -xzf fastmail-cli-linux-aarch64/fastmail-cli-linux-aarch64.tar.gz -C dist/arm64
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        env:
+          # Would otherwise be uploaded as an artifact of this run, beside the
+          # release's tarballs.
+          DOCKER_BUILD_RECORD_UPLOAD: false
+        with:
+          context: dist
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          # Read by `image-main` to tell which commit `main` holds.
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+
+  # The one status the ruleset requires. Skipped jobs are domains the change
+  # does not touch and pass; anything failed or cancelled fails it.
+  checks:
+    name: Checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    needs: [changes, check, changelog, linux-build, image, image-push, darwin-build]
+    if: always()
+    steps:
+      - env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          bad=$(echo "$NEEDS" | jq -r 'to_entries[] | select(.value.result != "success" and .value.result != "skipped") | .key')
+          if [ -n "$bad" ]; then
+            echo "::error::not passed: ${bad//$'\n'/ }"
+            exit 1
+          fi
+
+  # ── CD ──────────────────────────────────────────────────────────────────
+  #
+  # Main only, after `Checks`. `checks` runs whatever its needs did, so every
+  # job here states the results it depends on rather than relying on the
+  # default, which would skip it whenever any job upstream was skipped.
+
+  # `main` follows the newest commit whose checks passed, which the MCP gateway
+  # runs; `sha-<short>` names it for good.
+  image-main:
+    name: Container image (main)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: [checks, image-push]
+    if: ${{ !cancelled() && needs.checks.result == 'success' && needs.image-push.result == 'success' }}
+    # One at a time across runs: two that read the tag together could both
+    # see their commit ahead, and the one finishing last would win.
+    concurrency:
+      group: image-main
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # A release run is never cancelled and can finish after a later push's
+      # run, so `main` moves only forward: not onto a commit behind the one the
+      # tag holds now, read from its revision label. Main's head is no guide,
+      # since a later push that builds no image moves it without retagging.
+      #
+      # A missing tag, a tag without the label, or a labelled commit that
+      # history no longer leads to (gone, or diverged after a force-push)
+      # retags. Any other failure is retried, then fails the job: retagging on
+      # a guess can move `main` backwards. `sha-<short>` is always tagged.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          attempt() {
+            local n
+            for n in 1 2 3; do
+              "$@" && return 0
+              sleep $((n * 10))
+            done
+            return 1
+          }
+          read_tag() {
+            if docker buildx imagetools inspect "$IMAGE:main" --format '{{json .Image}}' > tag.json 2> tag.err; then
+              current=$(jq -r '[.. | objects | .config.Labels?["org.opencontainers.image.revision"]? // empty][0] // empty' tag.json)
+            elif grep -qF "$IMAGE:main: not found" tag.err; then
+              current=
+            else
+              cat tag.err >&2
+              return 1
+            fi
+          }
+          compare() {
+            if gh api "repos/$GITHUB_REPOSITORY/compare/$current...$GITHUB_SHA" --jq .status > compare.out 2> compare.err; then
+              status=$(cat compare.out)
+            elif grep -q 'HTTP 404' compare.err; then
+              status=gone
+            else
+              cat compare.err >&2
+              return 1
+            fi
+          }
+          tags=(-t "$IMAGE:sha-${GITHUB_SHA::7}" -t "$IMAGE:main")
+          attempt read_tag || { echo "::error::cannot read $IMAGE:main"; exit 1; }
+          if [ -n "$current" ] && [ "$current" != "$GITHUB_SHA" ]; then
+            attempt compare || { echo "::error::cannot compare $current with $GITHUB_SHA"; exit 1; }
+            case "$status" in
+              ahead) ;;
+              gone|diverged) echo "::notice::main holds $current, which history no longer leads to ($status); retagging" ;;
+              *)
+                echo "::notice::main holds $current, which this commit does not descend from ($status); leaving it"
+                tags=(-t "$IMAGE:sha-${GITHUB_SHA::7}")
+                ;;
+            esac
+          fi
+          docker buildx imagetools create "${tags[@]}" "$IMAGE:$GITHUB_SHA"
+
+  # The Apple silicon binary, Developer ID signed and notarised, so the tarball
+  # runs from a browser download without clearing quarantine. Nothing here is
+  # Apple-specific and Check covers the code on Linux, so an ordinary pull
+  # request or a push that does not release never takes one of the account's
+  # few macOS runners.
+  #
+  # A release pull request builds it unsigned, so a broken macOS build fails
+  # before the version merges rather than half way through publishing it. The
+  # release itself signs and uploads it; signing is mandatory there, since the
+  # notarise action fails when its secrets are missing rather than letting an
+  # unsigned binary ship. Started by `changes` rather than after `Checks`: it
+  # is the longest job in a release and publishes nothing.
+  #
+  # Also runs on the schedule, compiling without signing or uploading, because
+  # this is the only macOS cache in the pipeline and releases are rare enough
+  # that it would otherwise always have expired by the time one goes out.
+  darwin-build:
+    name: Build (darwin-aarch64)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    needs: [changes, make-room]
+    if: ${{ !cancelled() && needs.changes.result == 'success' && (needs.changes.outputs.release == 'true' || github.event_name == 'schedule') }}
+    env:
+      SHIP: ${{ github.event_name != 'pull_request' && needs.changes.outputs.release == 'true' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: darwin-aarch64
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - run: cargo build --release --locked --target aarch64-apple-darwin
+      - name: Sign and notarise
+        if: env.SHIP == 'true'
+        uses: radiosilence/blit-workflows/macos-notarise@c8a650dfa5a0fbe012c61eab28f615c1983aee18
+        with:
+          binaries: |
+            target/aarch64-apple-darwin/release/fastmail
+          certificate-p12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          certificate-password: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          api-key-p8: ${{ secrets.APPLE_API_KEY_P8 }}
+          api-key-id: ${{ secrets.APPLE_API_KEY_ID }}
+          api-issuer-id: ${{ secrets.APPLE_API_ISSUER_ID }}
+      - if: env.SHIP == 'true'
+        run: tar -czvf fastmail-cli-darwin-aarch64.tar.gz -C target/aarch64-apple-darwin/release fastmail
+      - if: env.SHIP == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fastmail-cli-darwin-aarch64
+          path: fastmail-cli-darwin-aarch64.tar.gz
+          retention-days: 90
+
+  # The image this commit already pushed, tagged with the release's version
+  # and `latest` once every build the release ships has passed: consumers poll
+  # releases, and a tag with no release behind it, or a release with no image,
+  # is what this order and the next job's prevent. Without RELEASE_TOKEN it
+  # tags nothing and says so, and the release is skipped, since it could not
+  # follow these tags. Retagging needs no rebuild, and repeats safely.
+  image-release:
+    name: Container image (release tags)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: [changes, checks, image-push, darwin-build]
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.image-push.result == 'success' && needs.darwin-build.result == 'success' && needs.checks.result == 'success' && needs.changes.outputs.release == 'true' }}
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      ready: ${{ steps.token.outputs.ready }}
+    env:
+      VERSION: ${{ needs.changes.outputs.version }}
+      RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+    steps:
+      - id: token
+        run: |
+          if [ -n "$RELEASE_TOKEN" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::RELEASE_TOKEN is not set; skipping the release."
+          fi
+      - if: steps.token.outputs.ready == 'true'
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - if: steps.token.outputs.ready == 'true'
+        uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - if: steps.token.outputs.ready == 'true'
+        run: |
+          tags=()
+          for tag in "v$VERSION" "v${VERSION%.*}" "v${VERSION%%.*}" latest; do
+            tags+=(-t "$IMAGE:$tag")
+          done
+          docker buildx imagetools create "${tags[@]}" "$IMAGE:$GITHUB_SHA"
+
+  # Last, since a release is what consumers and update pollers act on. The
+  # action creates the tag through the API, on the commit that was built:
+  # GitHub refuses a git push of it from the workflow token for any commit
+  # that changes a workflow. A re-run finds the release and tag and fills in
+  # what is missing.
+  publish-release:
+    name: GitHub release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: [changes, linux-build, darwin-build, image-release]
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.linux-build.result == 'success' && needs.darwin-build.result == 'success' && needs.image-release.result == 'success' && needs.image-release.outputs.ready == 'true' && needs.changes.outputs.release == 'true' }}
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.changes.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: fastmail-cli-*
+          path: artifacts
+          merge-multiple: true
+      - name: Release notes
+        run: |
+          awk -v h="## $VERSION" '$0==h{f=1;next} f&&/^## /{exit} f' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          if ! grep -q . "$RUNNER_TEMP/notes.md"; then
+            echo "::error::CHANGELOG.md has no section for $VERSION"
+            exit 1
+          fi
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          token: ${{ secrets.RELEASE_TOKEN }}
+          tag_name: v${{ env.VERSION }}
+          target_commitish: ${{ github.sha }}
+          name: v${{ env.VERSION }}
+          body_path: ${{ runner.temp }}/notes.md
+          files: artifacts/*.tar.gz

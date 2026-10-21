@@ -1,33 +1,15 @@
 # fastmail-cli as a container. Default command runs the MCP server over HTTP —
 # this is the image the mcp-gateway proxies to as a backend (token per request
 # via X-Fastmail-Token).
-
-# Selects which stage supplies the binary. Must be declared before the first
-# FROM to be usable in one. `docker build .` compiles from source as it always
-# did; CI passes prebuilt to reuse the binary the release matrix already built,
-# rather than compiling the crate a second time in here.
-ARG BIN_SOURCE=source
-
-# Build deps (clang/cmake) are for the kreuzberg / bundled-pdfium native build.
-FROM rust:1-bookworm AS builder
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    clang cmake pkg-config \
-    && rm -rf /var/lib/apt/lists/*
-WORKDIR /app
-COPY . .
-RUN cargo build --release --locked && cp target/release/fastmail /fastmail
-
-FROM scratch AS bin-source
-COPY --from=builder /fastmail /fastmail
-
-FROM scratch AS bin-prebuilt
-COPY dist/fastmail /fastmail
-
-# Indirection through a stage is required: --from takes no variable expansion,
-# only FROM does. BuildKit then only builds the stage this resolves to, so
-# bin-prebuilt never looks for dist/ on a source build and the Rust builder
-# never runs on a prebuilt one.
-FROM bin-${BIN_SOURCE} AS bin
+#
+# The image holds the release binaries CI built; nothing is compiled here. The
+# build context is a directory holding `<arch>/fastmail` for each Docker
+# architecture (amd64, arm64), which CI stages from the `linux-build`
+# tarballs. To build one locally:
+#
+#   cargo build --release --locked
+#   mkdir -p dist/amd64 && cp target/release/fastmail dist/amd64/
+#   docker build --platform linux/amd64 -f Dockerfile dist
 
 # Distroless rather than a distro base: the binary is the only thing this image
 # needs to contain, so there is no shell, no package manager and no apt layer.
@@ -44,15 +26,16 @@ FROM bin-${BIN_SOURCE} AS bin
 #
 # glibc invariant: whatever builds the binary must be no newer than this base.
 # Symbol versioning is forward-compatible only, so a binary linked against a
-# newer glibc builds fine and dies at exec time. cc-debian13 is trixie, 2.41 —
-# comfortably above the ubuntu-24.04 runners CI builds on (2.39) and the
-# bookworm source path above (2.36). Bumping either end means re-checking both.
-# Note cc-debian12 is 2.36 and would not clear the runners.
+# newer glibc builds fine and dies at exec time. cc-debian13 is trixie, 2.41,
+# above the ubuntu-24.04 runners CI builds on (2.39). Bumping either end means
+# re-checking both. cc-debian12 is 2.36 and would not clear the runners.
 FROM gcr.io/distroless/cc-debian13
+
+ARG TARGETARCH
 
 # Absolute, not a bare name: there is no shell here to fall back on for PATH
 # resolution.
-COPY --from=bin /fastmail /usr/local/bin/fastmail
+COPY ${TARGETARCH}/fastmail /usr/local/bin/fastmail
 
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/fastmail"]
