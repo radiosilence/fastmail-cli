@@ -1,7 +1,8 @@
 # fastmail-cli — CLI and MCP server for Fastmail's JMAP API
 
-# What CI checks: format, lint with warnings as errors, tests.
+# What CI checks: format, lint with warnings as errors, tests, workflow lint.
 check:
+    actionlint
     cargo fmt -- --check
     cargo clippy --all-targets --locked -- -D warnings
     cargo test --locked
