@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.7.4
+
+### Security
+
+- **tokio 1.54.1.** Fixes a race condition in `tokio::time::Interval` (RUSTSEC-2026-0384), along with compatible updates to other dependencies. kreuzberg's open-ended `zip` requirement stays on zip 8, since it does not build against zip 9.
+
+### Internal
+
+- **Workflow lint.** CI runs actionlint, with shellcheck, over `.github/workflows/` and `.github/actions/` when they change; `just check` runs it locally.
+
 ## 3.7.3
 
 ### Security
