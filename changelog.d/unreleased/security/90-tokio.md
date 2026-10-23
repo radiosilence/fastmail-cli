@@ -1,0 +1,1 @@
+- **tokio 1.54.1.** Fixes a race condition in `tokio::time::Interval` (RUSTSEC-2026-0384), along with compatible updates to other dependencies. kreuzberg's open-ended `zip` requirement stays on zip 8, since it does not build against zip 9.

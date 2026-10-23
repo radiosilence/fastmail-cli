@@ -67,6 +67,7 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       docker: ${{ steps.filter.outputs.docker }}
       changelog: ${{ steps.filter.outputs.changelog }}
+      workflows: ${{ steps.filter.outputs.workflows }}
       release: ${{ steps.filter.outputs.release }}
       version: ${{ steps.filter.outputs.version }}
     steps:
@@ -97,7 +98,7 @@ jobs:
         # command rather than an answer, so every question is asked in a
         # condition.
         run: |
-          rust=true docker=true changelog=true release=false
+          rust=true docker=true changelog=true workflows=true release=false
           version_of() { sed -n 's/^version = "\(.*\)"/\1/p' | head -1; }
           # A pull request merged or closed as its run was created: the
           # cancelling workflow can look before this run is listed, and the
@@ -160,7 +161,7 @@ jobs:
           touches() { [ "$(grep -E "$1" <<< "$files" | grep -cvE '\.md$')" -gt 0 ]; }
           if [ "$state" != "OPEN" ]; then
             echo "pull request #$PR is no longer open -- skipping everything"
-            rust=false docker=false changelog=false release=false
+            rust=false docker=false changelog=false workflows=false release=false
           elif [ "$release" = true ]; then
             echo "a release -- running everything"
           elif { [ "$EVENT" = push ] || [ "$EVENT" = pull_request ]; } && [ -n "$base" ] && files=$(git diff --name-only "$base" HEAD); then
@@ -176,12 +177,14 @@ jobs:
             if [ "$EVENT" = "pull_request" ] || [ "$rust" = false ]; then
               touches '^Dockerfile$|^\.github/' || docker=false
             fi
+            touches '^\.github/(workflows|actions)/' || workflows=false
             [ "$(grep -cE '^changelog\.d/|^CHANGELOG\.md$|^scripts/(test_)?changelog\.py$|^\.github/' <<< "$files")" -gt 0 ] || changelog=false
           fi
           {
             echo "rust=$rust"
             echo "docker=$docker"
             echo "changelog=$changelog"
+            echo "workflows=$workflows"
             echo "release=$release"
             echo "version=$version"
           } | tee -a "$GITHUB_OUTPUT"
@@ -281,6 +284,17 @@ jobs:
           else
             python3 scripts/changelog.py --lint
           fi
+
+  actionlint:
+    name: Actionlint
+    runs-on: ubuntu-24.04
+    needs: changes
+    if: needs.changes.outputs.workflows == 'true'
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The image bundles shellcheck, which checks the `run:` scripts.
+      - run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -color
 
   # The Linux binaries, in release, once: the image is built from them and a
   # release attaches them. Built on the runners, each on its own architecture,
@@ -410,7 +424,7 @@ jobs:
     name: Checks
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    needs: [changes, check, changelog, linux-build, image, image-push, darwin-build]
+    needs: [changes, check, changelog, actionlint, linux-build, image, image-push, darwin-build]
     if: always()
     steps:
       - env:
