@@ -16,4 +16,8 @@ ignore = [
   # compile time only and has no known vulnerability. Remove once biblatex
   # drops it.
   "RUSTSEC-2024-0436",
+  # basic-toml is read at compile time by askama_derive for askama.toml, which
+  # this repository does not have. askama-rs/askama#771 replaced it with toml
+  # after 0.16.1; remove once that is released.
+  "RUSTSEC-2026-0374",
 ]

@@ -1,1 +1,0 @@
-- **Dropped askama.** The GraphiQL page interpolated two constants, so it is now embedded with `include_str!`, which removes the unmaintained `basic-toml` from the build. `cargo audit` ignores the unreachable `lru` advisory and the compile-time `paste` one, each with its reason in `.cargo/audit.toml`.

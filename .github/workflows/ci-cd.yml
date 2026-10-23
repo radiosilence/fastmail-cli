@@ -167,8 +167,8 @@ jobs:
           elif { [ "$EVENT" = push ] || [ "$EVENT" = pull_request ]; } && [ -n "$base" ] && files=$(git diff --name-only "$base" HEAD); then
             echo "changes since $(git rev-parse --short "$base"):"
             printf '%s\n' "$files" | sed 's/^/  /'
-            # Anything cargo compiles or that decides how. The binary embeds
-            # templates/ with include_str!.
+            # Anything cargo compiles or that decides how. askama compiles
+            # templates/ into the binary.
             touches '^src/|^templates/|^Cargo\.(toml|lock)$|^build\.rs$|^\.cargo/|^rust-toolchain|^\.github/' || rust=false
             # The image is the Linux binaries in a runtime layer. Check already
             # covers the code, so a pull request builds the binaries and the

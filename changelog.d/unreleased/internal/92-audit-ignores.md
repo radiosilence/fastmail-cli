@@ -1,0 +1,1 @@
+- **cargo audit ignores.** `basic-toml` (compile-time, via askama, fixed upstream but unreleased), `lru` (only reached through async-graphql's unused `LruCache`) and `paste` (compile-time, via kreuzberg) are ignored with their reasons in `.cargo/audit.toml`.
