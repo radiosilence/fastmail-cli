@@ -1,6 +1,6 @@
 <!--
   GraphiQL 5, tracking the official CDN example (graphql/graphiql,
-  examples/graphiql-cdn) with the endpoint and title supplied by the server.
+  examples/graphiql-cdn) served as-is at `/`, posting to `/graphql`.
 
   Versions are pinned and carry SRI hashes, so bumping one means taking the
   matching hash from upstream rather than editing the version in place.
@@ -10,7 +10,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>{{ title }}</title>
+    <title>Fastmail GraphQL</title>
     <style>
       body {
         margin: 0;
@@ -80,7 +80,7 @@
       import { explorerPlugin } from '@graphiql/plugin-explorer';
       import 'graphiql/setup-workers/esm.sh';
 
-      const fetcher = createGraphiQLFetcher({ url: '{{ endpoint }}' });
+      const fetcher = createGraphiQLFetcher({ url: '/graphql' });
       const plugins = [HISTORY_PLUGIN, explorerPlugin()];
 
       function App() {

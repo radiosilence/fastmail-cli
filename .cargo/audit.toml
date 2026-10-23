@@ -1,10 +1,19 @@
 [advisories]
-# zip 8.x reaches the build only through kreuzberg -> calamine, which reads
-# spreadsheet entries into memory and never calls ZipArchive::extract or
-# ZipStreamReader::extract, the APIs these advisories concern. Remove once
-# kreuzberg moves to a calamine release built on zip 9.
 ignore = [
+  # zip 8.x reaches the build only through kreuzberg -> calamine, which reads
+  # spreadsheet entries into memory and never calls ZipArchive::extract or
+  # ZipStreamReader::extract, the APIs these advisories concern. Remove once
+  # kreuzberg moves to a calamine release built on zip 9.
   "RUSTSEC-2026-0367",
   "RUSTSEC-2026-0368",
   "RUSTSEC-2026-0369",
+  # lru 0.16 reaches the build only through async-graphql's dataloader, which
+  # uses it solely for dataloader::LruCache. The loaders use HashMapCache and
+  # NoCache, so LruCache::pop is never reached. Remove once async-graphql
+  # depends on lru >= 0.18.2.
+  "RUSTSEC-2026-0253",
+  # paste is a proc-macro reached through kreuzberg -> biblatex; it runs at
+  # compile time only and has no known vulnerability. Remove once biblatex
+  # drops it.
+  "RUSTSEC-2024-0436",
 ]

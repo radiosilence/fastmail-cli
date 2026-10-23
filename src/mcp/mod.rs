@@ -413,13 +413,8 @@ struct HttpGraphqlRequest {
 }
 
 /// The GraphiQL IDE page. GraphiQL itself is loaded from a CDN with pinned
-/// versions and SRI hashes — see `templates/graphiql.html`.
-#[derive(askama::Template)]
-#[template(path = "graphiql.html")]
-struct GraphiqlPage<'a> {
-    title: &'a str,
-    endpoint: &'a str,
-}
+/// versions and SRI hashes.
+const GRAPHIQL_PAGE: &str = include_str!("../../templates/graphiql.html");
 
 /// Whether every top-level selection is an introspection field, and so can be
 /// answered from the schema alone.
@@ -606,18 +601,9 @@ pub async fn run_http_server(addr: &str, surfaces: HttpSurfaces) -> anyhow::Resu
     }
 
     if surfaces.graphiql {
-        // Rendered once: nothing in the page varies per request, and a template
-        // error should stop the server rather than 500 on every hit.
-        let ide = askama::Template::render(&GraphiqlPage {
-            title: "Fastmail GraphQL",
-            endpoint: "/graphql",
-        })?;
         router = router.route(
             "/",
-            axum::routing::get(move || {
-                let ide = ide.clone();
-                async move { axum::response::Html(ide) }
-            }),
+            axum::routing::get(|| async { axum::response::Html(GRAPHIQL_PAGE) }),
         );
         tracing::info!("GraphiQL IDE on http://{addr}/");
     }
