@@ -18,13 +18,13 @@ A CLI for Fastmail over JMAP (email) and CardDAV (contacts), installed as the `f
 
 ## CI/CD
 
-`.github/workflows/ci-cd.yml` is one pipeline: CI checks the change and ends in the `Checks` job, which is the only status the ruleset requires; CD runs on main after `Checks` passes and ships what CI built. The `changes` job decides from the diff which domains a change touches, and each CI job runs only for its domain, so a skipped job is expected and passes `Checks` (a failed or cancelled one fails it). The domains are `rust` (`src/`, `templates/`, the Cargo files; runs Check), `docker` (the Linux release binaries and the image: on a pull request when `Dockerfile` changes, on main whenever `rust` does, since CD ships them) and `changelog`. Changes under `.github/`, a release, a manual run and the twice-weekly cache-warming schedule run every domain. A pull request diffs against its base; a push to main against the last main commit whose run passed, and runs everything when that commit cannot be found. To add a domain, add an output and its path allowlist to `changes`, gate the new job on it with a job-level `if:`, and add the job to the `needs` of `Checks`; a new top-level source directory is invisible until it is in an allowlist.
+`.github/workflows/ci-cd.yml` is one pipeline: CI checks the change and ends in the `Checks` job, which is the only status the ruleset requires; CD runs on main after `Checks` passes and ships what CI built. The `changes` job decides from the diff which domains a change touches, and each CI job runs only for its domain, so a skipped job is expected and passes `Checks` (a failed or cancelled one fails it). The domains are `rust` (`src/`, `templates/`, the Cargo files; runs Check), `docker` (the Linux release binaries and the image: on a pull request when `Dockerfile` changes, on main whenever `rust` does, since CD ships them), `changelog` and `workflows` (`.github/workflows/`, `.github/actions/`; runs actionlint). Changes under `.github/`, a release, a manual run and the twice-weekly cache-warming schedule run every domain. A pull request diffs against its base; a push to main against the last main commit whose run passed, and runs everything when that commit cannot be found. To add a domain, add an output and its path allowlist to `changes`, gate the new job on it with a job-level `if:`, and add the job to the `needs` of `Checks`; a new top-level source directory is invisible until it is in an allowlist.
 
 The Linux binaries are built once, on `ubuntu-24.04` and `ubuntu-24.04-arm`, and the image only copies them in, so a local `docker build` needs them staged first (see the `Dockerfile`). CI pushes the image under the commit SHA on main; CD moves `main` and `sha-<short>` onto it, and a release adds the version tags and `latest` before the GitHub release attaches the same tarballs. The macOS binary builds only on release pull requests (unsigned) and releases (signed and notarised).
 
 ## Check
 
 ```sh
-just check   # fmt --check, clippy -D warnings, tests
+just check   # actionlint, fmt --check, clippy -D warnings, tests
 just fmt
 ```
