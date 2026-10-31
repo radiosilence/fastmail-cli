@@ -25,6 +25,14 @@ pub const MIN_POLL: Duration = Duration::from_secs(10);
 /// server is not asked again at full rate.
 const FAILURE_BACKOFF_MAX: Duration = Duration::from_secs(300);
 
+/// Attempts at one page before it is given up on. Without a limit, a page that
+/// can never be fetched, such as one too large to arrive within the request
+/// timeout, would hold the cursor still and stop every later arrival.
+const MAX_PAGE_ATTEMPTS: u32 = 5;
+
+/// Emails per `Email/get` when fetching bodies, which can be megabytes each.
+const FULL_FETCH_CHUNK: usize = 10;
+
 /// Reconnect backoff bounds. The ceiling is deliberately small: a watcher that
 /// goes quiet for minutes after a blip is indistinguishable from a broken one.
 const BACKOFF_START: u64 = 1;
@@ -114,6 +122,12 @@ impl ArrivalWatcher {
     /// blip is useless in the loop it exists to feed.
     pub async fn next_arrivals(&mut self) -> Result<Arrivals> {
         if self.failures > 0 {
+            // An unread push connection is worse than none: reqwest's read
+            // timeout keeps running while nobody polls it, so the first read
+            // after a long pause fails. Reopen it afterwards instead.
+            if let Wake::Push { stream, .. } = &mut self.wake {
+                *stream = None;
+            }
             // Retry the read after a pause; the cursor has not moved, so
             // nothing is lost by not waiting for a wake-up first.
             let exponent = (self.failures - 1).min(16);
@@ -252,30 +266,48 @@ impl ArrivalWatcher {
             }
         };
 
+        // A server that claims more but has not moved the state would be read
+        // forever without a pause.
+        let more = changes.has_more && changes.new_state != self.state;
         if changes.created.is_empty() {
-            self.advance(changes.new_state, changes.has_more);
+            self.advance(changes.new_state, more);
             return Ok(Arrivals::none());
         }
 
-        let fetched = if self.full {
-            client.get_emails(&changes.created).await
+        let mut emails = Vec::with_capacity(changes.created.len());
+        let chunk = if self.full {
+            FULL_FETCH_CHUNK
         } else {
-            client.get_email_summaries(&changes.created).await
+            changes.created.len()
         };
-
-        let mut emails = match fetched {
-            Ok(emails) => emails,
-            Err(e) if is_fatal(&e) => return Err(e),
-            Err(e) => {
-                debug!(
-                    "Could not fetch {} new email(s) ({e})",
-                    changes.created.len()
-                );
-                self.failures += 1;
-                return Ok(Arrivals::none());
+        for ids in changes.created.chunks(chunk) {
+            let fetched = if self.full {
+                client.get_emails(ids).await
+            } else {
+                client.get_email_summaries(ids).await
+            };
+            match fetched {
+                Ok(batch) => emails.extend(batch),
+                Err(e) if is_fatal(&e) => return Err(e),
+                Err(e) if self.failures + 1 >= MAX_PAGE_ATTEMPTS => {
+                    tracing::warn!(
+                        "Giving up on {} new email(s) after {MAX_PAGE_ATTEMPTS} attempts ({e})",
+                        changes.created.len()
+                    );
+                    self.advance(changes.new_state, more);
+                    return Ok(Arrivals::none());
+                }
+                Err(e) => {
+                    debug!(
+                        "Could not fetch {} new email(s) ({e})",
+                        changes.created.len()
+                    );
+                    self.failures += 1;
+                    return Ok(Arrivals::none());
+                }
             }
-        };
-        self.advance(changes.new_state, changes.has_more);
+        }
+        self.advance(changes.new_state, more);
 
         emails.retain(|email| in_mailbox(email, self.mailbox_id.as_deref()));
         // `Email/get` makes no ordering guarantee, and a stream reads
