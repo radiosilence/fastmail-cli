@@ -10,7 +10,7 @@ use async_graphql::{Context, Result, Subscription};
 use std::time::Duration;
 
 use super::SharedClient;
-use super::loaders::to_gql_error;
+use super::loaders::{Emails, Identities, Mailboxes, MaskedEmails, Threads, to_gql_error};
 use super::types::GqlEmail;
 use crate::jmap::ArrivalWatcher;
 use std::sync::Arc;
@@ -37,10 +37,8 @@ impl SubscriptionRoot {
     /// Transient failures are retried internally and never reach the
     /// subscriber. The stream ends only when the token stops authenticating.
     ///
-    /// Set `full` to select body and attachment fields. Unlike a query, a
-    /// subscription has no request boundary at which the batching loaders
-    /// reset, so leaving it off and selecting `textBody` anyway resolves each
-    /// email through a loader that lives as long as the subscription.
+    /// Set `full` to select body and attachment fields; leaving it off and
+    /// selecting `textBody` anyway costs a fetch per arrival.
     async fn emails(
         &self,
         ctx: &Context<'_>,
@@ -53,11 +51,22 @@ impl SubscriptionRoot {
         full: bool,
         #[graphql(
             desc = "Check on this interval instead of holding a push connection open. For \
-                    networks that will not keep one alive; the results are the same."
+                    networks that will not keep one alive; the results are the same. At least 10."
         )]
         poll_seconds: Option<u64>,
     ) -> Result<impl Stream<Item = Result<GqlEmail>> + use<>> {
         let client = ctx.data::<SharedClient>()?.clone();
+
+        // A subscription is one request for as long as it runs, so the
+        // request-scoped loader caches would keep every email, thread and
+        // mailbox list resolved for it until the client disconnects, and
+        // serve a mailbox list from when it connected. Batching within one
+        // arrival still applies.
+        ctx.data::<Emails>()?.enable_all_cache(false);
+        ctx.data::<Mailboxes>()?.enable_all_cache(false);
+        ctx.data::<Identities>()?.enable_all_cache(false);
+        ctx.data::<MaskedEmails>()?.enable_all_cache(false);
+        ctx.data::<Threads>()?.enable_all_cache(false);
 
         let watcher = ArrivalWatcher::new(
             client,
