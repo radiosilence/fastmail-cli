@@ -1,0 +1,1 @@
+- **`watch` and the `emails` subscription no longer lose mail after a failed fetch.** The cursor now moves only once the new mail is in hand, a backlog is read a page at a time, and failures back off instead of retrying at full rate. Polling has a 10 second minimum. A long-running subscription no longer keeps every email it has emitted in memory.

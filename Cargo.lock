@@ -1552,6 +1552,7 @@ dependencies = [
  "reqwest",
  "rmcp",
  "roxmltree",
+ "rustix",
  "schemars",
  "serde",
  "serde_json",

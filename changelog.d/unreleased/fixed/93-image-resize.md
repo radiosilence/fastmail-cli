@@ -1,0 +1,1 @@
+- **Image resizing no longer blocks other requests, and handles transparency.** PNGs with an alpha channel resize instead of failing, and the result fits `maxBytes` or fails with the reason.

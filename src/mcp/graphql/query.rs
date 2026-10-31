@@ -151,6 +151,7 @@ impl QueryRoot {
             .ok_or_else(|| async_graphql::Error::new(format!("Email {email_id} not found")))?;
         let thread_id = email
             .thread_id
+            .clone()
             .ok_or_else(|| async_graphql::Error::new("Email has no thread ID"))?;
         GqlThread::load(ctx, thread_id).await
     }
