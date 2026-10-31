@@ -51,7 +51,7 @@ impl SubscriptionRoot {
         full: bool,
         #[graphql(
             desc = "Check on this interval instead of holding a push connection open. For \
-                    networks that will not keep one alive; the results are the same."
+                    networks that will not keep one alive; the results are the same. At least 10."
         )]
         poll_seconds: Option<u64>,
     ) -> Result<impl Stream<Item = Result<GqlEmail>> + use<>> {

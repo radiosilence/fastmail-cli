@@ -72,6 +72,10 @@ pub struct ArrivalWatcher {
     more: bool,
     /// Consecutive failed reads, which set the backoff before the next one.
     failures: u32,
+    /// Failed fetches of the current page's mail. Counted apart from
+    /// `failures`, which also counts failures to read changes at all, so a
+    /// page is given up on only after its own fetch has failed repeatedly.
+    page_attempts: u32,
 }
 
 impl ArrivalWatcher {
@@ -101,6 +105,7 @@ impl ArrivalWatcher {
             full,
             more: false,
             failures: 0,
+            page_attempts: 0,
             wake: match poll {
                 Some(interval) => Wake::Poll(interval.max(MIN_POLL)),
                 None => Wake::Push {
@@ -121,17 +126,26 @@ impl ArrivalWatcher {
     /// is retried internally with backoff, because a watcher that exits on one
     /// blip is useless in the loop it exists to feed.
     pub async fn next_arrivals(&mut self) -> Result<Arrivals> {
-        if self.failures > 0 {
+        if self.failures > 0 || self.more {
             // An unread push connection is worse than none: reqwest's read
             // timeout keeps running while nobody polls it, so the first read
-            // after a long pause fails. Reopen it afterwards instead.
+            // after a pause or a long backlog fails. Reopen it afterwards.
             if let Wake::Push { stream, .. } = &mut self.wake {
                 *stream = None;
             }
+        }
+        if self.failures > 0 {
             // Retry the read after a pause; the cursor has not moved, so
-            // nothing is lost by not waiting for a wake-up first.
+            // nothing is lost by not waiting for a wake-up first. Never sooner
+            // than a poll would have come anyway.
             let exponent = (self.failures - 1).min(16);
-            let delay = Duration::from_secs(1 << exponent).min(FAILURE_BACKOFF_MAX);
+            let floor = match self.wake {
+                Wake::Poll(interval) => interval,
+                Wake::Push { .. } => Duration::ZERO,
+            };
+            let delay = Duration::from_secs(1 << exponent)
+                .max(floor)
+                .min(FAILURE_BACKOFF_MAX);
             tokio::time::sleep(delay).await;
         } else if !self.more {
             self.wait().await?;
@@ -289,13 +303,13 @@ impl ArrivalWatcher {
             match fetched {
                 Ok(batch) => emails.extend(batch),
                 Err(e) if is_fatal(&e) => return Err(e),
-                Err(e) if self.failures + 1 >= MAX_PAGE_ATTEMPTS => {
+                Err(e) if self.page_attempts + 1 >= MAX_PAGE_ATTEMPTS => {
+                    // Deliver what did arrive, and skip only the rest.
                     tracing::warn!(
                         "Giving up on {} new email(s) after {MAX_PAGE_ATTEMPTS} attempts ({e})",
-                        changes.created.len()
+                        changes.created.len() - emails.len()
                     );
-                    self.advance(changes.new_state, more);
-                    return Ok(Arrivals::none());
+                    break;
                 }
                 Err(e) => {
                     debug!(
@@ -303,6 +317,7 @@ impl ArrivalWatcher {
                         changes.created.len()
                     );
                     self.failures += 1;
+                    self.page_attempts += 1;
                     return Ok(Arrivals::none());
                 }
             }
@@ -326,6 +341,7 @@ impl ArrivalWatcher {
         self.state = state;
         self.more = more;
         self.failures = 0;
+        self.page_attempts = 0;
     }
 }
 
@@ -400,5 +416,118 @@ mod tests {
             backoff, BACKOFF_MAX,
             "backoff must not grow past the ceiling"
         );
+    }
+
+    mod drain {
+        use super::*;
+        use wiremock::matchers::{body_string_contains, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        fn reply(name: &str, args: serde_json::Value) -> ResponseTemplate {
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "methodResponses": [[name, args, "x"]],
+                "sessionState": "s"
+            }))
+        }
+
+        /// A server at state `s0` with one new email, `e1`, at `s1`, whose
+        /// `Email/get` fails `failures` times before it succeeds.
+        async fn server(failures: u64) -> MockServer {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(body_string_contains(r#""ids":[]"#))
+                .respond_with(reply(
+                    "Email/get",
+                    serde_json::json!({"state": "s0", "list": []}),
+                ))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(body_string_contains("Email/changes"))
+                .respond_with(reply(
+                    "Email/changes",
+                    serde_json::json!({
+                        "oldState": "s0", "newState": "s1", "hasMoreChanges": false,
+                        "created": ["e1"], "updated": [], "destroyed": []
+                    }),
+                ))
+                .mount(&server)
+                .await;
+            if failures > 0 {
+                Mock::given(method("POST"))
+                    .and(body_string_contains(r#""e1""#))
+                    .respond_with(ResponseTemplate::new(503))
+                    .up_to_n_times(failures)
+                    .with_priority(1)
+                    .mount(&server)
+                    .await;
+            }
+            Mock::given(method("POST"))
+                .and(body_string_contains(r#""e1""#))
+                .respond_with(reply(
+                    "Email/get",
+                    serde_json::json!({"state": "s1", "list": [{"id": "e1", "mailboxIds": {}}]}),
+                ))
+                .mount(&server)
+                .await;
+            server
+        }
+
+        async fn watcher(server: &MockServer) -> ArrivalWatcher {
+            let client = std::sync::Arc::new(JmapClient::with_test_session(&format!(
+                "{}/jmap",
+                server.uri()
+            )));
+            ArrivalWatcher::new(client, None, false, Some(MIN_POLL))
+                .await
+                .unwrap()
+        }
+
+        #[tokio::test]
+        async fn a_failed_fetch_leaves_the_cursor_for_the_next_read() {
+            let server = server(1).await;
+            let mut watcher = watcher(&server).await;
+
+            let first = watcher.drain().await.unwrap();
+            assert!(first.emails.is_empty());
+            assert_eq!(
+                watcher.state, "s0",
+                "the cursor must not pass unfetched mail"
+            );
+
+            let second = watcher.drain().await.unwrap();
+            assert_eq!(second.emails.len(), 1);
+            assert_eq!(watcher.state, "s1");
+        }
+
+        #[tokio::test]
+        async fn a_page_that_never_fetches_is_skipped_after_its_attempts() {
+            let server = server(u64::MAX).await;
+            let mut watcher = watcher(&server).await;
+
+            for _ in 1..MAX_PAGE_ATTEMPTS {
+                watcher.drain().await.unwrap();
+                assert_eq!(watcher.state, "s0");
+            }
+            watcher.drain().await.unwrap();
+            assert_eq!(
+                watcher.state, "s1",
+                "a page that never fetches must not wedge the watcher"
+            );
+        }
+
+        #[tokio::test]
+        async fn failures_to_read_changes_do_not_count_against_the_page() {
+            let server = server(1).await;
+            let mut watcher = watcher(&server).await;
+            // As though an outage had already failed several reads.
+            watcher.failures = MAX_PAGE_ATTEMPTS;
+
+            watcher.drain().await.unwrap();
+            assert_eq!(
+                watcher.state, "s0",
+                "one fetch failure must not skip the page"
+            );
+        }
     }
 }
