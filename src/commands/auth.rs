@@ -4,7 +4,7 @@ use crate::models::Output;
 use std::io::{self, BufRead, IsTerminal, Write};
 
 pub async fn auth(token: &str) -> anyhow::Result<()> {
-    let mut client = JmapClient::new(token.to_string());
+    let client = JmapClient::new(token.to_string());
     let session = client.authenticate().await?;
 
     let mut config = Config::load()?;

@@ -320,7 +320,6 @@ pub async fn emails_connection(
             };
 
             let client = ctx.data::<SharedClient>()?;
-            let client = client.lock().await;
 
             let page = client
                 .query_emails(EmailQuery {

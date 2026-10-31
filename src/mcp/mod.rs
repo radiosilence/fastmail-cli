@@ -54,9 +54,9 @@ async fn client_for(cache: &ClientCache, token: &str) -> anyhow::Result<SharedCl
     }
     // Authenticate outside the cache lock so concurrent callers for other
     // tokens aren't blocked on this network round-trip.
-    let mut client = JmapClient::new(token.to_string());
+    let client = JmapClient::new(token.to_string());
     client.authenticate().await?;
-    let shared: SharedClient = Arc::new(Mutex::new(client));
+    let shared: SharedClient = Arc::new(client);
 
     // Re-check under lock: another caller may have inserted meanwhile.
     Ok(cache
@@ -859,7 +859,7 @@ mod tests {
         mcp.clients
             .lock()
             .await
-            .insert("fake-token".to_string(), Arc::new(Mutex::new(client)));
+            .insert("fake-token".to_string(), Arc::new(client));
 
         let req = HttpGraphqlRequest {
             query: "{ session { status } }".to_string(),
