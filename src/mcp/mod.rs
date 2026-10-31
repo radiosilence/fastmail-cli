@@ -583,7 +583,7 @@ pub async fn run_http_server(addr: &str, surfaces: HttpSurfaces) -> anyhow::Resu
 
     // Installed before anything slow, so a SIGTERM during start-up is not lost:
     // as PID 1 it would otherwise be ignored.
-    let signal = shutdown_signal()?;
+    let mut signals = ShutdownSignals::install()?;
 
     // One shared instance (shared schema + client cache) cloned into each session
     // and used as the axum state for the GraphQL routes.
@@ -594,9 +594,11 @@ pub async fn run_http_server(addr: &str, surfaces: HttpSurfaces) -> anyhow::Resu
     // (localhost/127.0.0.1/::1) would reject with 403. Rebinding protection
     // guards browsers hitting a localhost MCP directly — irrelevant for a
     // proxied, non-browser-facing backend; the proxy is the security boundary.
-    let config = StreamableHttpServerConfig::default()
-        .disable_allowed_hosts()
-        .with_cancellation_token(mcp.shutdown.clone());
+    //
+    // rmcp is deliberately not handed the shutdown token: cancelling it aborts
+    // tool calls in flight at once. Its sessions instead end with the process,
+    // so a tool call gets the same grace period as any other request.
+    let config = StreamableHttpServerConfig::default().disable_allowed_hosts();
     let service = StreamableHttpService::new(
         {
             let template = mcp.clone();
@@ -648,17 +650,14 @@ pub async fn run_http_server(addr: &str, surfaces: HttpSurfaces) -> anyhow::Resu
     }
 
     let shutdown = mcp.shutdown.clone();
-    tokio::spawn({
-        let shutdown = shutdown.clone();
-        async move {
-            signal.await;
-            tracing::info!("Shutting down");
-            shutdown.cancel();
-            // A second Ctrl-C skips the grace period.
-            if tokio::signal::ctrl_c().await.is_ok() {
-                std::process::exit(130);
-            }
-        }
+    let on_signal = shutdown.clone();
+    tokio::spawn(async move {
+        signals.recv().await;
+        tracing::info!("Shutting down");
+        on_signal.cancel();
+        // A second signal skips the grace period.
+        signals.recv().await;
+        std::process::exit(130);
     });
 
     let serve = axum::serve(listener, router.with_state(mcp))
@@ -680,33 +679,46 @@ pub async fn run_http_server(addr: &str, surfaces: HttpSurfaces) -> anyhow::Resu
 /// 10 seconds Docker and Kubernetes allow by default before SIGKILL.
 const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(8);
 
-/// Resolves on SIGTERM or Ctrl-C. The SIGTERM handler is registered when this
-/// is called, not when the future is first polled.
+/// SIGTERM and SIGINT, registered when installed rather than when first
+/// awaited.
 ///
 /// The image runs this binary as PID 1, and the kernel gives PID 1 no default
-/// action for SIGTERM. Without a handler, `docker stop` waits out its whole
-/// timeout and then kills the server mid-request.
-fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {
+/// action for either signal. Without handlers, `docker stop` waits out its
+/// whole timeout and then kills the server mid-request, and Ctrl-C under
+/// `docker run -it` does nothing.
+struct ShutdownSignals {
     #[cfg(unix)]
-    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    Ok(async move {
-        let ctrl_c = async {
-            // An error means no Ctrl-C can arrive, not that one did.
-            if tokio::signal::ctrl_c().await.is_err() {
-                std::future::pending::<()>().await;
-            }
-        };
+    term: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    int: tokio::signal::unix::Signal,
+}
+
+impl ShutdownSignals {
+    fn install() -> std::io::Result<Self> {
         #[cfg(unix)]
-        let term = async {
-            term.recv().await;
-        };
-        #[cfg(not(unix))]
-        let term = std::future::pending::<()>();
-        tokio::select! {
-            () = ctrl_c => {}
-            () = term => {}
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            Ok(Self {
+                term: signal(SignalKind::terminate())?,
+                int: signal(SignalKind::interrupt())?,
+            })
         }
-    })
+        #[cfg(not(unix))]
+        Ok(Self {})
+    }
+
+    /// The next SIGTERM or SIGINT.
+    async fn recv(&mut self) {
+        #[cfg(unix)]
+        tokio::select! {
+            _ = self.term.recv() => {}
+            _ = self.int.recv() => {}
+        }
+        #[cfg(not(unix))]
+        if tokio::signal::ctrl_c().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
 }
 
 #[cfg(test)]
