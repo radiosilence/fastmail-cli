@@ -14,7 +14,7 @@ pub struct WatchOptions {
 /// Stream newly arrived emails as newline-delimited JSON, one object per line,
 /// until interrupted.
 pub async fn watch(opts: WatchOptions) -> anyhow::Result<()> {
-    let client = std::sync::Arc::new(tokio::sync::Mutex::new(authenticated_client().await?));
+    let client = std::sync::Arc::new(authenticated_client().await?);
 
     let mut watcher = ArrivalWatcher::new(
         client,

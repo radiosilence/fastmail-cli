@@ -103,7 +103,7 @@ struct Connected {
 pub async fn authenticated_client() -> crate::error::Result<JmapClient> {
     let config = crate::config::Config::load()?;
     let token = config.get_token()?;
-    let mut client = JmapClient::new(token);
+    let client = JmapClient::new(token);
     client.authenticate().await?;
     Ok(client)
 }
@@ -1525,7 +1525,7 @@ impl JmapClient {
         let url = apply_url_template(
             &session.download_url,
             &[
-                ("accountId", account_id),
+                ("accountId", account_id.as_str()),
                 ("blobId", blob_id),
                 ("name", "attachment"),
                 ("type", "application/octet-stream"),
@@ -1582,7 +1582,7 @@ impl JmapClient {
         let account_id = self.account_id()?;
         let session = self.session()?;
 
-        let url = apply_url_template(&session.upload_url, &[("accountId", account_id)]);
+        let url = apply_url_template(&session.upload_url, &[("accountId", account_id.as_str())]);
 
         debug!(url = %url, content_type = %content_type, size = data.len(), "Uploading blob");
         let resp = self
