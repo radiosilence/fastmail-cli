@@ -99,6 +99,8 @@ pub struct JmapClient {
     /// Send confirmations issued to this account and not yet used. Kept here
     /// because the client is what the MCP server pools per token.
     confirmations: crate::mcp::graphql::types::NonceStore,
+    /// The server answered 401 since the last successful handshake.
+    rejected: std::sync::atomic::AtomicBool,
 }
 
 /// What one handshake established. Kept together so a reader never pairs one
@@ -656,6 +658,7 @@ impl JmapClient {
             session: std::sync::RwLock::new(None),
             downloads: tokio::sync::Semaphore::new(CONCURRENT_DOWNLOADS),
             confirmations: Default::default(),
+            rejected: Default::default(),
         }
     }
 
@@ -707,6 +710,18 @@ impl JmapClient {
         session
     }
 
+    /// Whether the server has refused this client's token since it last
+    /// authenticated, so a cache holding it should check the token again.
+    pub fn is_rejected(&self) -> bool {
+        self.rejected.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn refuse(&self, reason: &'static str) -> Error {
+        self.rejected
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        Error::InvalidToken(reason)
+    }
+
     /// Outstanding PREVIEW confirmations for this account.
     pub fn confirmations(&self) -> &crate::mcp::graphql::types::NonceStore {
         &self.confirmations
@@ -731,7 +746,7 @@ impl JmapClient {
             .await?;
 
         match resp.status().as_u16() {
-            401 => return Err(Error::InvalidToken("Authentication failed")),
+            401 => return Err(self.refuse("Authentication failed")),
             429 => return Err(Error::RateLimited),
             500..=599 => return Err(Error::Server(format!("Server error: {}", resp.status()))),
             _ => {}
@@ -739,6 +754,8 @@ impl JmapClient {
 
         let session: Session = resp.json().await?;
         debug!(username = %session.username, "Session established");
+        self.rejected
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         Ok(self.set_session(session))
     }
 
@@ -785,7 +802,7 @@ impl JmapClient {
             .await?;
 
         match resp.status().as_u16() {
-            401 => return Err(Error::InvalidToken("Token expired or invalid")),
+            401 => return Err(self.refuse("Token expired or invalid")),
             429 => return Err(Error::RateLimited),
             500..=599 => return Err(Error::Server(format!("Server error: {}", resp.status()))),
             _ => {}
@@ -1167,7 +1184,7 @@ impl JmapClient {
         let resp = req.send().await?;
 
         match resp.status().as_u16() {
-            401 => return Err(Error::InvalidToken("Token expired or invalid")),
+            401 => return Err(self.refuse("Token expired or invalid")),
             429 => return Err(Error::RateLimited),
             500..=599 => return Err(Error::Server(format!("Server error: {}", resp.status()))),
             _ => {}
@@ -1558,7 +1575,7 @@ impl JmapClient {
             .await?;
 
         match resp.status().as_u16() {
-            401 => return Err(Error::InvalidToken("Token expired or invalid")),
+            401 => return Err(self.refuse("Token expired or invalid")),
             404 => return Err(Error::Config(format!("Blob not found: {}", blob_id))),
             429 => return Err(Error::RateLimited),
             500..=599 => return Err(Error::Server(format!("Server error: {}", resp.status()))),
@@ -1613,7 +1630,7 @@ impl JmapClient {
 
         match resp.status().as_u16() {
             200..=299 => {}
-            401 => return Err(Error::InvalidToken("Token expired or invalid")),
+            401 => return Err(self.refuse("Token expired or invalid")),
             429 => return Err(Error::RateLimited),
             500..=599 => return Err(Error::Server(format!("Server error: {}", resp.status()))),
             code => {

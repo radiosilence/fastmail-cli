@@ -1153,6 +1153,15 @@ mod tests {
         assert!(err.contains("expired"));
     }
 
+    #[test]
+    fn fingerprint_keeps_part_boundaries() {
+        // Moving text from one argument to the next must not keep the token.
+        assert_ne!(
+            params_fingerprint(&["ab", "c"]),
+            params_fingerprint(&["a", "bc"])
+        );
+    }
+
     #[tokio::test]
     async fn issue_evicts_oldest_when_at_cap() {
         let store = fresh_store();
