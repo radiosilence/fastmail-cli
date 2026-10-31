@@ -972,11 +972,7 @@ pub fn params_fingerprint(parts: &[&str]) -> String {
         hasher.update((part.len() as u64).to_le_bytes());
         hasher.update(part.as_bytes());
     }
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    crate::util::hex(&hasher.finalize())
 }
 
 /// Issue a new one-shot confirmation nonce for the given params.

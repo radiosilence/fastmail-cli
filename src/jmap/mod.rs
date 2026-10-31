@@ -659,10 +659,7 @@ impl JmapClient {
             downloads: tokio::sync::Semaphore::new(CONCURRENT_DOWNLOADS),
             tenant_key: {
                 use sha2::{Digest, Sha256};
-                Sha256::digest(token.as_bytes())
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect()
+                crate::util::hex(&Sha256::digest(token.as_bytes()))
             },
             rejected: Default::default(),
         }

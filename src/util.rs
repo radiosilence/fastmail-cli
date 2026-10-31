@@ -2,6 +2,11 @@ use crate::jmap::{AttachmentContent, AttachmentData};
 use crate::models::EmailAddress;
 use std::path::Path;
 
+/// Lower-case hex, as for a digest.
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 pub fn parse_addresses(input: &str) -> Vec<EmailAddress> {
     input
         .split(',')
