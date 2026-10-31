@@ -1859,6 +1859,27 @@ impl JmapClient {
         let resp: DestroyResponse =
             Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/set")?;
         if let Some(err) = resp.not_destroyed.as_ref().and_then(|m| m.get(&draft.id)) {
+            // Gone since it was read: another edit or a send got there first,
+            // and its result is the draft now. Withdraw this copy rather than
+            // leave two.
+            if err["type"].as_str() == Some("notFound") {
+                let _ = self
+                    .request(vec![json!([
+                        "Email/set",
+                        { "accountId": account_id, "destroy": [new_id] },
+                        "d2"
+                    ])])
+                    .await;
+                return Err(Error::Jmap {
+                    method: "Email/set".into(),
+                    error_type: "notFound".into(),
+                    description: format!(
+                        "draft {} changed or was sent while this edit was being saved; \
+                         read it again and redo the edit",
+                        draft.id
+                    ),
+                });
+            }
             return Err(Error::Jmap {
                 method: "Email/set".into(),
                 error_type: err["type"].as_str().unwrap_or("unknown").into(),

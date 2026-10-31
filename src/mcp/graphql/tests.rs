@@ -1902,6 +1902,48 @@ async fn update_draft_creates_the_edit_before_destroying_the_original() {
 }
 
 #[tokio::test]
+async fn an_edit_that_lost_a_race_withdraws_its_copy() {
+    // Another edit or a send consumed the original first: destroying it comes
+    // back notFound, and this edit's copy must go too, or two drafts remain.
+    let server = mock_server(1).await;
+    Mock::given(method("POST"))
+        .and(path("/jmap"))
+        .and(wiremock::matchers::body_string_contains(
+            r#""destroy":["draft1"]"#,
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "methodResponses": [["Email/set", {
+                "notDestroyed": { "draft1": { "type": "notFound" } }
+            }, "d1"]]
+        })))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "mutation { updateDraft(emailId: \"draft1\", subject: \"New\") { success error } }",
+    )
+    .await;
+    assert_eq!(data["updateDraft"]["success"], false, "{data}");
+    assert!(
+        data["updateDraft"]["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("changed or was sent")),
+        "{data}"
+    );
+
+    let sets = call_args(&server, "Email/set").await;
+    assert_eq!(
+        sets.len(),
+        3,
+        "create, destroy the original, withdraw the copy"
+    );
+    assert_eq!(sets[2]["destroy"][0], "new1");
+}
+
+#[tokio::test]
 async fn draft_mutations_refuse_sent_mail() {
     let server = mock_server(1).await;
     let data = exec(
