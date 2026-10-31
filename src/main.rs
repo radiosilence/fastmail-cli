@@ -514,7 +514,13 @@ enum ContactsCommands {
 
 #[tokio::main]
 async fn main() {
+    // stderr, because stdout carries the output: JSON for every command, and
+    // the JSON-RPC stream itself for `mcp` over stdio.
     tracing_subscriber::fmt()
+        .with_writer(io::stderr)
+        // Colour only for a person reading a terminal; MCP hosts write stderr
+        // to log files.
+        .with_ansi(io::IsTerminal::is_terminal(&io::stderr()))
         .with_env_filter(EnvFilter::from_default_env())
         .with_target(false)
         .init();

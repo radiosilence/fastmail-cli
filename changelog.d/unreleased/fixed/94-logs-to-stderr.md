@@ -1,0 +1,1 @@
+- **Logs go to stderr.** With `RUST_LOG` set, log lines were written to stdout, which corrupted JSON output and broke the stdio MCP stream.
