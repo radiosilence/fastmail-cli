@@ -1,0 +1,1 @@
+- **Large attachments no longer time out.** Requests to Fastmail are limited by connection and read timeouts instead of a 30 second cap on the whole transfer.
