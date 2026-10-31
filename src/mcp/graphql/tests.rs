@@ -656,7 +656,7 @@ async fn payload_fields_resolve_independently() {
     //
     // Extraction is unobservable from outside once the blob is downloaded — it
     // returns Ok(None) rather than failing on input it cannot parse — so the
-    // guarantee is structural: `crate::util::extract_text` has exactly one call
+    // guarantee is structural: `crate::extract::extract_text` has exactly one call
     // site in this crate's GraphQL layer, inside the `text` resolver. The
     // observable half is `attachment_metadata_downloads_nothing`: no download
     // means no bytes, and no bytes means nothing was extracted.

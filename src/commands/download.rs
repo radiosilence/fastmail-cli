@@ -1,8 +1,6 @@
 use crate::jmap::authenticated_client;
 use crate::models::Output;
-use crate::util::{
-    extract_text, infer_image_mime, is_image, parse_size, resize_image, sanitize_filename,
-};
+use crate::util::{infer_image_mime, is_image, parse_size, sanitize_filename};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
@@ -41,7 +39,7 @@ pub async fn download_attachment(
             let content_type = attachment.content_type.clone().unwrap_or_default();
             let bytes = client.download_blob(blob_id).await?;
 
-            let text = extract_text(&bytes, &filename).await?;
+            let text = crate::extract::extract_text(&bytes, &filename).await?;
 
             results.push(AttachmentContent {
                 filename,
@@ -85,7 +83,8 @@ pub async fn download_attachment(
             };
 
             if is_image(mime, &filename) {
-                match resize_image(&bytes, mime, max) {
+                let data = std::sync::Arc::new(bytes);
+                match crate::extract::resize_image(data.clone(), mime.to_string(), max).await {
                     Ok((resized, new_mime)) => {
                         // Update extension if format changed (e.g., PNG -> JPEG)
                         let new_filename = if new_mime == "image/jpeg"
@@ -102,7 +101,7 @@ pub async fn download_attachment(
                         };
                         (resized, new_filename)
                     }
-                    Err(_) => (bytes, filename.clone()),
+                    Err(_) => (std::sync::Arc::unwrap_or_clone(data), filename.clone()),
                 }
             } else {
                 (bytes, filename.clone())

@@ -141,16 +141,24 @@ pub fn name_and_type(
 
 /// Decode base64, refusing before decoding anything that cannot fit in `room`.
 pub fn decode(name: &str, encoded: &str, room: usize) -> Result<Vec<u8>, String> {
-    let compact: String = encoded
-        .chars()
-        .filter(|c| !c.is_ascii_whitespace())
-        .collect();
-    let decoded_len = compact.len() / 4 * 3;
+    // Measured before copying, so an oversized argument is refused without
+    // first being duplicated.
+    let compact_len = encoded.bytes().filter(|b| !b.is_ascii_whitespace()).count();
+    let decoded_len = compact_len / 4 * 3;
     if decoded_len.saturating_sub(2) > room {
         return Err(over_cap(MAX_ATTACHMENT_BYTES - room + decoded_len));
     }
+    let compact: std::borrow::Cow<str> = if compact_len == encoded.len() {
+        encoded.into()
+    } else {
+        encoded
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .collect::<String>()
+            .into()
+    };
     let bytes = base64::engine::general_purpose::STANDARD
-        .decode(compact)
+        .decode(compact.as_bytes())
         .map_err(|e| format!("Attachment '{name}' is not valid base64: {e}"))?;
     if bytes.len() > room {
         return Err(over_cap(MAX_ATTACHMENT_BYTES - room + bytes.len()));

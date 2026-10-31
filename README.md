@@ -208,7 +208,9 @@ It uses JMAP's push channel (`eventSourceUrl`), but treats a notification purely
 as a signal to look again: the state cursor lives in the CLI, and each wake-up
 runs `Email/changes` against it. Dropped connections are reconciled on reconnect
 and `--poll` takes the identical path, so a missed notification costs latency
-rather than mail. Only *new* messages are reported — flag and folder changes to
+rather than mail; the cursor moves only once the new mail has been fetched, and
+failed reads back off rather than retrying at full rate. `--poll` takes at least
+10 seconds. Only *new* messages are reported — flag and folder changes to
 existing mail are not arrivals.
 
 Reconnects, and the rare case where the server has discarded change history and
@@ -525,10 +527,11 @@ curl -N http://127.0.0.1:8080/graphql/stream \
 
 SSE rather than WebSockets because the only subscription is a server-to-client
 firehose: nothing is ever sent back up the socket, and SSE reconnects on its
-own. Body fields (`textBody`, `attachments`) want `full: true` — a subscription
-has no request boundary at which the batching loaders reset, so the lazy path
-resolves through a loader that lives as long as the subscription. `pollSeconds`
-is the same fallback as the CLI's `--poll`. MCP has no equivalent: tools are
+own. Body fields (`textBody`, `attachments`) want `full: true`, which fetches them
+with each arrival; selected without it, each costs a fetch per arrival. A
+subscription caches nothing between arrivals, so it does not grow however long
+it runs. `pollSeconds` is the same fallback as the CLI's `--poll`, at least 10
+seconds. MCP has no equivalent: tools are
 request/response, and a subscription never returns.
 
 **Credential resolution is the same everywhere:** the request's own header

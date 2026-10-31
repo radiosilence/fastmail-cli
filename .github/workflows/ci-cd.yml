@@ -169,7 +169,7 @@ jobs:
             printf '%s\n' "$files" | sed 's/^/  /'
             # Anything cargo compiles or that decides how. askama compiles
             # templates/ into the binary.
-            touches '^src/|^templates/|^Cargo\.(toml|lock)$|^build\.rs$|^\.cargo/|^rust-toolchain|^\.github/' || rust=false
+            touches '^src/|^tests/|^templates/|^Cargo\.(toml|lock)$|^build\.rs$|^\.cargo/|^rust-toolchain|^\.github/' || rust=false
             # The image is the Linux binaries in a runtime layer. Check already
             # covers the code, so a pull request builds the binaries and the
             # image only when the recipe changed; main whenever what they

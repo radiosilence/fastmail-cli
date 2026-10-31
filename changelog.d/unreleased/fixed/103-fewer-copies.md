@@ -1,0 +1,1 @@
+- **Queries that select bodies or attachments use far less memory.** Emails, JMAP responses and downloads are shared or moved rather than copied once per field, and MCP tool results are compact JSON rather than pretty-printed.

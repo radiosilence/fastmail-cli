@@ -17,9 +17,21 @@ use tracing::debug;
 /// connection. [`JmapClient`] is safe to use concurrently.
 pub type SharedJmapClient = std::sync::Arc<JmapClient>;
 
-/// How often to ask the server for a keep-alive, and the basis for the read
-/// timeout that notices a connection which died without saying so.
-const PING_SECONDS: u32 = 30;
+/// Shortest poll interval accepted. Each tick is an `Email/changes` call, and a
+/// zero interval would issue them back to back until rate-limited.
+pub const MIN_POLL: Duration = Duration::from_secs(10);
+
+/// Longest wait after repeated failures to read changes, so a struggling
+/// server is not asked again at full rate.
+const FAILURE_BACKOFF_MAX: Duration = Duration::from_secs(300);
+
+/// Attempts at one page before it is given up on. Without a limit, a page that
+/// can never be fetched, such as one too large to arrive within the request
+/// timeout, would hold the cursor still and stop every later arrival.
+const MAX_PAGE_ATTEMPTS: u32 = 5;
+
+/// Emails per `Email/get` when fetching bodies, which can be megabytes each.
+const FULL_FETCH_CHUNK: usize = 10;
 
 /// Reconnect backoff bounds. The ceiling is deliberately small: a watcher that
 /// goes quiet for minutes after a blip is indistinguishable from a broken one.
@@ -55,13 +67,23 @@ pub struct ArrivalWatcher {
     mailbox_id: Option<String>,
     full: bool,
     wake: Wake,
+    /// The last read left changes unread past `state`, so read again without
+    /// waiting for a wake-up.
+    more: bool,
+    /// Consecutive failed reads, which set the backoff before the next one.
+    failures: u32,
+    /// Failed fetches of the current page's mail. Counted apart from
+    /// `failures`, which also counts failures to read changes at all, so a
+    /// page is given up on only after its own fetch has failed repeatedly.
+    page_attempts: u32,
 }
 
 impl ArrivalWatcher {
     /// Start watching from the present moment.
     ///
-    /// `poll` swaps the push connection for a timer of that interval; without
-    /// it the watcher holds JMAP's event source open.
+    /// `poll` swaps the push connection for a timer of that interval, no
+    /// shorter than [`MIN_POLL`]; without it the watcher holds JMAP's event
+    /// source open.
     pub async fn new(
         client: SharedJmapClient,
         mailbox: Option<&str>,
@@ -81,8 +103,11 @@ impl ArrivalWatcher {
             state,
             mailbox_id,
             full,
+            more: false,
+            failures: 0,
+            page_attempts: 0,
             wake: match poll {
-                Some(interval) => Wake::Poll(interval),
+                Some(interval) => Wake::Poll(interval.max(MIN_POLL)),
                 None => Wake::Push {
                     stream: None,
                     parser: EventParser::default(),
@@ -101,7 +126,30 @@ impl ArrivalWatcher {
     /// is retried internally with backoff, because a watcher that exits on one
     /// blip is useless in the loop it exists to feed.
     pub async fn next_arrivals(&mut self) -> Result<Arrivals> {
-        self.wait().await?;
+        if self.failures > 0 || self.more {
+            // An unread push connection is worse than none: reqwest's read
+            // timeout keeps running while nobody polls it, so the first read
+            // after a pause or a long backlog fails. Reopen it afterwards.
+            if let Wake::Push { stream, .. } = &mut self.wake {
+                *stream = None;
+            }
+        }
+        if self.failures > 0 {
+            // Retry the read after a pause; the cursor has not moved, so
+            // nothing is lost by not waiting for a wake-up first. Never sooner
+            // than a poll would have come anyway.
+            let exponent = (self.failures - 1).min(16);
+            let floor = match self.wake {
+                Wake::Poll(interval) => interval,
+                Wake::Push { .. } => Duration::ZERO,
+            };
+            let delay = Duration::from_secs(1 << exponent)
+                .max(floor)
+                .min(FAILURE_BACKOFF_MAX);
+            tokio::time::sleep(delay).await;
+        } else if !self.more {
+            self.wait().await?;
+        }
         self.drain().await
     }
 
@@ -128,9 +176,12 @@ impl ArrivalWatcher {
             };
 
             if stream.is_none() {
+                // A frame half-read from a dead connection must not prefix the
+                // first one from the new connection.
+                *parser = EventParser::default();
                 let opened = self
                     .client
-                    .open_event_stream(PING_SECONDS, last_event_id.as_deref())
+                    .open_event_stream(last_event_id.as_deref())
                     .await;
                 match opened {
                     Ok(resp) => *stream = Some(resp),
@@ -159,7 +210,13 @@ impl ArrivalWatcher {
                     *backoff = BACKOFF_START;
 
                     let mut changed = false;
-                    for event in parser.feed(&String::from_utf8_lossy(&bytes)) {
+                    let Ok(events) = parser.feed(&bytes) else {
+                        debug!("Event stream sent no frame boundary; reconnecting");
+                        *stream = None;
+                        sleep_backoff(backoff).await;
+                        return Ok(());
+                    };
+                    for event in events {
                         if let Some(id) = event.id {
                             *last_event_id = Some(id);
                         }
@@ -186,9 +243,13 @@ impl ArrivalWatcher {
         }
     }
 
-    /// Advance the cursor and collect whatever it turned up.
+    /// Read one page of changes and collect whatever it turned up.
+    ///
+    /// The cursor moves only once the page's mail has been fetched: a failure
+    /// either side leaves it where it was, so the same page is read again
+    /// after a backoff and nothing in it is skipped.
     async fn drain(&mut self) -> Result<Arrivals> {
-        let client = &self.client;
+        let client = self.client.clone();
 
         let changes = match client.email_changes(&self.state).await {
             Ok(changes) => changes,
@@ -196,7 +257,16 @@ impl ArrivalWatcher {
                 // History is gone back to our cursor. There is no way to know
                 // what was missed, and replaying the mailbox as "new" would be
                 // a lie, so reset to the present and say so.
-                self.state = client.email_state().await?;
+                let state = match client.email_state().await {
+                    Ok(state) => state,
+                    Err(e) if is_fatal(&e) => return Err(e),
+                    Err(e) => {
+                        debug!("Could not resync ({e})");
+                        self.failures += 1;
+                        return Ok(Arrivals::none());
+                    }
+                };
+                self.advance(state, false);
                 return Ok(Arrivals {
                     emails: Vec::new(),
                     resynced: true,
@@ -205,32 +275,54 @@ impl ArrivalWatcher {
             Err(e) if is_fatal(&e) => return Err(e),
             Err(e) => {
                 debug!("Could not read changes ({e})");
+                self.failures += 1;
                 return Ok(Arrivals::none());
             }
         };
 
-        self.state = changes.new_state;
+        // A server that claims more but has not moved the state would be read
+        // forever without a pause.
+        let more = changes.has_more && changes.new_state != self.state;
         if changes.created.is_empty() {
+            self.advance(changes.new_state, more);
             return Ok(Arrivals::none());
         }
 
-        let fetched = if self.full {
-            client.get_emails(&changes.created).await
+        let mut emails = Vec::with_capacity(changes.created.len());
+        let chunk = if self.full {
+            FULL_FETCH_CHUNK
         } else {
-            client.get_email_summaries(&changes.created).await
+            changes.created.len()
         };
-
-        let mut emails = match fetched {
-            Ok(emails) => emails,
-            Err(e) if is_fatal(&e) => return Err(e),
-            Err(e) => {
-                debug!(
-                    "Could not fetch {} new email(s) ({e})",
-                    changes.created.len()
-                );
-                return Ok(Arrivals::none());
+        for ids in changes.created.chunks(chunk) {
+            let fetched = if self.full {
+                client.get_emails(ids).await
+            } else {
+                client.get_email_summaries(ids).await
+            };
+            match fetched {
+                Ok(batch) => emails.extend(batch),
+                Err(e) if is_fatal(&e) => return Err(e),
+                Err(e) if self.page_attempts + 1 >= MAX_PAGE_ATTEMPTS => {
+                    // Deliver what did arrive, and skip only the rest.
+                    tracing::warn!(
+                        "Giving up on {} new email(s) after {MAX_PAGE_ATTEMPTS} attempts ({e})",
+                        changes.created.len() - emails.len()
+                    );
+                    break;
+                }
+                Err(e) => {
+                    debug!(
+                        "Could not fetch {} new email(s) ({e})",
+                        changes.created.len()
+                    );
+                    self.failures += 1;
+                    self.page_attempts += 1;
+                    return Ok(Arrivals::none());
+                }
             }
-        };
+        }
+        self.advance(changes.new_state, more);
 
         emails.retain(|email| in_mailbox(email, self.mailbox_id.as_deref()));
         // `Email/get` makes no ordering guarantee, and a stream reads
@@ -241,6 +333,15 @@ impl ArrivalWatcher {
             emails,
             resynced: false,
         })
+    }
+}
+
+impl ArrivalWatcher {
+    fn advance(&mut self, state: String, more: bool) {
+        self.state = state;
+        self.more = more;
+        self.failures = 0;
+        self.page_attempts = 0;
     }
 }
 
@@ -315,5 +416,118 @@ mod tests {
             backoff, BACKOFF_MAX,
             "backoff must not grow past the ceiling"
         );
+    }
+
+    mod drain {
+        use super::*;
+        use wiremock::matchers::{body_string_contains, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        fn reply(name: &str, args: serde_json::Value) -> ResponseTemplate {
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "methodResponses": [[name, args, "x"]],
+                "sessionState": "s"
+            }))
+        }
+
+        /// A server at state `s0` with one new email, `e1`, at `s1`, whose
+        /// `Email/get` fails `failures` times before it succeeds.
+        async fn server(failures: u64) -> MockServer {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(body_string_contains(r#""ids":[]"#))
+                .respond_with(reply(
+                    "Email/get",
+                    serde_json::json!({"state": "s0", "list": []}),
+                ))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(body_string_contains("Email/changes"))
+                .respond_with(reply(
+                    "Email/changes",
+                    serde_json::json!({
+                        "oldState": "s0", "newState": "s1", "hasMoreChanges": false,
+                        "created": ["e1"], "updated": [], "destroyed": []
+                    }),
+                ))
+                .mount(&server)
+                .await;
+            if failures > 0 {
+                Mock::given(method("POST"))
+                    .and(body_string_contains(r#""e1""#))
+                    .respond_with(ResponseTemplate::new(503))
+                    .up_to_n_times(failures)
+                    .with_priority(1)
+                    .mount(&server)
+                    .await;
+            }
+            Mock::given(method("POST"))
+                .and(body_string_contains(r#""e1""#))
+                .respond_with(reply(
+                    "Email/get",
+                    serde_json::json!({"state": "s1", "list": [{"id": "e1", "mailboxIds": {}}]}),
+                ))
+                .mount(&server)
+                .await;
+            server
+        }
+
+        async fn watcher(server: &MockServer) -> ArrivalWatcher {
+            let client = std::sync::Arc::new(JmapClient::with_test_session(&format!(
+                "{}/jmap",
+                server.uri()
+            )));
+            ArrivalWatcher::new(client, None, false, Some(MIN_POLL))
+                .await
+                .unwrap()
+        }
+
+        #[tokio::test]
+        async fn a_failed_fetch_leaves_the_cursor_for_the_next_read() {
+            let server = server(1).await;
+            let mut watcher = watcher(&server).await;
+
+            let first = watcher.drain().await.unwrap();
+            assert!(first.emails.is_empty());
+            assert_eq!(
+                watcher.state, "s0",
+                "the cursor must not pass unfetched mail"
+            );
+
+            let second = watcher.drain().await.unwrap();
+            assert_eq!(second.emails.len(), 1);
+            assert_eq!(watcher.state, "s1");
+        }
+
+        #[tokio::test]
+        async fn a_page_that_never_fetches_is_skipped_after_its_attempts() {
+            let server = server(u64::MAX).await;
+            let mut watcher = watcher(&server).await;
+
+            for _ in 1..MAX_PAGE_ATTEMPTS {
+                watcher.drain().await.unwrap();
+                assert_eq!(watcher.state, "s0");
+            }
+            watcher.drain().await.unwrap();
+            assert_eq!(
+                watcher.state, "s1",
+                "a page that never fetches must not wedge the watcher"
+            );
+        }
+
+        #[tokio::test]
+        async fn failures_to_read_changes_do_not_count_against_the_page() {
+            let server = server(1).await;
+            let mut watcher = watcher(&server).await;
+            // As though an outage had already failed several reads.
+            watcher.failures = MAX_PAGE_ATTEMPTS;
+
+            watcher.drain().await.unwrap();
+            assert_eq!(
+                watcher.state, "s0",
+                "one fetch failure must not skip the page"
+            );
+        }
     }
 }
