@@ -143,6 +143,10 @@ pub struct FastmailMcp {
     default_carddav: CardDavCreds,
     #[allow(dead_code)] // referenced by #[tool_handler] macro expansion
     tool_router: ToolRouter<Self>,
+    /// Cancelled when the HTTP server begins shutting down, which ends every
+    /// open subscription stream. Graceful shutdown waits for open responses,
+    /// and a subscription is a response that never finishes by itself.
+    shutdown: tokio_util::sync::CancellationToken,
 }
 
 impl FastmailMcp {
@@ -153,6 +157,7 @@ impl FastmailMcp {
             default_token,
             default_carddav: CardDavCreds::from_local_config(),
             tool_router: Self::tool_router(),
+            shutdown: tokio_util::sync::CancellationToken::new(),
         }
     }
 
@@ -534,11 +539,15 @@ async fn graphql_stream_endpoint(
         }
     };
 
-    let events = mcp.schema.execute_stream(request).map(|response| {
-        let data = serde_json::to_string(&response)
-            .unwrap_or_else(|e| format!(r#"{{"errors":[{{"message":"{e}"}}]}}"#));
-        Ok::<_, std::convert::Infallible>(sse::Event::default().data(data))
-    });
+    let events = mcp
+        .schema
+        .execute_stream(request)
+        .take_until(mcp.shutdown.clone().cancelled_owned())
+        .map(|response| {
+            let data = serde_json::to_string(&response)
+                .unwrap_or_else(|e| format!(r#"{{"errors":[{{"message":"{e}"}}]}}"#));
+            Ok::<_, std::convert::Infallible>(sse::Event::default().data(data))
+        });
 
     // Proxies drop connections that go quiet, and a mail subscription is quiet
     // most of the time.
@@ -581,7 +590,9 @@ pub async fn run_http_server(addr: &str, surfaces: HttpSurfaces) -> anyhow::Resu
     // (localhost/127.0.0.1/::1) would reject with 403. Rebinding protection
     // guards browsers hitting a localhost MCP directly — irrelevant for a
     // proxied, non-browser-facing backend; the proxy is the security boundary.
-    let config = StreamableHttpServerConfig::default().disable_allowed_hosts();
+    let config = StreamableHttpServerConfig::default()
+        .disable_allowed_hosts()
+        .with_cancellation_token(mcp.shutdown.clone());
     let service = StreamableHttpService::new(
         {
             let template = mcp.clone();
@@ -632,11 +643,59 @@ pub async fn run_http_server(addr: &str, surfaces: HttpSurfaces) -> anyhow::Resu
         }
     }
 
-    axum::serve(listener, router.with_state(mcp))
-        .await
-        .map_err(|e| anyhow::anyhow!("HTTP server error: {}", e))?;
+    let shutdown = mcp.shutdown.clone();
+    tokio::spawn({
+        let shutdown = shutdown.clone();
+        async move {
+            shutdown_signal().await;
+            tracing::info!("Shutting down");
+            shutdown.cancel();
+        }
+    });
+
+    let serve = axum::serve(listener, router.with_state(mcp))
+        .with_graceful_shutdown(shutdown.clone().cancelled_owned());
+    tokio::select! {
+        result = serve => result.map_err(|e| anyhow::anyhow!("HTTP server error: {}", e))?,
+        // Requests still running after the deadline are cut off rather than
+        // waited on: a container runtime sends SIGKILL soon after SIGTERM.
+        () = async {
+            shutdown.cancelled().await;
+            tokio::time::sleep(SHUTDOWN_GRACE).await;
+        } => tracing::warn!("Requests still open after {}s; exiting", SHUTDOWN_GRACE.as_secs()),
+    }
 
     Ok(())
+}
+
+/// How long in-flight requests get to finish once shutdown begins. Under the
+/// 10 seconds Docker and Kubernetes allow by default before SIGKILL.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// SIGTERM or Ctrl-C.
+///
+/// The image runs this binary as PID 1, and the kernel gives PID 1 no default
+/// action for SIGTERM. Without a handler, `docker stop` waits out its whole
+/// timeout and then kills the server mid-request.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let term = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(_) => std::future::pending().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+    tokio::select! {
+        () = ctrl_c => {}
+        () = term => {}
+    }
 }
 
 #[cfg(test)]
