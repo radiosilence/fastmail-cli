@@ -44,13 +44,56 @@ pub const APP_PASSWORD_HEADER: &str = "x-fastmail-app-password";
 
 /// Cache of authenticated JMAP clients keyed by Fastmail token, so we don't
 /// re-run the JMAP session handshake on every tool call. Shared across sessions.
-type ClientCache = Arc<Mutex<HashMap<String, SharedClient>>>;
+type ClientCache = Arc<Mutex<HashMap<String, CachedClient>>>;
+
+/// How long a client may go unused before it is dropped from the cache.
+const CLIENT_IDLE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Most clients cached at once. A hosted server sees every user's token, and
+/// each rotation of one, so idle expiry alone would not bound a busy window.
+const CLIENT_CAP: usize = 1000;
+
+struct CachedClient {
+    client: SharedClient,
+    last_used: std::time::Instant,
+}
 
 /// Get or lazily create an authenticated JMAP client for `token`, caching it
 /// for reuse. The JMAP session handshake runs once per distinct token.
+///
+/// Dropping an entry, idle or over the cap, never breaks a request using it:
+/// holders keep their own `Arc`, and the next request for that token builds a
+/// second client alongside. So eviction need not check whether one is in use.
 async fn client_for(cache: &ClientCache, token: &str) -> anyhow::Result<SharedClient> {
-    if let Some(existing) = cache.lock().await.get(token) {
-        return Ok(existing.clone());
+    let cached = {
+        let mut cache = cache.lock().await;
+        cache.get_mut(token).map(|entry| {
+            entry.last_used = std::time::Instant::now();
+            entry.client.clone()
+        })
+    };
+    if let Some(client) = cached {
+        if !client.is_rejected() {
+            return Ok(client);
+        }
+        // A token the server has refused is checked again rather than reused.
+        // A passing refusal heals here and the client stays; a revoked token
+        // fails the handshake and its client is dropped.
+        match client.authenticate().await {
+            Ok(_) => return Ok(client),
+            Err(e @ crate::error::Error::InvalidToken(_)) => {
+                let mut cache = cache.lock().await;
+                // Only this client: a concurrent caller may have cached a new one.
+                if cache
+                    .get(token)
+                    .is_some_and(|entry| Arc::ptr_eq(&entry.client, &client))
+                {
+                    cache.remove(token);
+                }
+                return Err(e.into());
+            }
+            Err(e) => return Err(e.into()),
+        }
     }
     // Authenticate outside the cache lock so concurrent callers for other
     // tokens aren't blocked on this network round-trip.
@@ -58,20 +101,55 @@ async fn client_for(cache: &ClientCache, token: &str) -> anyhow::Result<SharedCl
     client.authenticate().await?;
     let shared: SharedClient = Arc::new(client);
 
-    // Re-check under lock: another caller may have inserted meanwhile.
-    Ok(cache
-        .lock()
-        .await
-        .entry(token.to_string())
-        .or_insert(shared)
-        .clone())
+    let mut cache = cache.lock().await;
+    // Another caller may have inserted meanwhile; then nothing is evicted.
+    if let Some(entry) = cache.get(token) {
+        return Ok(entry.client.clone());
+    }
+    let now = std::time::Instant::now();
+    cache.retain(|_, entry| now.duration_since(entry.last_used) < CLIENT_IDLE);
+    if cache.len() >= CLIENT_CAP
+        && let Some(oldest) = cache
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_used)
+            .map(|(token, _)| token.clone())
+    {
+        cache.remove(&oldest);
+    }
+    cache.insert(
+        token.to_string(),
+        CachedClient {
+            client: shared.clone(),
+            last_used: now,
+        },
+    );
+    Ok(shared)
 }
 
 /// Prefer the per-request `X-Fastmail-Token` header (HTTP), else fall back to
 /// the configured default. Pure so it can be unit-tested without a live
 /// [`RequestContext`].
+///
+/// No fallback when the request carries any credential header at all: it
+/// speaks for a user of its own, and must not be completed with the
+/// operator's credentials.
 fn resolve_token(headers: Option<&http::HeaderMap>, default: Option<&str>) -> Option<String> {
-    header_value(headers, TOKEN_HEADER).or_else(|| default.map(str::to_owned))
+    header_value(headers, TOKEN_HEADER).or_else(|| {
+        default
+            .filter(|_| !carries_credentials(headers))
+            .map(str::to_owned)
+    })
+}
+
+/// Whether the request brings any credential of its own. A header counts
+/// when present at all, even empty or unreadable: a proxy that sends one is
+/// speaking for a user, and an empty value must not become the operator's.
+fn carries_credentials(headers: Option<&http::HeaderMap>) -> bool {
+    headers.is_some_and(|h| {
+        [TOKEN_HEADER, USERNAME_HEADER, APP_PASSWORD_HEADER]
+            .iter()
+            .any(|name| h.contains_key(*name))
+    })
 }
 
 fn header_value(headers: Option<&http::HeaderMap>, name: &str) -> Option<String> {
@@ -85,16 +163,18 @@ fn header_value(headers: Option<&http::HeaderMap>, name: &str) -> Option<String>
 /// Per-request CardDAV credentials, resolved like [`resolve_token`]: the
 /// request's own headers first, then whatever local config supplied.
 ///
-/// Each half falls back independently. A deployment that stores a username but
-/// no app password should get exactly that — half-configured, which
-/// `carddavConfigured` reports as false — rather than silently mixing one
-/// user's header with another's local default.
+/// Local config fills in only for a request with no credential headers at
+/// all, as for [`resolve_token`]. A request with a token but no CardDAV
+/// headers, or only half of them, gets exactly that — not configured, which
+/// `carddavConfigured` reports as false — rather than the operator's contacts.
 fn resolve_carddav(headers: Option<&http::HeaderMap>, default: &CardDavCreds) -> CardDavCreds {
-    CardDavCreds {
-        username: header_value(headers, USERNAME_HEADER).or_else(|| default.username.clone()),
-        app_password: header_value(headers, APP_PASSWORD_HEADER)
-            .or_else(|| default.app_password.clone()),
+    if carries_credentials(headers) {
+        return CardDavCreds {
+            username: header_value(headers, USERNAME_HEADER),
+            app_password: header_value(headers, APP_PASSWORD_HEADER),
+        };
     }
+    default.clone()
 }
 
 /// The Fastmail token to use when no request header supplies one: the local
@@ -920,6 +1000,26 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_credential_header_still_blocks_the_local_fallback() {
+        let mut headers = headers_with(None);
+        headers.insert(TOKEN_HEADER, "".parse().unwrap());
+        assert_eq!(resolve_token(Some(&headers), Some("operator-token")), None);
+        assert!(!resolve_carddav(Some(&headers), &local_carddav()).is_complete());
+    }
+
+    #[test]
+    fn a_tenant_token_never_borrows_local_carddav_credentials() {
+        let headers = headers_with(Some("tenant-token"));
+        assert!(!resolve_carddav(Some(&headers), &local_carddav()).is_complete());
+    }
+
+    #[test]
+    fn tenant_carddav_headers_never_borrow_the_local_token() {
+        let headers = carddav_headers(Some("hosted@example.com"), Some("hosted-password"));
+        assert_eq!(resolve_token(Some(&headers), Some("operator-token")), None);
+    }
+
+    #[test]
     fn none_when_neither_header_nor_default() {
         // hosted mode with no upstream-injected token — must refuse.
         assert_eq!(resolve_token(Some(&headers_with(None)), None), None);
@@ -940,10 +1040,13 @@ mod tests {
         // resolver's JMAP call fails fast instead of reaching the real
         // Fastmail API with a fake token.
         let client = JmapClient::with_test_session("http://127.0.0.1:1");
-        mcp.clients
-            .lock()
-            .await
-            .insert("fake-token".to_string(), Arc::new(client));
+        mcp.clients.lock().await.insert(
+            "fake-token".to_string(),
+            CachedClient {
+                client: Arc::new(client),
+                last_used: std::time::Instant::now(),
+            },
+        );
 
         let req = HttpGraphqlRequest {
             query: "{ session { status } }".to_string(),

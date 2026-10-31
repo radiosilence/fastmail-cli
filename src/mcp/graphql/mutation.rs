@@ -62,7 +62,7 @@ impl MutationRoot {
         params.extend(attachment_keys.iter().map(String::as_str));
 
         if matches!(action, SendAction::Preview) {
-            let nonce = super::types::issue_nonce(nonce_store, &params).await;
+            let nonce = super::types::issue_nonce(nonce_store, client.tenant_key(), &params).await;
             let mut body_preview = body.clone();
             if html_body.is_some() {
                 body_preview.push_str("\n[HTML body included]");
@@ -79,8 +79,13 @@ impl MutationRoot {
             });
         }
 
-        if let Err(msg) =
-            super::types::consume_nonce(nonce_store, confirmation_token.as_deref(), &params).await
+        if let Err(msg) = super::types::consume_nonce(
+            nonce_store,
+            client.tenant_key(),
+            confirmation_token.as_deref(),
+            &params,
+        )
+        .await
         {
             return Ok(GqlComposeResult {
                 success: false,
@@ -199,7 +204,7 @@ impl MutationRoot {
         );
 
         if matches!(action, SendAction::Preview) {
-            let nonce = super::types::issue_nonce(nonce_store, &params).await;
+            let nonce = super::types::issue_nonce(nonce_store, client.tenant_key(), &params).await;
             let in_reply_to = original
                 .message_id
                 .as_ref()
@@ -236,8 +241,13 @@ impl MutationRoot {
             });
         }
 
-        if let Err(msg) =
-            super::types::consume_nonce(nonce_store, confirmation_token.as_deref(), &params).await
+        if let Err(msg) = super::types::consume_nonce(
+            nonce_store,
+            client.tenant_key(),
+            confirmation_token.as_deref(),
+            &params,
+        )
+        .await
         {
             return Ok(GqlComposeResult {
                 success: false,
@@ -344,7 +354,7 @@ impl MutationRoot {
         };
 
         if matches!(action, SendAction::Preview) {
-            let nonce = super::types::issue_nonce(nonce_store, &params).await;
+            let nonce = super::types::issue_nonce(nonce_store, client.tenant_key(), &params).await;
             let original_body = original.text_content().unwrap_or_default();
             let sender = format_addrs(&original.from.clone().unwrap_or_default());
 
@@ -382,8 +392,13 @@ impl MutationRoot {
             });
         }
 
-        if let Err(msg) =
-            super::types::consume_nonce(nonce_store, confirmation_token.as_deref(), &params).await
+        if let Err(msg) = super::types::consume_nonce(
+            nonce_store,
+            client.tenant_key(),
+            confirmation_token.as_deref(),
+            &params,
+        )
+        .await
         {
             return Ok(GqlComposeResult {
                 success: false,
@@ -540,7 +555,7 @@ impl MutationRoot {
         }
 
         if matches!(action, SendDraftAction::Preview) {
-            let nonce = super::types::issue_nonce(nonce_store, &params).await;
+            let nonce = super::types::issue_nonce(nonce_store, client.tenant_key(), &params).await;
             let mut preview = format!(
                 "DRAFT PREVIEW:\nFrom: {}\nTo: {}\nCC: {}\nBCC: {}\nSubject: {}\n\n--- Body ---\n{}",
                 format_addrs(draft.from.as_deref().unwrap_or_default()),
@@ -575,8 +590,13 @@ impl MutationRoot {
             });
         }
 
-        if let Err(msg) =
-            super::types::consume_nonce(nonce_store, confirmation_token.as_deref(), &params).await
+        if let Err(msg) = super::types::consume_nonce(
+            nonce_store,
+            client.tenant_key(),
+            confirmation_token.as_deref(),
+            &params,
+        )
+        .await
         {
             return Ok(failure(msg.to_string()));
         }

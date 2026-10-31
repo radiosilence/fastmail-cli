@@ -187,11 +187,7 @@ pub fn fingerprint(attachments: &[Attachment]) -> Vec<String> {
             // deliberate collision.
             let content = match &a.data.content {
                 AttachmentContent::Bytes(bytes) => {
-                    let digest: String = Sha256::digest(bytes)
-                        .iter()
-                        .map(|b| format!("{b:02x}"))
-                        .collect();
-                    format!("bytes:{digest}")
+                    format!("bytes:{}", crate::util::hex(&Sha256::digest(bytes)))
                 }
                 AttachmentContent::Blob(id) => format!("blob:{id}"),
             };

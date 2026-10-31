@@ -1,0 +1,1 @@
+- **The HTTP server keeps each user's state apart.** A request carrying its own credentials no longer falls back to the host's for anything it lacks, send confirmations are kept per account and fingerprinted with SHA-256, and cached clients are bounded, expire when idle and are re-checked once Fastmail refuses their token.
