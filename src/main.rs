@@ -512,21 +512,24 @@ enum ContactsCommands {
     },
 }
 
-#[tokio::main]
-async fn main() -> std::process::ExitCode {
-    // Before anything else reads config or writes to stdout: the child's
-    // stdout is the extracted text, and it is handed nothing but the document.
+fn main() -> std::process::ExitCode {
+    // Before a runtime, config or logging exists: the worker child's stdout is
+    // its result, and it is handed nothing but its input.
     let mut args = std::env::args_os().skip(1);
     if args.next().as_deref() == Some(std::ffi::OsStr::new(extract::CHILD_ARG)) {
-        let filename = args.next().unwrap_or_default();
-        let input_len = args
-            .next()
-            .and_then(|n| n.to_str()?.parse().ok())
-            .unwrap_or(0);
-        return extract::run_child(std::path::Path::new(&filename), input_len).await;
+        let rest: Vec<String> = args.map(|a| a.to_string_lossy().into_owned()).collect();
+        return extract::run_child(&rest);
     }
     extract::isolate();
 
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to start the async runtime")
+        .block_on(run())
+}
+
+async fn run() -> std::process::ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .with_target(false)
