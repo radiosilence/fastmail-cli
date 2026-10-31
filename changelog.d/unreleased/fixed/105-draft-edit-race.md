@@ -1,0 +1,1 @@
+- **Concurrent edits of one draft leave one draft.** When another edit or a send has already replaced the draft, `updateDraft` withdraws its own copy and asks for the draft to be read again, instead of leaving a duplicate.
