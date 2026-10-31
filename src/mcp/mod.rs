@@ -82,7 +82,14 @@ async fn client_for(cache: &ClientCache, token: &str) -> anyhow::Result<SharedCl
         match client.authenticate().await {
             Ok(_) => return Ok(client),
             Err(e @ crate::error::Error::InvalidToken(_)) => {
-                cache.lock().await.remove(token);
+                let mut cache = cache.lock().await;
+                // Only this client: a concurrent caller may have cached a new one.
+                if cache
+                    .get(token)
+                    .is_some_and(|entry| Arc::ptr_eq(&entry.client, &client))
+                {
+                    cache.remove(token);
+                }
                 return Err(e.into());
             }
             Err(e) => return Err(e.into()),

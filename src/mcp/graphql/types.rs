@@ -940,6 +940,10 @@ const NONCE_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 /// Drop entries older than TTL, then if `tenant` is still at its cap drop its
 /// oldest.
+///
+/// Scans the whole store, which holds at most `NONCE_CAP` entries for each
+/// account that previewed a send in the last `NONCE_TTL`: small next to the
+/// send it guards.
 fn evict(map: &mut std::collections::HashMap<String, Nonce>, tenant: &str) {
     let now = std::time::Instant::now();
     map.retain(|_, n| now.duration_since(n.issued_at) < NONCE_TTL);
