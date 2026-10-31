@@ -1,5 +1,24 @@
 # Changelog
 
+## 3.8.0
+
+### Security
+
+- **Attachment text extraction and image resizing run in a child process.** A hung, crashing or memory-hungry attachment, such as a PDF that wedges pdfium or an archive that inflates without bound, is killed on its own instead of stalling or taking down the server. The child holds no credentials, and the kernel kills it before the server when memory runs out, so large documents still extract.
+- **The HTTP server keeps each user's state apart.** A request carrying its own credentials no longer falls back to the host's for anything it lacks, send confirmations are kept per account and fingerprinted with SHA-256, and cached clients are bounded, expire when idle and are re-checked once Fastmail refuses their token.
+
+### Fixed
+
+- **Image resizing no longer blocks other requests, and handles transparency.** PNGs with an alpha channel resize instead of failing, and the result fits `maxBytes` or fails with the reason.
+- **Logs go to stderr.** With `RUST_LOG` set, log lines were written to stdout, which corrupted JSON output and broke the stdio MCP stream.
+- **Contacts requests time out and reuse connections.** CardDAV calls now give up on a server that stops responding instead of hanging, share one connection pool instead of a TLS handshake per request, and search all address books concurrently.
+- **The HTTP server stops promptly on SIGTERM.** As PID 1 in the container it ignored the signal, so `docker stop` waited out its timeout and then killed it mid-request. It now ends open subscriptions, gives in-flight requests up to 8 seconds, and exits.
+- **Large attachments no longer time out.** A request to Fastmail now fails when the connection goes silent for 30 seconds or the transfer passes 15 minutes, instead of at 30 seconds however healthy it was.
+- **Requests for one account run concurrently.** The MCP server serialised every Fastmail call for a token behind one lock, so a slow attachment download stalled everything else that user did. Mailbox lookups by name also no longer use a list cached at first use, which missed folders created after the server started.
+- **`watch` and the `emails` subscription no longer lose mail after a failed fetch.** The cursor now moves only once the new mail is in hand, a backlog is read a page at a time, and failures back off instead of retrying at full rate. Polling has a 10 second minimum. A long-running subscription no longer keeps every email it has emitted in memory.
+- **Queries that select bodies or attachments use far less memory.** Emails, JMAP responses and downloads are shared or moved rather than copied once per field, and MCP tool results are compact JSON rather than pretty-printed.
+- **A draft edit no longer deletes mail that was sent, deleted or replaced while it was saving.** `updateDraft` removes the original only if it is still the same draft in the same place, checked against the state it was read in. Otherwise it withdraws its own copy, and it names any copy it could not remove.
+
 ## 3.7.4
 
 ### Security
