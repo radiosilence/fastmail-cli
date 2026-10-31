@@ -158,7 +158,7 @@ pub fn decode(name: &str, encoded: &str, room: usize) -> Result<Vec<u8>, String>
             .into()
     };
     let bytes = base64::engine::general_purpose::STANDARD
-        .decode(compact)
+        .decode(compact.as_bytes())
         .map_err(|e| format!("Attachment '{name}' is not valid base64: {e}"))?;
     if bytes.len() > room {
         return Err(over_cap(MAX_ATTACHMENT_BYTES - room + bytes.len()));
