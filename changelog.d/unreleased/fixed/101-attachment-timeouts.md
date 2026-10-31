@@ -1,0 +1,1 @@
+- **Large attachments no longer time out.** A request to Fastmail now fails when the connection goes silent for 30 seconds or the transfer passes 15 minutes, instead of at 30 seconds however healthy it was.
