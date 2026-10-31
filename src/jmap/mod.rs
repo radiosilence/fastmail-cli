@@ -86,6 +86,9 @@ const CONCURRENT_DOWNLOADS: usize = 4;
 /// `&self`, and the only state that changes, the session, is swapped whole.
 pub struct JmapClient {
     client: Client,
+    /// For the push channel, which [`Self::client`]'s 30s request timeout
+    /// would cut off.
+    push: Client,
     token: String,
     session_url: String,
     session: std::sync::RwLock<Option<Arc<Connected>>>,
@@ -310,14 +313,20 @@ impl ComposeContext {
 /// lower; `hasMoreChanges` then drives the next page.
 const CHANGES_PAGE: u32 = 100;
 
-/// What arrived since a known `Email` state.
+/// What arrived since a known `Email` state: one page of it.
 #[derive(Debug)]
 pub struct EmailChanges {
     /// The state to pass as `sinceState` next time.
     pub new_state: String,
     /// IDs created in that window, oldest change first.
     pub created: Vec<String>,
+    /// More changes lie past `new_state`; ask again from there.
+    pub has_more: bool,
 }
+
+/// Keep-alive interval asked of the push channel, and the basis of its read
+/// timeout.
+const PUSH_PING_SECONDS: u64 = 30;
 
 // Shared JMAP response types used across multiple methods
 #[derive(Deserialize)]
@@ -638,8 +647,18 @@ impl JmapClient {
             .build()
             .expect("Failed to build HTTP client");
 
+        // A push channel is meant to stay open for days, so it has no overall
+        // timeout. A read timeout of a few ping intervals stands in for it, so
+        // silence reads as a dead connection rather than an idle one: the
+        // difference between reconnecting and hanging forever.
+        let push = Client::builder()
+            .read_timeout(Duration::from_secs(PUSH_PING_SECONDS * 3))
+            .build()
+            .expect("Failed to build HTTP client");
+
         Self {
             client,
+            push,
             token,
             session_url: SESSION_URL.to_string(),
             session: std::sync::RwLock::new(None),
@@ -1044,13 +1063,14 @@ impl JmapClient {
         Ok(resp.state)
     }
 
-    /// IDs of emails created since `since_state`, and the state they leave the
-    /// caller at.
+    /// IDs of emails created since `since_state`, at most one page of them,
+    /// and the state they leave the caller at.
     ///
-    /// Follows `hasMoreChanges` to the end, so the returned state is always
-    /// current: a partial read would silently drop everything past the first
-    /// page on the next call. Only creations are reported — a watcher wants
-    /// arrivals, and updates would replay every flag change as news.
+    /// One page rather than all of them, so a caller back from a long
+    /// disconnect or a bulk import handles the backlog a page at a time
+    /// instead of holding it whole; `has_more` says to call again from
+    /// `new_state`. Only creations are reported — a watcher wants arrivals,
+    /// and updates would replay every flag change as news.
     ///
     /// Fails with a `cannotCalculateChanges` JMAP error when the server has
     /// discarded history back that far; the caller resyncs via
@@ -1058,45 +1078,35 @@ impl JmapClient {
     #[instrument(skip(self))]
     pub async fn email_changes(&self, since_state: &str) -> Result<EmailChanges> {
         let account_id = self.account_id()?;
-        let mut state = since_state.to_string();
-        let mut created = Vec::new();
+        let responses = self
+            .request(vec![json!([
+                "Email/changes",
+                {
+                    "accountId": account_id,
+                    "sinceState": since_state,
+                    "maxChanges": CHANGES_PAGE
+                },
+                "c0"
+            ])])
+            .await?;
 
-        loop {
-            let responses = self
-                .request(vec![json!([
-                    "Email/changes",
-                    {
-                        "accountId": account_id,
-                        "sinceState": state,
-                        "maxChanges": CHANGES_PAGE
-                    },
-                    "c0"
-                ])])
-                .await?;
-
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase")]
-            struct ChangesResponse {
-                new_state: String,
-                #[serde(default)]
-                has_more_changes: bool,
-                #[serde(default)]
-                created: Vec<String>,
-            }
-
-            let resp: ChangesResponse =
-                Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/changes")?;
-
-            created.extend(resp.created);
-            state = resp.new_state;
-
-            if !resp.has_more_changes {
-                return Ok(EmailChanges {
-                    new_state: state,
-                    created,
-                });
-            }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct ChangesResponse {
+            new_state: String,
+            #[serde(default)]
+            has_more_changes: bool,
+            #[serde(default)]
+            created: Vec<String>,
         }
+
+        let resp: ChangesResponse =
+            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/changes")?;
+        Ok(EmailChanges {
+            new_state: resp.new_state,
+            created: resp.created,
+            has_more: resp.has_more_changes,
+        })
     }
 
     /// Open the JMAP push channel and return the live response to read frames
@@ -1109,7 +1119,6 @@ impl JmapClient {
     #[instrument(skip(self))]
     pub async fn open_event_stream(
         &self,
-        ping: u32,
         last_event_id: Option<&str>,
     ) -> Result<reqwest::Response> {
         let template = self
@@ -1128,17 +1137,10 @@ impl JmapClient {
         let url = template
             .replace("{types}", "Email")
             .replace("{closeafter}", "no")
-            .replace("{ping}", &ping.to_string());
+            .replace("{ping}", &PUSH_PING_SECONDS.to_string());
 
-        // The shared client caps every request at 30s; a push channel is meant
-        // to stay open for days. A read timeout of a few ping intervals stands
-        // in for it, so silence reads as a dead connection rather than an idle
-        // one — the difference between reconnecting and hanging forever.
-        let client = Client::builder()
-            .read_timeout(Duration::from_secs(u64::from(ping) * 3))
-            .build()?;
-
-        let mut req = client
+        let mut req = self
+            .push
             .get(&url)
             .bearer_auth(&self.token)
             .header("Accept", "text/event-stream");
@@ -2642,7 +2644,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_email_changes_follows_has_more_changes() {
+    async fn test_email_changes_reads_one_page_at_a_time() {
         use wiremock::matchers::{body_string_contains, method};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -2683,10 +2685,15 @@ mod tests {
             .await;
 
         let client = mock_client(&mock_server.uri());
-        let changes = client.email_changes("s0").await.unwrap();
+        let first = client.email_changes("s0").await.unwrap();
+        assert_eq!(first.created, vec!["e1", "e2"]);
+        assert_eq!(first.new_state, "s1");
+        assert!(first.has_more);
 
-        assert_eq!(changes.created, vec!["e1", "e2", "e3"]);
-        assert_eq!(changes.new_state, "s2");
+        let second = client.email_changes(&first.new_state).await.unwrap();
+        assert_eq!(second.created, vec!["e3"]);
+        assert_eq!(second.new_state, "s2");
+        assert!(!second.has_more);
     }
 
     #[tokio::test]
@@ -2779,7 +2786,7 @@ mod tests {
         ));
         client.set_session(session);
 
-        let resp = client.open_event_stream(30, Some("evt-7")).await.unwrap();
+        let resp = client.open_event_stream(Some("evt-7")).await.unwrap();
         assert!(resp.status().is_success());
     }
 
@@ -2788,7 +2795,7 @@ mod tests {
         // create_test_session advertises no eventSourceUrl, standing in for a
         // server that does not offer push.
         let client = mock_client("https://api.example.com");
-        let err = client.open_event_stream(30, None).await.unwrap_err();
+        let err = client.open_event_stream(None).await.unwrap_err();
         assert!(err.to_string().contains("--poll"), "unhelpful error: {err}");
     }
 

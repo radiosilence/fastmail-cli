@@ -17,9 +17,13 @@ use tracing::debug;
 /// [`JmapClient`] is safe to use concurrently, so there is no lock to hold.
 pub type SharedJmapClient = std::sync::Arc<JmapClient>;
 
-/// How often to ask the server for a keep-alive, and the basis for the read
-/// timeout that notices a connection which died without saying so.
-const PING_SECONDS: u32 = 30;
+/// Shortest poll interval accepted. Each tick is an `Email/changes` call, and a
+/// zero interval would issue them back to back until rate-limited.
+pub const MIN_POLL: Duration = Duration::from_secs(10);
+
+/// Longest wait after repeated failures to read changes, so a struggling
+/// server is not asked again at full rate.
+const FAILURE_BACKOFF_MAX: Duration = Duration::from_secs(300);
 
 /// Reconnect backoff bounds. The ceiling is deliberately small: a watcher that
 /// goes quiet for minutes after a blip is indistinguishable from a broken one.
@@ -55,13 +59,19 @@ pub struct ArrivalWatcher {
     mailbox_id: Option<String>,
     full: bool,
     wake: Wake,
+    /// The last read left changes unread past `state`, so read again without
+    /// waiting for a wake-up.
+    more: bool,
+    /// Consecutive failed reads, which set the backoff before the next one.
+    failures: u32,
 }
 
 impl ArrivalWatcher {
     /// Start watching from the present moment.
     ///
-    /// `poll` swaps the push connection for a timer of that interval; without
-    /// it the watcher holds JMAP's event source open.
+    /// `poll` swaps the push connection for a timer of that interval, no
+    /// shorter than [`MIN_POLL`]; without it the watcher holds JMAP's event
+    /// source open.
     pub async fn new(
         client: SharedJmapClient,
         mailbox: Option<&str>,
@@ -81,8 +91,10 @@ impl ArrivalWatcher {
             state,
             mailbox_id,
             full,
+            more: false,
+            failures: 0,
             wake: match poll {
-                Some(interval) => Wake::Poll(interval),
+                Some(interval) => Wake::Poll(interval.max(MIN_POLL)),
                 None => Wake::Push {
                     stream: None,
                     parser: EventParser::default(),
@@ -101,7 +113,15 @@ impl ArrivalWatcher {
     /// is retried internally with backoff, because a watcher that exits on one
     /// blip is useless in the loop it exists to feed.
     pub async fn next_arrivals(&mut self) -> Result<Arrivals> {
-        self.wait().await?;
+        if self.failures > 0 {
+            // Retry the read after a pause; the cursor has not moved, so
+            // nothing is lost by not waiting for a wake-up first.
+            let exponent = (self.failures - 1).min(16);
+            let delay = Duration::from_secs(1 << exponent).min(FAILURE_BACKOFF_MAX);
+            tokio::time::sleep(delay).await;
+        } else if !self.more {
+            self.wait().await?;
+        }
         self.drain().await
     }
 
@@ -128,9 +148,12 @@ impl ArrivalWatcher {
             };
 
             if stream.is_none() {
+                // A frame half-read from a dead connection must not prefix the
+                // first one from the new connection.
+                *parser = EventParser::default();
                 let opened = self
                     .client
-                    .open_event_stream(PING_SECONDS, last_event_id.as_deref())
+                    .open_event_stream(last_event_id.as_deref())
                     .await;
                 match opened {
                     Ok(resp) => *stream = Some(resp),
@@ -159,7 +182,13 @@ impl ArrivalWatcher {
                     *backoff = BACKOFF_START;
 
                     let mut changed = false;
-                    for event in parser.feed(&String::from_utf8_lossy(&bytes)) {
+                    let Ok(events) = parser.feed(&bytes) else {
+                        debug!("Event stream sent no frame boundary; reconnecting");
+                        *stream = None;
+                        sleep_backoff(backoff).await;
+                        return Ok(());
+                    };
+                    for event in events {
                         if let Some(id) = event.id {
                             *last_event_id = Some(id);
                         }
@@ -186,9 +215,13 @@ impl ArrivalWatcher {
         }
     }
 
-    /// Advance the cursor and collect whatever it turned up.
+    /// Read one page of changes and collect whatever it turned up.
+    ///
+    /// The cursor moves only once the page's mail has been fetched: a failure
+    /// either side leaves it where it was, so the same page is read again
+    /// after a backoff and nothing in it is skipped.
     async fn drain(&mut self) -> Result<Arrivals> {
-        let client = &self.client;
+        let client = self.client.clone();
 
         let changes = match client.email_changes(&self.state).await {
             Ok(changes) => changes,
@@ -196,7 +229,16 @@ impl ArrivalWatcher {
                 // History is gone back to our cursor. There is no way to know
                 // what was missed, and replaying the mailbox as "new" would be
                 // a lie, so reset to the present and say so.
-                self.state = client.email_state().await?;
+                let state = match client.email_state().await {
+                    Ok(state) => state,
+                    Err(e) if is_fatal(&e) => return Err(e),
+                    Err(e) => {
+                        debug!("Could not resync ({e})");
+                        self.failures += 1;
+                        return Ok(Arrivals::none());
+                    }
+                };
+                self.advance(state, false);
                 return Ok(Arrivals {
                     emails: Vec::new(),
                     resynced: true,
@@ -205,12 +247,13 @@ impl ArrivalWatcher {
             Err(e) if is_fatal(&e) => return Err(e),
             Err(e) => {
                 debug!("Could not read changes ({e})");
+                self.failures += 1;
                 return Ok(Arrivals::none());
             }
         };
 
-        self.state = changes.new_state;
         if changes.created.is_empty() {
+            self.advance(changes.new_state, changes.has_more);
             return Ok(Arrivals::none());
         }
 
@@ -228,9 +271,11 @@ impl ArrivalWatcher {
                     "Could not fetch {} new email(s) ({e})",
                     changes.created.len()
                 );
+                self.failures += 1;
                 return Ok(Arrivals::none());
             }
         };
+        self.advance(changes.new_state, changes.has_more);
 
         emails.retain(|email| in_mailbox(email, self.mailbox_id.as_deref()));
         // `Email/get` makes no ordering guarantee, and a stream reads
@@ -241,6 +286,14 @@ impl ArrivalWatcher {
             emails,
             resynced: false,
         })
+    }
+}
+
+impl ArrivalWatcher {
+    fn advance(&mut self, state: String, more: bool) {
+        self.state = state;
+        self.more = more;
+        self.failures = 0;
     }
 }
 
