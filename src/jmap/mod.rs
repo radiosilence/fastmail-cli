@@ -1742,6 +1742,40 @@ impl JmapClient {
         .await
     }
 
+    /// Destroy the copy an abandoned draft edit created, and say why it was
+    /// abandoned. If the copy cannot be removed either, the error names it so
+    /// it can be cleaned up by hand.
+    async fn withdraw_copy(&self, account_id: &str, copy_id: &str, reason: String) -> Error {
+        let withdrawn = self
+            .request(vec![json!([
+                "Email/set",
+                { "accountId": account_id, "destroy": [copy_id] },
+                "d2"
+            ])])
+            .await
+            .and_then(|responses| {
+                Self::parse_response::<DestroyResponse>(
+                    responses.first().unwrap_or(&Value::Null),
+                    "Email/set",
+                )
+            })
+            .is_ok_and(|resp| {
+                resp.not_destroyed
+                    .as_ref()
+                    .is_none_or(|m| !m.contains_key(copy_id))
+            });
+        let description = if withdrawn {
+            reason
+        } else {
+            format!("{reason}. The unapplied copy {copy_id} could not be removed")
+        };
+        Error::Jmap {
+            method: "Email/set".into(),
+            error_type: "draftChanged".into(),
+            description,
+        }
+    }
+
     /// Rewrite a draft. JMAP emails are immutable apart from their keywords
     /// and mailboxes, so this creates the edited copy and then destroys the
     /// original. The two happen in separate requests: in a single `Email/set`
@@ -1849,36 +1883,57 @@ impl JmapClient {
             .await?;
         let new_id = Self::parse_email_create_response(&responses)?;
 
-        let responses = self
+        // Something else may have got to the original since it was read: a
+        // send moves it to Sent, keeping its ID, and another edit replaces it.
+        // Destroying it then would delete the sent mail or leave two drafts,
+        // so this edit withdraws its own copy instead.
+        let gone = format!(
+            "draft {} was sent, deleted or replaced by another edit while this edit was \
+             being saved; the edit was not applied. List the drafts again before \
+             editing",
+            draft.id
+        );
+        match self
+            .get_email_summaries(std::slice::from_ref(&draft.id))
+            .await
+        {
+            Ok(current) if current.first().is_some_and(Email::is_draft) => {}
+            Ok(_) => return Err(self.withdraw_copy(&account_id, &new_id, gone).await),
+            Err(e) => {
+                return Err(self
+                    .withdraw_copy(
+                        &account_id,
+                        &new_id,
+                        format!("could not re-read draft {}: {e}", draft.id),
+                    )
+                    .await);
+            }
+        }
+
+        let destroyed = self
             .request(vec![json!([
                 "Email/set",
                 { "accountId": account_id, "destroy": [draft.id] },
                 "d1"
             ])])
-            .await?;
-        let resp: DestroyResponse =
-            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/set")?;
+            .await
+            .and_then(|responses| {
+                Self::parse_response::<DestroyResponse>(
+                    responses.first().unwrap_or(&Value::Null),
+                    "Email/set",
+                )
+            });
+        let resp = destroyed.map_err(|e| Error::Jmap {
+            method: "Email/set".into(),
+            error_type: "partial".into(),
+            description: format!(
+                "saved the edit as {new_id} but could not remove the original draft {}: {e}",
+                draft.id
+            ),
+        })?;
         if let Some(err) = resp.not_destroyed.as_ref().and_then(|m| m.get(&draft.id)) {
-            // Gone since it was read: another edit or a send got there first,
-            // and its result is the draft now. Withdraw this copy rather than
-            // leave two.
             if err["type"].as_str() == Some("notFound") {
-                let _ = self
-                    .request(vec![json!([
-                        "Email/set",
-                        { "accountId": account_id, "destroy": [new_id] },
-                        "d2"
-                    ])])
-                    .await;
-                return Err(Error::Jmap {
-                    method: "Email/set".into(),
-                    error_type: "notFound".into(),
-                    description: format!(
-                        "draft {} changed or was sent while this edit was being saved; \
-                         read it again and redo the edit",
-                        draft.id
-                    ),
-                });
+                return Err(self.withdraw_copy(&account_id, &new_id, gone).await);
             }
             return Err(Error::Jmap {
                 method: "Email/set".into(),

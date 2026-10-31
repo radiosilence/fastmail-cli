@@ -1930,7 +1930,7 @@ async fn an_edit_that_lost_a_race_withdraws_its_copy() {
     assert!(
         data["updateDraft"]["error"]
             .as_str()
-            .is_some_and(|e| e.contains("changed or was sent")),
+            .is_some_and(|e| e.contains("was sent, deleted or replaced")),
         "{data}"
     );
 
@@ -1941,6 +1941,81 @@ async fn an_edit_that_lost_a_race_withdraws_its_copy() {
         "create, destroy the original, withdraw the copy"
     );
     assert_eq!(sets[2]["destroy"][0], "new1");
+}
+
+#[tokio::test]
+async fn an_edit_never_destroys_a_draft_that_was_sent_meanwhile() {
+    // A send keeps the original's ID and moves it to Sent, so destroying it
+    // would delete the sent mail. The re-check sees it is no longer a draft.
+    let server = mock_server(1).await;
+    Mock::given(method("POST"))
+        .and(path("/jmap"))
+        .and(wiremock::matchers::body_string_contains(r#""fetchTextBodyValues":false"#))
+        .and(wiremock::matchers::body_string_contains(r#""draft1""#))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "methodResponses": [["Email/get", {
+                "list": [{ "id": "draft1", "mailboxIds": { "sent": true }, "keywords": { "$seen": true } }],
+                "notFound": []
+            }, "g0"]]
+        })))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "mutation { updateDraft(emailId: \"draft1\", subject: \"New\") { success error } }",
+    )
+    .await;
+    assert_eq!(data["updateDraft"]["success"], false, "{data}");
+
+    let sets = call_args(&server, "Email/set").await;
+    assert!(
+        sets.iter().all(|s| s["destroy"][0] != "draft1"),
+        "the sent message must not be destroyed: {sets:?}"
+    );
+    assert_eq!(sets.last().unwrap()["destroy"][0], "new1");
+}
+
+#[tokio::test]
+async fn a_copy_that_cannot_be_withdrawn_is_named() {
+    let server = mock_server(1).await;
+    Mock::given(method("POST"))
+        .and(path("/jmap"))
+        .and(wiremock::matchers::body_string_contains(
+            r#""destroy":["draft1"]"#,
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "methodResponses": [["Email/set", {
+                "notDestroyed": { "draft1": { "type": "notFound" } }
+            }, "d1"]]
+        })))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/jmap"))
+        .and(wiremock::matchers::body_string_contains(
+            r#""destroy":["new1"]"#,
+        ))
+        .respond_with(ResponseTemplate::new(503))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "mutation { updateDraft(emailId: \"draft1\", subject: \"New\") { success error } }",
+    )
+    .await;
+    assert!(
+        data["updateDraft"]["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("new1")),
+        "{data}"
+    );
 }
 
 #[tokio::test]

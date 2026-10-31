@@ -1,1 +1,1 @@
-- **Concurrent edits of one draft leave one draft.** When another edit or a send has already replaced the draft, `updateDraft` withdraws its own copy and asks for the draft to be read again, instead of leaving a duplicate.
+- **A draft edit no longer deletes mail sent or replaced while it was saving.** `updateDraft` checks that the original is still a draft before removing it. If it was sent, deleted or edited elsewhere in the meantime, it withdraws its own copy, leaving one draft or the sent message untouched, and names any copy it could not remove.
