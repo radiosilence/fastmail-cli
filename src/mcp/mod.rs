@@ -581,6 +581,10 @@ pub async fn run_http_server(addr: &str, surfaces: HttpSurfaces) -> anyhow::Resu
         StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     };
 
+    // Installed before anything slow, so a SIGTERM during start-up is not lost:
+    // as PID 1 it would otherwise be ignored.
+    let signal = shutdown_signal()?;
+
     // One shared instance (shared schema + client cache) cloned into each session
     // and used as the axum state for the GraphQL routes.
     let mcp = FastmailMcp::http();
@@ -647,9 +651,13 @@ pub async fn run_http_server(addr: &str, surfaces: HttpSurfaces) -> anyhow::Resu
     tokio::spawn({
         let shutdown = shutdown.clone();
         async move {
-            shutdown_signal().await;
+            signal.await;
             tracing::info!("Shutting down");
             shutdown.cancel();
+            // A second Ctrl-C skips the grace period.
+            if tokio::signal::ctrl_c().await.is_ok() {
+                std::process::exit(130);
+            }
         }
     });
 
@@ -672,30 +680,33 @@ pub async fn run_http_server(addr: &str, surfaces: HttpSurfaces) -> anyhow::Resu
 /// 10 seconds Docker and Kubernetes allow by default before SIGKILL.
 const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(8);
 
-/// SIGTERM or Ctrl-C.
+/// Resolves on SIGTERM or Ctrl-C. The SIGTERM handler is registered when this
+/// is called, not when the future is first polled.
 ///
 /// The image runs this binary as PID 1, and the kernel gives PID 1 no default
 /// action for SIGTERM. Without a handler, `docker stop` waits out its whole
 /// timeout and then kills the server mid-request.
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
+fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {
     #[cfg(unix)]
-    let term = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut signal) => {
-                signal.recv().await;
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    Ok(async move {
+        let ctrl_c = async {
+            // An error means no Ctrl-C can arrive, not that one did.
+            if tokio::signal::ctrl_c().await.is_err() {
+                std::future::pending::<()>().await;
             }
-            Err(_) => std::future::pending().await,
+        };
+        #[cfg(unix)]
+        let term = async {
+            term.recv().await;
+        };
+        #[cfg(not(unix))]
+        let term = std::future::pending::<()>();
+        tokio::select! {
+            () = ctrl_c => {}
+            () = term => {}
         }
-    };
-    #[cfg(not(unix))]
-    let term = std::future::pending::<()>();
-    tokio::select! {
-        () = ctrl_c => {}
-        () = term => {}
-    }
+    })
 }
 
 #[cfg(test)]
