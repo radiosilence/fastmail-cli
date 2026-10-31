@@ -96,9 +96,9 @@ pub struct JmapClient {
     session_url: String,
     session: std::sync::RwLock<Option<Arc<Connected>>>,
     downloads: tokio::sync::Semaphore,
-    /// Send confirmations issued to this account and not yet used. Kept here
-    /// because the client is what the MCP server pools per token.
-    confirmations: crate::mcp::graphql::types::NonceStore,
+    /// A digest of the token, naming the account it speaks for without
+    /// holding the token itself in other state.
+    tenant_key: String,
     /// The server answered 401 since the last successful handshake.
     rejected: std::sync::atomic::AtomicBool,
 }
@@ -657,7 +657,13 @@ impl JmapClient {
             session_url: SESSION_URL.to_string(),
             session: std::sync::RwLock::new(None),
             downloads: tokio::sync::Semaphore::new(CONCURRENT_DOWNLOADS),
-            confirmations: Default::default(),
+            tenant_key: {
+                use sha2::{Digest, Sha256};
+                Sha256::digest(token.as_bytes())
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect()
+            },
             rejected: Default::default(),
         }
     }
@@ -722,9 +728,10 @@ impl JmapClient {
         Error::InvalidToken(reason)
     }
 
-    /// Outstanding PREVIEW confirmations for this account.
-    pub fn confirmations(&self) -> &crate::mcp::graphql::types::NonceStore {
-        &self.confirmations
+    /// Which account's state this client's requests may touch, such as send
+    /// confirmations; a digest of the token.
+    pub fn tenant_key(&self) -> &str {
+        &self.tenant_key
     }
 
     fn connected(&self) -> Result<Arc<Connected>> {

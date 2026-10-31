@@ -65,20 +65,27 @@ struct CachedClient {
 /// holders keep their own `Arc`, and the next request for that token builds a
 /// second client alongside. So eviction need not check whether one is in use.
 async fn client_for(cache: &ClientCache, token: &str) -> anyhow::Result<SharedClient> {
-    {
+    let cached = {
         let mut cache = cache.lock().await;
-        match cache.get_mut(token) {
-            // A token the server has refused is re-checked rather than reused:
-            // a revoked one then fails at the handshake and is not cached
-            // again, and a passing refusal heals on the next call.
-            Some(entry) if entry.client.is_rejected() => {
-                cache.remove(token);
+        cache.get_mut(token).map(|entry| {
+            entry.last_used = std::time::Instant::now();
+            entry.client.clone()
+        })
+    };
+    if let Some(client) = cached {
+        if !client.is_rejected() {
+            return Ok(client);
+        }
+        // A token the server has refused is checked again rather than reused.
+        // A passing refusal heals here and the client stays; a revoked token
+        // fails the handshake and its client is dropped.
+        match client.authenticate().await {
+            Ok(_) => return Ok(client),
+            Err(e @ crate::error::Error::InvalidToken(_)) => {
+                cache.lock().await.remove(token);
+                return Err(e.into());
             }
-            Some(entry) => {
-                entry.last_used = std::time::Instant::now();
-                return Ok(entry.client.clone());
-            }
-            None => {}
+            Err(e) => return Err(e.into()),
         }
     }
     // Authenticate outside the cache lock so concurrent callers for other
@@ -88,6 +95,10 @@ async fn client_for(cache: &ClientCache, token: &str) -> anyhow::Result<SharedCl
     let shared: SharedClient = Arc::new(client);
 
     let mut cache = cache.lock().await;
+    // Another caller may have inserted meanwhile; then nothing is evicted.
+    if let Some(entry) = cache.get(token) {
+        return Ok(entry.client.clone());
+    }
     let now = std::time::Instant::now();
     cache.retain(|_, entry| now.duration_since(entry.last_used) < CLIENT_IDLE);
     if cache.len() >= CLIENT_CAP
@@ -98,15 +109,14 @@ async fn client_for(cache: &ClientCache, token: &str) -> anyhow::Result<SharedCl
     {
         cache.remove(&oldest);
     }
-    // Another caller may have inserted meanwhile.
-    Ok(cache
-        .entry(token.to_string())
-        .or_insert(CachedClient {
-            client: shared,
+    cache.insert(
+        token.to_string(),
+        CachedClient {
+            client: shared.clone(),
             last_used: now,
-        })
-        .client
-        .clone())
+        },
+    );
+    Ok(shared)
 }
 
 /// Prefer the per-request `X-Fastmail-Token` header (HTTP), else fall back to
@@ -124,11 +134,15 @@ fn resolve_token(headers: Option<&http::HeaderMap>, default: Option<&str>) -> Op
     })
 }
 
-/// Whether the request brings any credential of its own.
+/// Whether the request brings any credential of its own. A header counts
+/// when present at all, even empty or unreadable: a proxy that sends one is
+/// speaking for a user, and an empty value must not become the operator's.
 fn carries_credentials(headers: Option<&http::HeaderMap>) -> bool {
-    [TOKEN_HEADER, USERNAME_HEADER, APP_PASSWORD_HEADER]
-        .iter()
-        .any(|name| header_value(headers, name).is_some())
+    headers.is_some_and(|h| {
+        [TOKEN_HEADER, USERNAME_HEADER, APP_PASSWORD_HEADER]
+            .iter()
+            .any(|name| h.contains_key(*name))
+    })
 }
 
 fn header_value(headers: Option<&http::HeaderMap>, name: &str) -> Option<String> {
@@ -153,11 +167,7 @@ fn resolve_carddav(headers: Option<&http::HeaderMap>, default: &CardDavCreds) ->
             app_password: header_value(headers, APP_PASSWORD_HEADER),
         };
     }
-    CardDavCreds {
-        username: header_value(headers, USERNAME_HEADER).or_else(|| default.username.clone()),
-        app_password: header_value(headers, APP_PASSWORD_HEADER)
-            .or_else(|| default.app_password.clone()),
-    }
+    default.clone()
 }
 
 /// The Fastmail token to use when no request header supplies one: the local
@@ -978,6 +988,14 @@ mod tests {
             "{ ...F } fragment F on Query { __typename }"
         ));
         assert!(!is_introspection_only("{ this is not graphql"));
+    }
+
+    #[test]
+    fn an_empty_credential_header_still_blocks_the_local_fallback() {
+        let mut headers = headers_with(None);
+        headers.insert(TOKEN_HEADER, "".parse().unwrap());
+        assert_eq!(resolve_token(Some(&headers), Some("operator-token")), None);
+        assert!(!resolve_carddav(Some(&headers), &local_carddav()).is_complete());
     }
 
     #[test]

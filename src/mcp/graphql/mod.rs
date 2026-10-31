@@ -91,6 +91,7 @@ pub fn build_schema() -> FastmailSchema {
     // Depth stays capped: the graph contains cycles, and nothing else bounds
     // them.
     Schema::build(QueryRoot, MutationRoot, SubscriptionRoot)
+        .data(types::NonceStore::default())
         .limit_depth(MAX_DEPTH)
         .finish()
 }

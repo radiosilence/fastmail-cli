@@ -906,6 +906,8 @@ pub struct GqlComposeResult {
 /// A pending confirmation nonce: fingerprint of the compose params, plus
 /// the monotonic instant it was issued at so we can expire it.
 pub struct Nonce {
+    /// The account it was issued to ([`crate::jmap::JmapClient::tenant_key`]).
+    pub tenant: String,
     pub fingerprint: String,
     pub issued_at: std::time::Instant,
 }
@@ -917,8 +919,9 @@ pub struct Nonce {
 /// whose stored fingerprint matches the current params — this prevents
 /// skipping PREVIEW and prevents reusing a nonce for different params.
 ///
-/// One store per Fastmail token, held by its pooled client, so one account's
-/// previews can neither confirm nor crowd out another's.
+/// One store for the process, partitioned by account: a nonce confirms only
+/// for the account it was issued to, and the cap applies per account, so one
+/// account's previews can neither confirm nor crowd out another's.
 ///
 /// The store is bounded by `NONCE_CAP` (oldest entries evicted) and entries
 /// older than `NONCE_TTL` are swept on every issue and treated as invalid
@@ -935,13 +938,15 @@ const NONCE_CAP: usize = 256;
 /// an email but expire well before the MCP process restarts.
 const NONCE_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
-/// Drop entries older than TTL, then if still over cap drop the oldest.
-fn evict(map: &mut std::collections::HashMap<String, Nonce>) {
+/// Drop entries older than TTL, then if `tenant` is still at its cap drop its
+/// oldest.
+fn evict(map: &mut std::collections::HashMap<String, Nonce>, tenant: &str) {
     let now = std::time::Instant::now();
     map.retain(|_, n| now.duration_since(n.issued_at) < NONCE_TTL);
-    while map.len() >= NONCE_CAP {
+    while map.values().filter(|n| n.tenant == tenant).count() >= NONCE_CAP {
         let oldest = map
             .iter()
+            .filter(|(_, n)| n.tenant == tenant)
             .min_by_key(|(_, n)| n.issued_at)
             .map(|(k, _)| k.clone());
         match oldest {
@@ -975,14 +980,15 @@ pub fn params_fingerprint(parts: &[&str]) -> String {
 }
 
 /// Issue a new one-shot confirmation nonce for the given params.
-pub async fn issue_nonce(store: &NonceStore, parts: &[&str]) -> String {
+pub async fn issue_nonce(store: &NonceStore, tenant: &str, parts: &[&str]) -> String {
     let nonce = uuid::Uuid::new_v4().to_string();
     let entry = Nonce {
+        tenant: tenant.to_string(),
         fingerprint: params_fingerprint(parts),
         issued_at: std::time::Instant::now(),
     };
     let mut map = store.lock().await;
-    evict(&mut map);
+    evict(&mut map, tenant);
     map.insert(nonce.clone(), entry);
     nonce
 }
@@ -992,16 +998,22 @@ pub async fn issue_nonce(store: &NonceStore, parts: &[&str]) -> String {
 /// so a bad CONFIRM forces the caller back to PREVIEW.
 pub async fn consume_nonce(
     store: &NonceStore,
+    tenant: &str,
     nonce: Option<&str>,
     parts: &[&str],
 ) -> std::result::Result<(), &'static str> {
     let nonce =
         nonce.ok_or("Missing confirmation_token. Use action=PREVIEW first to obtain one.")?;
-    let entry = store
-        .lock()
-        .await
-        .remove(nonce)
-        .ok_or("Invalid or already-used confirmation_token. Re-run PREVIEW.")?;
+    let invalid = "Invalid or already-used confirmation_token. Re-run PREVIEW.";
+    let entry = {
+        let mut map = store.lock().await;
+        // Another account's nonce is left where it is, so whoever learns one
+        // cannot spend it for its owner.
+        if map.get(nonce).is_none_or(|n| n.tenant != tenant) {
+            return Err(invalid);
+        }
+        map.remove(nonce).ok_or(invalid)?
+    };
     if std::time::Instant::now().duration_since(entry.issued_at) >= NONCE_TTL {
         return Err("confirmation_token expired. Re-run PREVIEW.");
     }
@@ -1100,14 +1112,18 @@ mod tests {
     async fn issue_then_consume_with_matching_params_ok() {
         let store = fresh_store();
         let parts = ["to@example.com", "subject", "body"];
-        let nonce = issue_nonce(&store, &parts).await;
-        assert!(consume_nonce(&store, Some(&nonce), &parts).await.is_ok());
+        let nonce = issue_nonce(&store, "t", &parts).await;
+        assert!(
+            consume_nonce(&store, "t", Some(&nonce), &parts)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
     async fn consume_rejects_missing_nonce() {
         let store = fresh_store();
-        let err = consume_nonce(&store, None, &["x"]).await.unwrap_err();
+        let err = consume_nonce(&store, "t", None, &["x"]).await.unwrap_err();
         assert!(err.contains("Missing"));
     }
 
@@ -1115,9 +1131,11 @@ mod tests {
     async fn consume_rejects_reused_nonce() {
         let store = fresh_store();
         let parts = ["x"];
-        let nonce = issue_nonce(&store, &parts).await;
-        consume_nonce(&store, Some(&nonce), &parts).await.unwrap();
-        let err = consume_nonce(&store, Some(&nonce), &parts)
+        let nonce = issue_nonce(&store, "t", &parts).await;
+        consume_nonce(&store, "t", Some(&nonce), &parts)
+            .await
+            .unwrap();
+        let err = consume_nonce(&store, "t", Some(&nonce), &parts)
             .await
             .unwrap_err();
         assert!(err.contains("Invalid or already-used"));
@@ -1126,8 +1144,8 @@ mod tests {
     #[tokio::test]
     async fn consume_rejects_tampered_params() {
         let store = fresh_store();
-        let nonce = issue_nonce(&store, &["preview"]).await;
-        let err = consume_nonce(&store, Some(&nonce), &["tampered"])
+        let nonce = issue_nonce(&store, "t", &["preview"]).await;
+        let err = consume_nonce(&store, "t", Some(&nonce), &["tampered"])
             .await
             .unwrap_err();
         assert!(err.contains("Params changed"));
@@ -1141,16 +1159,48 @@ mod tests {
         store.lock().await.insert(
             nonce.clone(),
             Nonce {
+                tenant: "t".into(),
                 fingerprint: params_fingerprint(&parts),
                 issued_at: std::time::Instant::now()
                     - NONCE_TTL
                     - std::time::Duration::from_secs(1),
             },
         );
-        let err = consume_nonce(&store, Some(&nonce), &parts)
+        let err = consume_nonce(&store, "t", Some(&nonce), &parts)
             .await
             .unwrap_err();
         assert!(err.contains("expired"));
+    }
+
+    #[tokio::test]
+    async fn a_nonce_confirms_only_for_its_own_account() {
+        let store = fresh_store();
+        let nonce = issue_nonce(&store, "alice", &["x"]).await;
+        assert!(
+            consume_nonce(&store, "mallory", Some(&nonce), &["x"])
+                .await
+                .is_err()
+        );
+        // And was not spent by the attempt.
+        assert!(
+            consume_nonce(&store, "alice", Some(&nonce), &["x"])
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn one_account_at_its_cap_leaves_others_alone() {
+        let store = fresh_store();
+        let kept = issue_nonce(&store, "alice", &["x"]).await;
+        for _ in 0..NONCE_CAP + 10 {
+            issue_nonce(&store, "mallory", &["y"]).await;
+        }
+        assert!(
+            consume_nonce(&store, "alice", Some(&kept), &["x"])
+                .await
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1172,6 +1222,7 @@ mod tests {
             map.insert(
                 oldest_nonce.clone(),
                 Nonce {
+                    tenant: "t".into(),
                     fingerprint: params_fingerprint(&["oldest"]),
                     issued_at: base,
                 },
@@ -1180,6 +1231,7 @@ mod tests {
                 map.insert(
                     format!("n{i}"),
                     Nonce {
+                        tenant: "t".into(),
                         fingerprint: params_fingerprint(&["x"]),
                         issued_at: base + std::time::Duration::from_millis(i as u64),
                     },
@@ -1187,7 +1239,7 @@ mod tests {
             }
             assert_eq!(map.len(), NONCE_CAP);
         }
-        let new_nonce = issue_nonce(&store, &["new"]).await;
+        let new_nonce = issue_nonce(&store, "t", &["new"]).await;
         let map = store.lock().await;
         assert_eq!(map.len(), NONCE_CAP);
         assert!(!map.contains_key(&oldest_nonce), "oldest should be evicted");
@@ -1201,13 +1253,14 @@ mod tests {
         store.lock().await.insert(
             expired.clone(),
             Nonce {
+                tenant: "t".into(),
                 fingerprint: params_fingerprint(&["old"]),
                 issued_at: std::time::Instant::now()
                     - NONCE_TTL
                     - std::time::Duration::from_secs(1),
             },
         );
-        issue_nonce(&store, &["new"]).await;
+        issue_nonce(&store, "t", &["new"]).await;
         assert!(!store.lock().await.contains_key(&expired));
     }
 }
