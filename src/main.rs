@@ -729,7 +729,7 @@ async fn run() -> std::process::ExitCode {
 
         Commands::Completions { shell } => {
             generate(shell, &mut Cli::command(), "fastmail", &mut io::stdout());
-            return;
+            return std::process::ExitCode::SUCCESS;
         }
 
         Commands::Masked(cmd) => match cmd {
