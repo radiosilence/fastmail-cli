@@ -650,17 +650,18 @@ impl JmapClient {
             .timeout(REQUEST_CEILING)
             .build()
             .expect("Failed to build HTTP client");
+        let tenant_key = {
+            use sha2::{Digest, Sha256};
+            crate::util::hex(&Sha256::digest(token.as_bytes()))
+        };
 
         Self {
             client,
             token,
+            tenant_key,
             session_url: SESSION_URL.to_string(),
             session: std::sync::RwLock::new(None),
             downloads: tokio::sync::Semaphore::new(CONCURRENT_DOWNLOADS),
-            tenant_key: {
-                use sha2::{Digest, Sha256};
-                crate::util::hex(&Sha256::digest(token.as_bytes()))
-            },
             rejected: Default::default(),
         }
     }

@@ -37,9 +37,7 @@ impl MutationRoot {
         let to_addrs = parse_addresses(&to);
         let cc_addrs = cc.as_deref().map(parse_addresses).unwrap_or_default();
         let bcc_addrs = bcc.as_deref().map(parse_addresses).unwrap_or_default();
-        let nonce_store = ctx
-            .data::<crate::mcp::graphql::SharedClient>()?
-            .confirmations();
+        let nonce_store = ctx.data::<super::types::NonceStore>()?;
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let attachments = match attachments::resolve(
             client,
@@ -154,9 +152,7 @@ impl MutationRoot {
         #[graphql(desc = "Token from PREVIEW response — required for CONFIRM/DRAFT")]
         confirmation_token: Option<String>,
     ) -> Result<GqlComposeResult> {
-        let nonce_store = ctx
-            .data::<crate::mcp::graphql::SharedClient>()?
-            .confirmations();
+        let nonce_store = ctx.data::<super::types::NonceStore>()?;
         let reply_all = all.unwrap_or(false);
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let attachments = match attachments::resolve(
@@ -318,9 +314,7 @@ impl MutationRoot {
         confirmation_token: Option<String>,
     ) -> Result<GqlComposeResult> {
         let body_str = body.as_deref().unwrap_or("");
-        let nonce_store = ctx
-            .data::<crate::mcp::graphql::SharedClient>()?
-            .confirmations();
+        let nonce_store = ctx.data::<super::types::NonceStore>()?;
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let attachments = match attachments::resolve(
             client,
@@ -542,9 +536,7 @@ impl MutationRoot {
         #[graphql(desc = "Token from PREVIEW response — required for CONFIRM")]
         confirmation_token: Option<String>,
     ) -> Result<GqlComposeResult> {
-        let nonce_store = ctx
-            .data::<crate::mcp::graphql::SharedClient>()?
-            .confirmations();
+        let nonce_store = ctx.data::<super::types::NonceStore>()?;
         // An email's content can't change under its ID, so the ID alone pins
         // exactly what was previewed.
         let params = ["send_draft", email_id.as_str()];
