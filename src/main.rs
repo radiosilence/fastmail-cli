@@ -1,7 +1,7 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 use fastmail_cli::models::Output;
-use fastmail_cli::{commands, jmap, mcp, util};
+use fastmail_cli::{commands, extract, jmap, mcp, util};
 use std::io;
 use tracing_subscriber::EnvFilter;
 
@@ -513,8 +513,29 @@ enum ContactsCommands {
     },
 }
 
-#[tokio::main]
-async fn main() {
+fn main() -> std::process::ExitCode {
+    // Before a runtime, config or logging exists: the worker child's stdout is
+    // its result, and it is handed nothing but its input.
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() == Some(std::ffi::OsStr::new(extract::CHILD_ARG)) {
+        let rest: Vec<String> = args.map(|a| a.to_string_lossy().into_owned()).collect();
+        return extract::run_child(&rest);
+    }
+    extract::isolate();
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to start the async runtime");
+    let code = runtime.block_on(run());
+    // Dropping a runtime waits for its blocking tasks without limit. Shutting
+    // down with a timeout drops whatever is left instead, which also kills any
+    // worker child still attached to an abandoned request.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+    code
+}
+
+async fn run() -> std::process::ExitCode {
     // stderr, because stdout carries the output: JSON for every command, and
     // the JSON-RPC stream itself for `mcp` over stdio.
     tracing_subscriber::fmt()
@@ -715,7 +736,7 @@ async fn main() {
 
         Commands::Completions { shell } => {
             generate(shell, &mut Cli::command(), "fastmail", &mut io::stdout());
-            return;
+            return std::process::ExitCode::SUCCESS;
         }
 
         Commands::Masked(cmd) => match cmd {
@@ -818,4 +839,5 @@ async fn main() {
         Output::<()>::error(e.to_string()).print();
         std::process::exit(1);
     }
+    std::process::ExitCode::SUCCESS
 }

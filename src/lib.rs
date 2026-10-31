@@ -8,6 +8,7 @@ pub mod carddav;
 pub mod commands;
 pub mod config;
 pub mod error;
+pub mod extract;
 pub mod jmap;
 pub mod mcp;
 pub mod models;

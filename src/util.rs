@@ -30,41 +30,8 @@ pub fn parse_addresses(input: &str) -> Vec<EmailAddress> {
         .collect()
 }
 
-// ============ Text Extraction ============
-
-/// Extract text from attachment data using kreuzberg
-/// Supports: PDF, DOC, DOCX, ODT, XLSX, XLS, ODS, PPTX, PPT, EPUB, RTF,
-/// HTML, XML, JSON, YAML, CSV, TSV, TXT, MD, EML, MSG, and more
-/// NOTE: Returns None for images - use existing image pipeline instead
-pub async fn extract_text(bytes: &[u8], filename: &str) -> anyhow::Result<Option<String>> {
-    use kreuzberg::{ExtractionConfig, extract_bytes};
-
-    // Skip images - we have our own pipeline for those (resize + send to Claude)
-    if is_image_extension(filename) {
-        return Ok(None);
-    }
-
-    let mime_type = mime_from_filename(filename);
-    let config = ExtractionConfig::default();
-
-    match extract_bytes(bytes, &mime_type, &config).await {
-        Ok(result) => {
-            let content = result.content.trim();
-            if content.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(content.to_string()))
-            }
-        }
-        Err(e) => {
-            tracing::debug!("kreuzberg extraction failed for {}: {}", filename, e);
-            Ok(None)
-        }
-    }
-}
-
 /// Check if filename has an image extension (used to skip kreuzberg for images)
-fn is_image_extension(filename: &str) -> bool {
+pub(crate) fn is_image_extension(filename: &str) -> bool {
     let ext = Path::new(filename)
         .extension()
         .and_then(|e| e.to_str())
@@ -217,14 +184,36 @@ pub fn infer_image_mime(filename: &str) -> Option<&'static str> {
 /// Default max size for MCP (Claude's ~1MB base64 limit means raw < 700KB)
 pub const MCP_IMAGE_MAX_BYTES: usize = 700 * 1024;
 
+/// Largest decode allocation accepted from an attachment: room for a photo of
+/// a few hundred megapixels. A small, highly compressed PNG can claim far more
+/// than its size, so this bounds what any one image costs. The limit scales
+/// with the input, as for document extraction, so large images still decode.
+const MAX_IMAGE_ALLOC_BASE: u64 = 1024 * 1024 * 1024;
+const MAX_IMAGE_ALLOC_PER_INPUT_BYTE: u64 = 16;
+
+/// Attempts at fitting `max_bytes`. JPEG size does not scale exactly with
+/// pixel count, so the first estimate can overshoot.
+const RESIZE_ATTEMPTS: usize = 6;
+
+/// Whether [`resize_image`] can decode this type.
+pub fn is_resizable(content_type: &str) -> bool {
+    matches!(
+        content_type,
+        "image/png" | "image/jpeg" | "image/jpg" | "image/gif" | "image/webp"
+    )
+}
+
 /// Resize image if needed to stay under a size limit
 /// Returns (processed_bytes, mime_type)
+///
+/// CPU-bound for as long as a second on a large photo, so async callers run it
+/// through [`crate::extract::resize_image`] rather than on the runtime.
 pub fn resize_image(
     data: &[u8],
     content_type: &str,
     max_bytes: usize,
 ) -> Result<(Vec<u8>, String), String> {
-    use image::ImageFormat;
+    use image::{ImageFormat, ImageReader, Limits};
     use std::io::Cursor;
 
     // If already small enough, return as-is
@@ -241,24 +230,47 @@ pub fn resize_image(
         _ => return Err(format!("Unsupported image format: {}", content_type)),
     };
 
-    // Load image
-    let img = image::load_from_memory_with_format(data, format)
-        .map_err(|e| format!("Failed to load image: {}", e))?;
+    let mut limits = Limits::default();
+    limits.max_alloc = Some(
+        MAX_IMAGE_ALLOC_PER_INPUT_BYTE
+            .saturating_mul(data.len() as u64)
+            .saturating_add(MAX_IMAGE_ALLOC_BASE),
+    );
+    let mut reader = ImageReader::with_format(Cursor::new(data), format);
+    reader.limits(limits);
+    // JPEG has no alpha channel, and the encoder refuses RGBA input.
+    let img = image::DynamicImage::ImageRgb8(
+        reader
+            .decode()
+            .map_err(|e| format!("Failed to load image: {}", e))?
+            .into_rgb8(),
+    );
 
-    // Resize to fit - scale down proportionally
     let (width, height) = (img.width(), img.height());
-    let scale = (max_bytes as f64 / data.len() as f64).sqrt();
-    let new_width = ((width as f64 * scale) as u32).max(1);
-    let new_height = ((height as f64 * scale) as u32).max(1);
-
-    let resized = img.resize(new_width, new_height, image::imageops::FilterType::Lanczos3);
-
-    // Encode as JPEG for better compression
+    let mut scale = (max_bytes as f64 / data.len() as f64).sqrt();
     let mut output = Vec::new();
-    resized
-        .write_to(&mut Cursor::new(&mut output), ImageFormat::Jpeg)
-        .map_err(|e| format!("Failed to encode image: {}", e))?;
+    for _ in 0..RESIZE_ATTEMPTS {
+        let new_width = ((width as f64 * scale) as u32).max(1);
+        let new_height = ((height as f64 * scale) as u32).max(1);
+        let resized = img.resize(new_width, new_height, image::imageops::FilterType::Lanczos3);
 
+        output.clear();
+        resized
+            .write_to(&mut Cursor::new(&mut output), ImageFormat::Jpeg)
+            .map_err(|e| format!("Failed to encode image: {}", e))?;
+        if output.len() <= max_bytes {
+            break;
+        }
+        // Shrink by the overshoot, with a margin so the next try lands under.
+        scale *= (max_bytes as f64 / output.len() as f64).sqrt() * 0.9;
+    }
+
+    if output.len() > max_bytes {
+        return Err(format!(
+            "Could not fit the image in {max_bytes} bytes; the smallest attempt was {}",
+            output.len()
+        ));
+    }
     Ok((output, "image/jpeg".to_string()))
 }
 
@@ -373,6 +385,47 @@ pub fn resolve_html(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    fn noisy_png(width: u32, height: u32, alpha: bool) -> Vec<u8> {
+        // Noise, so the PNG is too large to pass through untouched.
+        let mut seed = 0x2545_f491_u32;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as u8
+        };
+        let img = if alpha {
+            image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(width, height, |_, _| {
+                image::Rgba([next(), next(), next(), next()])
+            }))
+        } else {
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(width, height, |_, _| {
+                image::Rgb([next(), next(), next()])
+            }))
+        };
+        let mut out = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn resize_handles_a_png_with_alpha() {
+        let png = noisy_png(400, 400, true);
+        let (out, mime) = resize_image(&png, "image/png", 20 * 1024).unwrap();
+        assert_eq!(mime, "image/jpeg");
+        assert!(out.len() <= 20 * 1024, "{} bytes", out.len());
+    }
+
+    #[test]
+    fn resize_fits_the_limit_it_was_given() {
+        let png = noisy_png(600, 600, false);
+        for max in [8 * 1024, 30 * 1024, 100 * 1024] {
+            let (out, _) = resize_image(&png, "image/png", max).unwrap();
+            assert!(out.len() <= max, "{} bytes over a {max} limit", out.len());
+        }
+    }
 
     #[test]
     fn test_resolve_html_inline() {

@@ -591,7 +591,8 @@ impl GqlAttachment {
 
         let data = self.bytes(ctx).await?;
         let limit = max_bytes.map_or(crate::util::MCP_IMAGE_MAX_BYTES, |b| b as usize);
-        let (resized, _mime) = crate::util::resize_image(&data, mime, limit)
+        let (resized, _mime) = crate::extract::resize_image(data, mime.to_string(), limit)
+            .await
             .map_err(|e| async_graphql::Error::new(format!("Failed to process image: {e}")))?;
         Ok(Some(base64::Engine::encode(
             &base64::engine::general_purpose::STANDARD,
@@ -609,7 +610,7 @@ impl GqlAttachment {
     async fn text(&self, ctx: &Context<'_>) -> Result<Option<String>> {
         let name = self.name.as_deref().unwrap_or("attachment");
         let data = self.bytes(ctx).await?;
-        crate::util::extract_text(&data, name)
+        crate::extract::extract_text(&data, name)
             .await
             .map_err(|e| async_graphql::Error::new(format!("Failed to extract text: {e}")))
     }
