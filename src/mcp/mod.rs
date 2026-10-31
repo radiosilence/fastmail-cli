@@ -54,9 +54,9 @@ async fn client_for(cache: &ClientCache, token: &str) -> anyhow::Result<SharedCl
     }
     // Authenticate outside the cache lock so concurrent callers for other
     // tokens aren't blocked on this network round-trip.
-    let mut client = JmapClient::new(token.to_string());
+    let client = JmapClient::new(token.to_string());
     client.authenticate().await?;
-    let shared: SharedClient = Arc::new(Mutex::new(client));
+    let shared: SharedClient = Arc::new(client);
 
     // Re-check under lock: another caller may have inserted meanwhile.
     Ok(cache
@@ -143,6 +143,10 @@ pub struct FastmailMcp {
     default_carddav: CardDavCreds,
     #[allow(dead_code)] // referenced by #[tool_handler] macro expansion
     tool_router: ToolRouter<Self>,
+    /// Cancelled when the HTTP server begins shutting down, which ends every
+    /// open subscription stream. Graceful shutdown waits for open responses,
+    /// and a subscription is a response that never finishes by itself.
+    shutdown: tokio_util::sync::CancellationToken,
 }
 
 impl FastmailMcp {
@@ -153,6 +157,7 @@ impl FastmailMcp {
             default_token,
             default_carddav: CardDavCreds::from_local_config(),
             tool_router: Self::tool_router(),
+            shutdown: tokio_util::sync::CancellationToken::new(),
         }
     }
 
@@ -534,11 +539,15 @@ async fn graphql_stream_endpoint(
         }
     };
 
-    let events = mcp.schema.execute_stream(request).map(|response| {
-        let data = serde_json::to_string(&response)
-            .unwrap_or_else(|e| format!(r#"{{"errors":[{{"message":"{e}"}}]}}"#));
-        Ok::<_, std::convert::Infallible>(sse::Event::default().data(data))
-    });
+    let events = mcp
+        .schema
+        .execute_stream(request)
+        .take_until(mcp.shutdown.clone().cancelled_owned())
+        .map(|response| {
+            let data = serde_json::to_string(&response)
+                .unwrap_or_else(|e| format!(r#"{{"errors":[{{"message":"{e}"}}]}}"#));
+            Ok::<_, std::convert::Infallible>(sse::Event::default().data(data))
+        });
 
     // Proxies drop connections that go quiet, and a mail subscription is quiet
     // most of the time.
@@ -572,6 +581,10 @@ pub async fn run_http_server(addr: &str, surfaces: HttpSurfaces) -> anyhow::Resu
         StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     };
 
+    // Installed before anything slow, so a SIGTERM during start-up is not lost:
+    // as PID 1 it would otherwise be ignored.
+    let mut signals = ShutdownSignals::install()?;
+
     // One shared instance (shared schema + client cache) cloned into each session
     // and used as the axum state for the GraphQL routes.
     let mcp = FastmailMcp::http();
@@ -581,6 +594,10 @@ pub async fn run_http_server(addr: &str, surfaces: HttpSurfaces) -> anyhow::Resu
     // (localhost/127.0.0.1/::1) would reject with 403. Rebinding protection
     // guards browsers hitting a localhost MCP directly — irrelevant for a
     // proxied, non-browser-facing backend; the proxy is the security boundary.
+    //
+    // rmcp is deliberately not handed the shutdown token: cancelling it aborts
+    // tool calls in flight at once. Its sessions instead end with the process,
+    // so a tool call gets the same grace period as any other request.
     let config = StreamableHttpServerConfig::default().disable_allowed_hosts();
     let service = StreamableHttpService::new(
         {
@@ -632,11 +649,76 @@ pub async fn run_http_server(addr: &str, surfaces: HttpSurfaces) -> anyhow::Resu
         }
     }
 
-    axum::serve(listener, router.with_state(mcp))
-        .await
-        .map_err(|e| anyhow::anyhow!("HTTP server error: {}", e))?;
+    let shutdown = mcp.shutdown.clone();
+    let on_signal = shutdown.clone();
+    tokio::spawn(async move {
+        signals.recv().await;
+        tracing::info!("Shutting down");
+        on_signal.cancel();
+        // A second signal skips the grace period.
+        signals.recv().await;
+        std::process::exit(130);
+    });
+
+    let serve = axum::serve(listener, router.with_state(mcp))
+        .with_graceful_shutdown(shutdown.clone().cancelled_owned());
+    tokio::select! {
+        result = serve => result.map_err(|e| anyhow::anyhow!("HTTP server error: {}", e))?,
+        // Requests still running after the deadline are cut off rather than
+        // waited on: a container runtime sends SIGKILL soon after SIGTERM.
+        () = async {
+            shutdown.cancelled().await;
+            tokio::time::sleep(SHUTDOWN_GRACE).await;
+        } => tracing::warn!("Requests still open after {}s; exiting", SHUTDOWN_GRACE.as_secs()),
+    }
 
     Ok(())
+}
+
+/// How long in-flight requests get to finish once shutdown begins. Under the
+/// 10 seconds Docker and Kubernetes allow by default before SIGKILL.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// SIGTERM and SIGINT, registered when installed rather than when first
+/// awaited.
+///
+/// The image runs this binary as PID 1, and the kernel gives PID 1 no default
+/// action for either signal. Without handlers, `docker stop` waits out its
+/// whole timeout and then kills the server mid-request, and Ctrl-C under
+/// `docker run -it` does nothing.
+struct ShutdownSignals {
+    #[cfg(unix)]
+    term: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    int: tokio::signal::unix::Signal,
+}
+
+impl ShutdownSignals {
+    fn install() -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            Ok(Self {
+                term: signal(SignalKind::terminate())?,
+                int: signal(SignalKind::interrupt())?,
+            })
+        }
+        #[cfg(not(unix))]
+        Ok(Self {})
+    }
+
+    /// The next SIGTERM or SIGINT.
+    async fn recv(&mut self) {
+        #[cfg(unix)]
+        tokio::select! {
+            _ = self.term.recv() => {}
+            _ = self.int.recv() => {}
+        }
+        #[cfg(not(unix))]
+        if tokio::signal::ctrl_c().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -859,7 +941,7 @@ mod tests {
         mcp.clients
             .lock()
             .await
-            .insert("fake-token".to_string(), Arc::new(Mutex::new(client)));
+            .insert("fake-token".to_string(), Arc::new(client));
 
         let req = HttpGraphqlRequest {
             query: "{ session { status } }".to_string(),

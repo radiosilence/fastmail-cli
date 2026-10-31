@@ -8,7 +8,7 @@ pub async fn forward(
     body: &str,
     params: ComposeParams<'_>,
 ) -> anyhow::Result<()> {
-    let mut client = authenticated_client().await?;
+    let client = authenticated_client().await?;
     let draft = params.draft;
 
     let original = client.get_email(email_id).await?;

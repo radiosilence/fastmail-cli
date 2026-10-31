@@ -13,12 +13,9 @@ use crate::models::Email;
 use std::time::Duration;
 use tracing::debug;
 
-/// A client shared between a watcher and whatever else is using the connection.
-///
-/// The lock is held only across individual JMAP calls, never across a read of
-/// the push channel — that read blocks until mail arrives, which on a quiet
-/// account is hours.
-pub type SharedJmapClient = std::sync::Arc<tokio::sync::Mutex<JmapClient>>;
+/// A client shared between a watcher and whatever else is using the
+/// connection. [`JmapClient`] is safe to use concurrently.
+pub type SharedJmapClient = std::sync::Arc<JmapClient>;
 
 /// How often to ask the server for a keep-alive, and the basis for the read
 /// timeout that notices a connection which died without saying so.
@@ -71,16 +68,13 @@ impl ArrivalWatcher {
         full: bool,
         poll: Option<Duration>,
     ) -> Result<Self> {
-        let (mailbox_id, state) = {
-            let mut locked = client.lock().await;
-            let mailbox_id = match mailbox {
-                Some(name) => Some(locked.find_mailbox(name).await?.id),
-                None => None,
-            };
-            // Start from now: the caller asked what arrives next, not what is
-            // already sitting there.
-            (mailbox_id, locked.email_state().await?)
+        let mailbox_id = match mailbox {
+            Some(name) => Some(client.find_mailbox(name).await?.id),
+            None => None,
         };
+        // Start from now: the caller asked what arrives next, not what is
+        // already sitting there.
+        let state = client.email_state().await?;
 
         Ok(Self {
             client,
@@ -134,14 +128,10 @@ impl ArrivalWatcher {
             };
 
             if stream.is_none() {
-                // Opened under the lock, read outside it: the read blocks for
-                // as long as the account is quiet.
-                let opened = {
-                    let client = self.client.lock().await;
-                    client
-                        .open_event_stream(PING_SECONDS, last_event_id.as_deref())
-                        .await
-                };
+                let opened = self
+                    .client
+                    .open_event_stream(PING_SECONDS, last_event_id.as_deref())
+                    .await;
                 match opened {
                     Ok(resp) => *stream = Some(resp),
                     Err(e) if is_fatal(&e) => return Err(e),
@@ -198,7 +188,7 @@ impl ArrivalWatcher {
 
     /// Advance the cursor and collect whatever it turned up.
     async fn drain(&mut self) -> Result<Arrivals> {
-        let client = self.client.lock().await;
+        let client = &self.client;
 
         let changes = match client.email_changes(&self.state).await {
             Ok(changes) => changes,
