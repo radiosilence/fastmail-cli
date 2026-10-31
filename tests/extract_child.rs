@@ -5,7 +5,12 @@ use std::process::{Command, Stdio};
 
 fn run_child(mime: &str, input: &[u8]) -> std::process::Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_fastmail"))
-        .args(["__attachment-worker", "text", mime])
+        .args([
+            "__attachment-worker",
+            &std::process::id().to_string(),
+            "text",
+            mime,
+        ])
         .env_clear()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -43,7 +48,11 @@ fn an_unparseable_document_is_empty_not_a_failure() {
 #[test]
 fn an_unknown_job_fails() {
     let out = Command::new(env!("CARGO_BIN_EXE_fastmail"))
-        .args(["__attachment-worker", "format-disk"])
+        .args([
+            "__attachment-worker",
+            &std::process::id().to_string(),
+            "format-disk",
+        ])
         .stdin(Stdio::null())
         .output()
         .unwrap();

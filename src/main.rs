@@ -522,11 +522,16 @@ fn main() -> std::process::ExitCode {
     }
     extract::isolate();
 
-    tokio::runtime::Builder::new_multi_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .expect("Failed to start the async runtime")
-        .block_on(run())
+        .expect("Failed to start the async runtime");
+    let code = runtime.block_on(run());
+    // Dropping a runtime waits for its blocking tasks without limit. Shutting
+    // down with a timeout drops whatever is left instead, which also kills any
+    // worker child still attached to an abandoned request.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+    code
 }
 
 async fn run() -> std::process::ExitCode {

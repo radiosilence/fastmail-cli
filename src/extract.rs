@@ -137,8 +137,13 @@ pub async fn resize_image(
 }
 
 async fn run_worker(worker: &Worker, args: &[&str], input: &[u8]) -> anyhow::Result<Vec<u8>> {
+    // Spawned from this task's thread, an async worker that lives as long as
+    // the runtime. That matters on Linux: the child's parent-death signal
+    // fires when the spawning *thread* exits, so spawning from a blocking-pool
+    // thread, which exits when idle, would kill children mid-job.
     let mut process = tokio::process::Command::new(&worker.exe)
         .arg(CHILD_ARG)
+        .arg(std::process::id().to_string())
         .args(args)
         .env_clear()
         .env("TMPDIR", &worker.tmp)
@@ -202,8 +207,18 @@ async fn extract_in_process(bytes: &[u8], mime: &str) -> String {
 }
 
 /// The child's side: input on stdin, result on stdout, failure as the exit
-/// status. `args` are what followed [`CHILD_ARG`].
+/// status. `args` are what followed [`CHILD_ARG`]: the parent's pid, then the
+/// job.
 pub fn run_child(args: &[String]) -> ExitCode {
+    let Some((parent, args)) = args.split_first() else {
+        return ExitCode::FAILURE;
+    };
+    #[cfg(unix)]
+    if !outlive_no_one(parent) {
+        return ExitCode::FAILURE;
+    }
+    #[cfg(not(unix))]
+    let _ = parent;
     #[cfg(target_os = "linux")]
     contain_memory();
 
@@ -243,6 +258,45 @@ pub fn run_child(args: &[String]) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => ExitCode::FAILURE,
     }
+}
+
+/// Bound the child's life by its own limits, not only by the parent's
+/// deadline, which is gone when the parent is: killed outright, or exiting
+/// without dropping the request that owns the child.
+///
+/// CPU time is capped at the deadline, after which the kernel kills the
+/// child; that catches a runaway parse. On Linux the child also dies with its
+/// parent, which catches a blocked one. Returns false when the parent has
+/// already gone.
+#[cfg(unix)]
+fn outlive_no_one(parent: &str) -> bool {
+    use rustix::process::{Resource, Rlimit, setrlimit};
+    let secs = TIMEOUT.as_secs();
+    // SIGXCPU at the soft limit, SIGKILL at the hard one.
+    let _ = setrlimit(
+        Resource::Cpu,
+        Rlimit {
+            current: Some(secs),
+            maximum: Some(secs + 5),
+        },
+    );
+    #[cfg(target_os = "linux")]
+    {
+        use rustix::process::{Pid, Signal, getppid, set_parent_process_death_signal};
+        if set_parent_process_death_signal(Some(Signal::KILL)).is_err() {
+            return false;
+        }
+        // The parent may have died before the signal was armed.
+        let Ok(parent) = parent.parse::<i32>() else {
+            return false;
+        };
+        if Pid::as_raw(getppid()) != parent {
+            return false;
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = parent;
+    true
 }
 
 /// Make this process the one the kernel kills when memory runs out, and keep it
