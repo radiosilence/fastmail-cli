@@ -1,0 +1,1 @@
+- **Requests for one account run concurrently.** The MCP server serialised every Fastmail call for a token behind one lock, so a slow attachment download stalled everything else that user did. Mailbox lookups by name also no longer use a list cached at first use, which missed folders created after the server started.
