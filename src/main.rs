@@ -534,7 +534,6 @@ fn main() -> std::process::ExitCode {
     code
 }
 
-
 async fn run() -> std::process::ExitCode {
     // stderr, because stdout carries the output: JSON for every command, and
     // the JSON-RPC stream itself for `mcp` over stdio.
