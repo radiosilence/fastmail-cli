@@ -280,7 +280,7 @@ impl CardDavClient {
         let addressbooks = self.list_addressbooks().await?;
         use async_graphql::futures_util::{StreamExt, TryStreamExt, stream};
         let books: Vec<Vec<Contact>> = stream::iter(&addressbooks)
-            .map(|ab| self.list_contacts(&ab.href))
+            .map(|ab: &AddressBook| self.list_contacts(&ab.href))
             .buffered(CONCURRENT_BOOKS)
             .try_collect()
             .await?;
