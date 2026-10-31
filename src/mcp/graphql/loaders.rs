@@ -35,15 +35,20 @@ pub fn to_gql_error(e: LoadError) -> async_graphql::Error {
 pub struct EmailLoader(SharedClient);
 
 impl Loader<String> for EmailLoader {
-    type Value = Email;
+    /// Shared, because every lazy field on an email asks the loader for it
+    /// again, and an email with its bodies is the largest thing loaded.
+    type Value = Arc<Email>;
     type Error = LoadError;
 
-    async fn load(&self, keys: &[String]) -> Result<HashMap<String, Email>, Self::Error> {
+    async fn load(&self, keys: &[String]) -> Result<HashMap<String, Arc<Email>>, Self::Error> {
         let client = &self.0;
         let emails = client.get_emails(keys).await.map_err(Arc::new)?;
         // Missing IDs are simply absent from the map — `load_one` then yields
         // `Ok(None)`, which resolvers surface as a null rather than an error.
-        Ok(emails.into_iter().map(|e| (e.id.clone(), e)).collect())
+        Ok(emails
+            .into_iter()
+            .map(|e| (e.id.clone(), Arc::new(e)))
+            .collect())
     }
 }
 

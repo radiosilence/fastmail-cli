@@ -9,9 +9,8 @@
 //! [`super::loaders`]), so sibling fields and list elements collapse into one
 //! batched API call instead of N sequential ones.
 
-use std::borrow::Cow;
-
 use async_graphql::{Context, Enum, Object, Result, SimpleObject};
+use std::sync::Arc;
 
 use super::connection::{
     EmailConnection, ListConnection, PageArgs, emails_connection, page_complexity, paginate,
@@ -294,7 +293,7 @@ pub(crate) fn attachments_of(email: &Email) -> Vec<GqlAttachment> {
 /// the threading headers triggers a batched fetch of the full record for every
 /// email in the list at once — one extra API call, not one per email.
 pub struct GqlEmail {
-    inner: Email,
+    inner: Arc<Email>,
     /// Whether `inner` came from a full fetch (bodies + attachment metadata),
     /// as opposed to a list/search result carrying headers only.
     complete: bool,
@@ -308,9 +307,9 @@ impl GqlEmail {
     }
 
     /// Wrap an email fetched with the full property set.
-    pub fn full(email: Email) -> Self {
+    pub fn full(email: impl Into<Arc<Email>>) -> Self {
         Self {
-            inner: email,
+            inner: email.into(),
             complete: true,
         }
     }
@@ -318,15 +317,15 @@ impl GqlEmail {
     /// Wrap a list/search result. Body and attachment fields on it resolve lazily.
     pub fn summary(email: Email) -> Self {
         Self {
-            inner: email,
+            inner: Arc::new(email),
             complete: false,
         }
     }
 
     /// The full record: borrowed when we already have it, otherwise batch-loaded.
-    async fn detail<'a>(&'a self, ctx: &Context<'_>) -> Result<Cow<'a, Email>> {
+    async fn detail(&self, ctx: &Context<'_>) -> Result<Arc<Email>> {
         if self.complete {
-            return Ok(Cow::Borrowed(&self.inner));
+            return Ok(self.inner.clone());
         }
         let loader = ctx.data::<Emails>()?;
         let full = loader
@@ -336,7 +335,7 @@ impl GqlEmail {
             .ok_or_else(|| {
                 async_graphql::Error::new(format!("Email {} no longer exists", self.inner.id))
             })?;
-        Ok(Cow::Owned(full))
+        Ok(full)
     }
 }
 
@@ -1012,7 +1011,7 @@ pub struct GqlStatus {
 /// fully fetched, so bodies and attachment metadata are already present.
 pub struct GqlThread {
     pub id: Option<String>,
-    pub emails: Vec<Email>,
+    pub emails: Vec<Arc<Email>>,
 }
 
 impl GqlThread {
@@ -1029,7 +1028,7 @@ impl GqlThread {
             .unwrap_or_default();
 
         let loaded = emails.load_many(ids).await.map_err(to_gql_error)?;
-        let mut emails: Vec<Email> = loaded.into_values().collect();
+        let mut emails: Vec<Arc<Email>> = loaded.into_values().collect();
         emails.sort_by(|a, b| a.received_at.cmp(&b.received_at));
 
         Ok(Self {

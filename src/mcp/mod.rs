@@ -335,7 +335,9 @@ markAsRead, markAsSpam, and the remaining filter and sort options."
         }
 
         let response = self.schema.execute(request).await;
-        let json = serde_json::to_string_pretty(&response)
+        // Compact: the reader is a model, for which indentation is only more
+        // tokens, and a payload field can be megabytes.
+        let json = serde_json::to_string(&response)
             .unwrap_or_else(|e| format!("{{\"error\": \"Serialization failed: {e}\"}}"));
 
         Self::text_result(json)
