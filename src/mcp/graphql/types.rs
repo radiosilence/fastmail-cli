@@ -917,6 +917,9 @@ pub struct Nonce {
 /// whose stored fingerprint matches the current params — this prevents
 /// skipping PREVIEW and prevents reusing a nonce for different params.
 ///
+/// One store per Fastmail token, held by its pooled client, so one account's
+/// previews can neither confirm nor crowd out another's.
+///
 /// The store is bounded by `NONCE_CAP` (oldest entries evicted) and entries
 /// older than `NONCE_TTL` are swept on every issue and treated as invalid
 /// on consume, so a misbehaving client that previews without confirming
@@ -951,16 +954,24 @@ fn evict(map: &mut std::collections::HashMap<String, Nonce>) {
 }
 
 /// Fingerprint the compose params so we can detect param tampering between
-/// PREVIEW and CONFIRM. This is a non-cryptographic hash — it only needs to
-/// detect accidental drift, not defeat an attacker who already controls the
-/// process.
+/// PREVIEW and CONFIRM.
+///
+/// SHA-256 rather than the std hasher: whoever chooses both sets of arguments,
+/// such as text in an email steering the model, could otherwise search for a
+/// 64-bit collision and confirm recipients the preview never showed. Each part
+/// is length-prefixed so moving text between parts changes the digest.
 pub fn params_fingerprint(parts: &[&str]) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
     for part in parts {
-        part.hash(&mut hasher);
+        hasher.update((part.len() as u64).to_le_bytes());
+        hasher.update(part.as_bytes());
     }
-    format!("{:016x}", hasher.finish())
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Issue a new one-shot confirmation nonce for the given params.

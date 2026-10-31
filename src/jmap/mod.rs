@@ -90,6 +90,9 @@ pub struct JmapClient {
     session_url: String,
     session: std::sync::RwLock<Option<Arc<Connected>>>,
     downloads: tokio::sync::Semaphore,
+    /// Send confirmations issued to this account and not yet used. Kept here
+    /// because the client is what the MCP server pools per token.
+    confirmations: crate::mcp::graphql::types::NonceStore,
 }
 
 /// What one handshake established. Kept together so a reader never pairs one
@@ -644,6 +647,7 @@ impl JmapClient {
             session_url: SESSION_URL.to_string(),
             session: std::sync::RwLock::new(None),
             downloads: tokio::sync::Semaphore::new(CONCURRENT_DOWNLOADS),
+            confirmations: Default::default(),
         }
     }
 
@@ -693,6 +697,11 @@ impl JmapClient {
             capabilities,
         }));
         session
+    }
+
+    /// Outstanding PREVIEW confirmations for this account.
+    pub fn confirmations(&self) -> &crate::mcp::graphql::types::NonceStore {
+        &self.confirmations
     }
 
     fn connected(&self) -> Result<Arc<Connected>> {
