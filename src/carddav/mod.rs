@@ -11,6 +11,35 @@ use crate::error::{Error, Result};
 
 const CARDDAV_BASE: &str = "https://carddav.fastmail.com";
 
+/// Limits on connecting and on silence mid-response. Without them a stalled
+/// server holds the request, and the GraphQL resolver waiting on it, forever.
+/// There is no limit on the whole request: a large address book is a long
+/// download, and a healthy one keeps arriving.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Address books downloaded at once by a search.
+const CONCURRENT_BOOKS: usize = 4;
+
+/// One HTTP client for every CardDAV request in the process.
+///
+/// The MCP server builds a `CardDavClient` per GraphQL request, and a fresh
+/// `reqwest::Client` each time would mean a new connection pool and TLS
+/// handshake per call. Sharing it across users is safe: credentials go on each
+/// request, not on the connection.
+fn http_client() -> Client {
+    static CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .read_timeout(READ_TIMEOUT)
+                .build()
+                .expect("Failed to build HTTP client")
+        })
+        .clone()
+}
+
 // Per RFC 3986, these chars need escaping when interpolating into a URL path
 // segment. `/` is the segment delimiter and must be escaped to stay in-segment.
 const PATH_SEGMENT: &AsciiSet = &CONTROLS
@@ -86,7 +115,7 @@ pub struct CardDavClient {
 impl CardDavClient {
     pub fn new(username: String, app_password: String) -> Self {
         Self {
-            client: Client::new(),
+            client: http_client(),
             username,
             app_password,
         }
@@ -249,12 +278,15 @@ impl CardDavClient {
     pub async fn search_contacts(&self, query: &str) -> Result<Vec<Contact>> {
         // Get all contacts from all addressbooks and filter
         let addressbooks = self.list_addressbooks().await?;
-        let mut all_contacts = Vec::new();
-
-        for ab in addressbooks {
-            let contacts = self.list_contacts(&ab.href).await?;
-            all_contacts.extend(contacts);
-        }
+        use async_graphql::futures_util::{StreamExt, TryStreamExt, stream};
+        // Owned hrefs, so the closure borrows nothing from its argument; a
+        // borrowing one fails the `Send` check on the GraphQL resolver.
+        let books: Vec<Vec<Contact>> = stream::iter(addressbooks.into_iter().map(|ab| ab.href))
+            .map(|href| async move { self.list_contacts(&href).await })
+            .buffered(CONCURRENT_BOOKS)
+            .try_collect()
+            .await?;
+        let all_contacts: Vec<Contact> = books.into_iter().flatten().collect();
 
         let query_lower = query.to_lowercase();
         let filtered: Vec<Contact> = all_contacts
