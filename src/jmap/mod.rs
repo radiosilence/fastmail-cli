@@ -774,10 +774,12 @@ impl JmapClient {
             _ => {}
         }
 
-        let body = resp.text().await?;
-        let jmap_resp: JmapResponse = serde_json::from_str(&body).map_err(|e| {
+        let body = resp.bytes().await?;
+        let jmap_resp: JmapResponse = serde_json::from_slice(&body).map_err(|e| {
             debug!("Failed to parse JMAP response: {e}");
-            Error::Server(body.trim().to_string())
+            // Enough to recognise an error page, not a whole mailbox's worth.
+            let text = String::from_utf8_lossy(&body[..body.len().min(1024)]);
+            Error::Server(text.trim().to_string())
         })?;
         Ok(jmap_resp.method_responses)
     }
@@ -817,7 +819,9 @@ impl JmapClient {
             description: "Missing response data".into(),
         })?;
 
-        serde_json::from_value(data.clone()).map_err(|e| Error::Jmap {
+        // Deserialised from the borrowed tree: a full `Email/get` response is
+        // megabytes, and cloning it first would double that.
+        T::deserialize(data).map_err(|e| Error::Jmap {
             method: expected_method.into(),
             error_type: "parse".into(),
             description: e.to_string(),
@@ -931,10 +935,10 @@ impl JmapClient {
                 Self::parse_response(responses.get(1).unwrap_or(&Value::Null), "Email/get")?;
             // `Email/get` makes no ordering guarantee, so restore the sort order
             // the query asked for rather than trusting the response order.
-            let mut by_id: HashMap<&str, Email> = get_resp
+            let mut by_id: HashMap<String, Email> = get_resp
                 .list
-                .iter()
-                .map(|e| (e.id.as_str(), e.clone()))
+                .into_iter()
+                .map(|e| (e.id.clone(), e))
                 .collect();
             emails = query_resp
                 .ids
@@ -1488,13 +1492,15 @@ impl JmapClient {
     /// Download a blob (attachment) by ID
     #[instrument(skip(self))]
     pub async fn download_blob(&self, blob_id: &str) -> Result<Vec<u8>> {
+        // `Vec::from` takes the buffer over when the bytes are uniquely owned,
+        // as a whole response body is, rather than copying it.
         let _permit = self
             .downloads
             .acquire()
             .await
             .expect("the download semaphore is never closed");
         let bytes = self.fetch_blob(blob_id).await?.bytes().await?;
-        Ok(bytes.to_vec())
+        Ok(Vec::from(bytes))
     }
 
     /// A blob's size, read no further than `limit` bytes: past that, `limit + 1`.

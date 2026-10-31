@@ -141,14 +141,17 @@ pub fn name_and_type(
 
 /// Decode base64, refusing before decoding anything that cannot fit in `room`.
 pub fn decode(name: &str, encoded: &str, room: usize) -> Result<Vec<u8>, String> {
+    // Measured before copying, so an oversized argument is refused without
+    // first being duplicated.
+    let compact_len = encoded.bytes().filter(|b| !b.is_ascii_whitespace()).count();
+    let decoded_len = compact_len / 4 * 3;
+    if decoded_len.saturating_sub(2) > room {
+        return Err(over_cap(MAX_ATTACHMENT_BYTES - room + decoded_len));
+    }
     let compact: String = encoded
         .chars()
         .filter(|c| !c.is_ascii_whitespace())
         .collect();
-    let decoded_len = compact.len() / 4 * 3;
-    if decoded_len.saturating_sub(2) > room {
-        return Err(over_cap(MAX_ATTACHMENT_BYTES - room + decoded_len));
-    }
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(compact)
         .map_err(|e| format!("Attachment '{name}' is not valid base64: {e}"))?;
