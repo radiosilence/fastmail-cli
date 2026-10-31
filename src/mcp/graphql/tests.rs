@@ -1902,6 +1902,202 @@ async fn update_draft_creates_the_edit_before_destroying_the_original() {
 }
 
 #[tokio::test]
+async fn an_edit_that_lost_a_race_withdraws_its_copy() {
+    // Another edit or a send consumed the original first: destroying it comes
+    // back notFound, and this edit's copy must go too, or two drafts remain.
+    let server = mock_server(1).await;
+    Mock::given(method("POST"))
+        .and(path("/jmap"))
+        .and(wiremock::matchers::body_string_contains(
+            r#""destroy":["draft1"]"#,
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "methodResponses": [["Email/set", {
+                "notDestroyed": { "draft1": { "type": "notFound" } }
+            }, "d1"]]
+        })))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "mutation { updateDraft(emailId: \"draft1\", subject: \"New\") { success error } }",
+    )
+    .await;
+    assert_eq!(data["updateDraft"]["success"], false, "{data}");
+    assert!(
+        data["updateDraft"]["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("was sent, deleted or replaced")),
+        "{data}"
+    );
+
+    let sets = call_args(&server, "Email/set").await;
+    assert_eq!(
+        sets.len(),
+        3,
+        "create, destroy the original, withdraw the copy"
+    );
+    assert_eq!(sets[2]["destroy"][0], "new1");
+}
+
+#[tokio::test]
+async fn an_edit_never_destroys_a_draft_that_was_sent_meanwhile() {
+    // A send keeps the original's ID and moves it to Sent, so destroying it
+    // would delete the sent mail. The re-check sees it is no longer a draft.
+    let server = mock_server(1).await;
+    Mock::given(method("POST"))
+        .and(path("/jmap"))
+        .and(wiremock::matchers::body_string_contains(r#""dr""#))
+        .respond_with(reread(
+            "draft1",
+            json!({ "sent": true }),
+            json!({ "$seen": true }),
+        ))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "mutation { updateDraft(emailId: \"draft1\", subject: \"New\") { success error } }",
+    )
+    .await;
+    assert_eq!(data["updateDraft"]["success"], false, "{data}");
+
+    let sets = call_args(&server, "Email/set").await;
+    assert!(
+        sets.iter().all(|s| s["destroy"][0] != "draft1"),
+        "the sent message must not be destroyed: {sets:?}"
+    );
+    assert_eq!(sets.last().unwrap()["destroy"][0], "new1");
+}
+
+/// The answer to an edit's re-read of its original before removing it.
+fn reread(id: &str, mailboxes: Value, keywords: Value) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(json!({
+        "methodResponses": [["Email/get", {
+            "state": "s1",
+            "list": [{ "id": id, "mailboxIds": mailboxes, "keywords": keywords }],
+            "notFound": []
+        }, "dr"]]
+    }))
+}
+
+#[tokio::test]
+async fn an_edit_never_undoes_a_delete_made_meanwhile() {
+    // A delete moves the draft to Trash and keeps `$draft`; destroying it there
+    // would undo the delete and leave the edited copy in Drafts.
+    let server = mock_server(1).await;
+    Mock::given(method("POST"))
+        .and(path("/jmap"))
+        .and(wiremock::matchers::body_string_contains(r#""dr""#))
+        .respond_with(reread(
+            "draft1",
+            json!({ "trash": true }),
+            json!({ "$draft": true }),
+        ))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "mutation { updateDraft(emailId: \"draft1\", subject: \"New\") { success error } }",
+    )
+    .await;
+    assert_eq!(data["updateDraft"]["success"], false, "{data}");
+    let sets = call_args(&server, "Email/set").await;
+    assert!(sets.iter().all(|s| s["destroy"][0] != "draft1"), "{sets:?}");
+}
+
+#[tokio::test]
+async fn the_original_is_removed_only_in_the_state_it_was_checked_in() {
+    // Mail arriving between the re-read and the destroy moves the state; the
+    // destroy is refused and the check is made again.
+    let server = mock_server(1).await;
+    Mock::given(method("POST"))
+        .and(path("/jmap"))
+        .and(wiremock::matchers::body_string_contains(r#""dr""#))
+        .respond_with(reread(
+            "draft1",
+            json!({ "mb1": true }),
+            json!({ "$draft": true, "$seen": true }),
+        ))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/jmap"))
+        .and(wiremock::matchers::body_string_contains(r#""ifInState""#))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "methodResponses": [["error", { "type": "stateMismatch" }, "d1"]]
+        })))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "mutation { updateDraft(emailId: \"draft1\", subject: \"New\") { success error } }",
+    )
+    .await;
+    assert_eq!(data["updateDraft"]["success"], true, "{data}");
+    let destroys: Vec<_> = call_args(&server, "Email/set")
+        .await
+        .into_iter()
+        .filter(|s| s["destroy"][0] == "draft1")
+        .collect();
+    assert_eq!(destroys.len(), 2, "refused once, then removed");
+}
+
+#[tokio::test]
+async fn a_copy_that_cannot_be_withdrawn_is_named() {
+    let server = mock_server(1).await;
+    Mock::given(method("POST"))
+        .and(path("/jmap"))
+        .and(wiremock::matchers::body_string_contains(
+            r#""destroy":["draft1"]"#,
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "methodResponses": [["Email/set", {
+                "notDestroyed": { "draft1": { "type": "notFound" } }
+            }, "d1"]]
+        })))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/jmap"))
+        .and(wiremock::matchers::body_string_contains(
+            r#""destroy":["new1"]"#,
+        ))
+        .respond_with(ResponseTemplate::new(503))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "mutation { updateDraft(emailId: \"draft1\", subject: \"New\") { success error } }",
+    )
+    .await;
+    assert!(
+        data["updateDraft"]["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("new1")),
+        "{data}"
+    );
+}
+
+#[tokio::test]
 async fn draft_mutations_refuse_sent_mail() {
     let server = mock_server(1).await;
     let data = exec(

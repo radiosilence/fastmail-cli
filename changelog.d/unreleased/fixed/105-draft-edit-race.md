@@ -1,0 +1,1 @@
+- **A draft edit no longer deletes mail that was sent, deleted or replaced while it was saving.** `updateDraft` removes the original only if it is still the same draft in the same place, checked against the state it was read in. Otherwise it withdraws its own copy, and it names any copy it could not remove.
