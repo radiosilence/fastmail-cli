@@ -608,7 +608,7 @@ impl MutationRoot {
                 error: Some(format!("Email {email_id} is not a draft")),
             });
         }
-        let trash = client.find_mailbox("trash").await?;
+        let trash = mailbox_named(ctx, "trash").await?;
         Ok(match client.move_email(&email_id, &trash.id).await {
             Ok(()) => GqlStatus {
                 success: true,
@@ -638,7 +638,7 @@ impl MutationRoot {
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
 
         let email = client.get_email(&email_id).await?;
-        let target = client.find_mailbox(&target_mailbox).await?;
+        let target = mailbox_named(ctx, &target_mailbox).await?;
 
         match client.move_email(&email_id, &target.id).await {
             Ok(()) => Ok(GqlStatus {
@@ -727,7 +727,8 @@ impl MutationRoot {
             });
         }
 
-        match client.mark_spam(&email_id).await {
+        let junk = mailbox_named(ctx, "junk").await?;
+        match client.move_email(&email_id, &junk.id).await {
             Ok(()) => Ok(GqlStatus {
                 success: true,
                 message: Some(format!(
@@ -1023,4 +1024,14 @@ fn failed(msg: String) -> GqlComposeResult {
         confirmation_token: None,
         error: Some(msg),
     }
+}
+
+/// A mailbox by name or role, through the request's mailbox loader: one
+/// `Mailbox/get` however many mutations in the document need one, and never a
+/// list older than the request.
+async fn mailbox_named(ctx: &Context<'_>, name: &str) -> Result<crate::models::Mailbox> {
+    let mailboxes = all_mailboxes(ctx).await?;
+    find_by_name_or_role(&mailboxes, name)
+        .cloned()
+        .ok_or_else(|| crate::error::Error::MailboxNotFound(name.into()).into())
 }

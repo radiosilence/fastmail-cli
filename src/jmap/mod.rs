@@ -2180,7 +2180,7 @@ mod tests {
 
     #[test]
     fn test_require_capability_succeeds_when_present() {
-        let mut client = JmapClient::new("test-token".to_string());
+        let client = JmapClient::new("test-token".to_string());
         client.set_session(create_test_session(vec![
             "urn:ietf:params:jmap:core",
             "urn:ietf:params:jmap:mail",
@@ -2196,7 +2196,7 @@ mod tests {
 
     #[test]
     fn test_require_capability_fails_when_missing() {
-        let mut client = JmapClient::new("test-token".to_string());
+        let client = JmapClient::new("test-token".to_string());
         client.set_session(create_test_session(vec![
             "urn:ietf:params:jmap:core",
             "urn:ietf:params:jmap:mail",
@@ -2224,7 +2224,7 @@ mod tests {
 
     #[test]
     fn test_require_capability_works_for_masked_email() {
-        let mut client = JmapClient::new("test-token".to_string());
+        let client = JmapClient::new("test-token".to_string());
         client.set_session(create_test_session(vec![
             "urn:ietf:params:jmap:core",
             "urn:ietf:params:jmap:mail",
@@ -2606,7 +2606,7 @@ mod tests {
 
     /// Build a client pointed at a mock JMAP server.
     fn mock_client(uri: &str) -> JmapClient {
-        let mut client = JmapClient::new("test-token".to_string());
+        let client = JmapClient::new("test-token".to_string());
         let mut session = create_test_session(vec![
             "urn:ietf:params:jmap:core",
             "urn:ietf:params:jmap:mail",
@@ -2812,7 +2812,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let mut client = JmapClient::new("test-token".to_string());
+        let client = JmapClient::new("test-token".to_string());
         let mut session = create_test_session(vec!["urn:ietf:params:jmap:core"]);
         session.upload_url = format!("{}/upload/{{accountId}}/", mock_server.uri());
         client.set_session(session);
@@ -2836,7 +2836,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let mut client = JmapClient::new("test-token".to_string());
+        let client = JmapClient::new("test-token".to_string());
         let mut session = create_test_session(vec!["urn:ietf:params:jmap:core"]);
         session.upload_url = format!("{}/upload/{{accountId}}/", mock_server.uri());
         client.set_session(session);
@@ -2862,7 +2862,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let mut client = JmapClient::new("test-token".to_string());
+        let client = JmapClient::new("test-token".to_string());
         let mut session = create_test_session(vec!["urn:ietf:params:jmap:core"]);
         session.upload_url = format!("{}/upload/{{accountId}}/", mock_server.uri());
         client.set_session(session);
