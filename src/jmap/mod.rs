@@ -84,6 +84,10 @@ const DESIRED_CAPABILITIES: &[&str] = &[
     "https://www.fastmail.com/dev/maskedemail",
 ];
 
+/// Conditional attempts at removing an edited draft's original before
+/// removing it on the re-check alone.
+const DRAFT_DESTROY_ATTEMPTS: u32 = 3;
+
 /// Blob downloads in flight per client. Each holds a whole attachment in
 /// memory, and the GraphQL loaders start every batch at once.
 const CONCURRENT_DOWNLOADS: usize = 4;
@@ -1742,6 +1746,27 @@ impl JmapClient {
         .await
     }
 
+    /// A draft as it stands now, with the account's `Email` state at that read.
+    async fn draft_as_it_stands(&self, id: &str) -> Result<(Option<Email>, Option<String>)> {
+        let account_id = self.account_id()?;
+        let responses = self
+            .request(vec![json!([
+                "Email/get",
+                { "accountId": account_id, "ids": [id], "properties": EMAIL_SUMMARY_PROPERTIES },
+                "dr"
+            ])])
+            .await?;
+        #[derive(Deserialize)]
+        struct WithState {
+            #[serde(default)]
+            state: Option<String>,
+            list: Vec<Email>,
+        }
+        let resp: WithState =
+            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/get")?;
+        Ok((resp.list.into_iter().next(), resp.state))
+    }
+
     /// Destroy the copy an abandoned draft edit created, and say why it was
     /// abandoned. If the copy cannot be removed either, the error names it so
     /// it can be cleaned up by hand.
@@ -1893,44 +1918,61 @@ impl JmapClient {
              editing",
             draft.id
         );
-        match self
-            .get_email_summaries(std::slice::from_ref(&draft.id))
-            .await
-        {
-            Ok(current) if current.first().is_some_and(Email::is_draft) => {}
-            Ok(_) => return Err(self.withdraw_copy(&account_id, &new_id, gone).await),
-            Err(e) => {
-                return Err(self
-                    .withdraw_copy(
-                        &account_id,
-                        &new_id,
-                        format!("could not re-read draft {}: {e}", draft.id),
-                    )
-                    .await);
+        let mut attempt = 0;
+        let resp = loop {
+            attempt += 1;
+            let (current, state) = match self.draft_as_it_stands(&draft.id).await {
+                Ok(found) => found,
+                Err(e) => {
+                    let reason = format!("could not re-read draft {}: {e}", draft.id);
+                    return Err(self.withdraw_copy(&account_id, &new_id, reason).await);
+                }
+            };
+            // Still a draft, and still where it was: a delete moves it to Trash
+            // with `$draft` intact.
+            let untouched = current
+                .as_ref()
+                .is_some_and(|c| c.is_draft() && c.mailbox_ids == draft.mailbox_ids);
+            if !untouched {
+                return Err(self.withdraw_copy(&account_id, &new_id, gone).await);
             }
-        }
 
-        let destroyed = self
-            .request(vec![json!([
-                "Email/set",
-                { "accountId": account_id, "destroy": [draft.id] },
-                "d1"
-            ])])
-            .await
-            .and_then(|responses| {
-                Self::parse_response::<DestroyResponse>(
-                    responses.first().unwrap_or(&Value::Null),
-                    "Email/set",
-                )
-            });
-        let resp = destroyed.map_err(|e| Error::Jmap {
-            method: "Email/set".into(),
-            error_type: "partial".into(),
-            description: format!(
-                "saved the edit as {new_id} but could not remove the original draft {}: {e}",
-                draft.id
-            ),
-        })?;
+            // Destroyed only if nothing has changed since that read. The state
+            // is account-wide, so arriving mail fails the check too; that is
+            // retried, and past the last attempt the destroy goes ahead on the
+            // re-read alone.
+            let mut args = json!({ "accountId": account_id, "destroy": [draft.id] });
+            if let Some(state) = state.filter(|_| attempt <= DRAFT_DESTROY_ATTEMPTS) {
+                args["ifInState"] = json!(state);
+            }
+            let destroyed = self
+                .request(vec![json!(["Email/set", args, "d1"])])
+                .await
+                .and_then(|responses| {
+                    Self::parse_response::<DestroyResponse>(
+                        responses.first().unwrap_or(&Value::Null),
+                        "Email/set",
+                    )
+                });
+            match destroyed {
+                Err(Error::Jmap { ref error_type, .. })
+                    if error_type == "stateMismatch" && attempt <= DRAFT_DESTROY_ATTEMPTS =>
+                {
+                    continue;
+                }
+                other => {
+                    break other.map_err(|e| Error::Jmap {
+                        method: "Email/set".into(),
+                        error_type: "partial".into(),
+                        description: format!(
+                            "saved the edit as {new_id} but could not remove the original \
+                             draft {}: {e}",
+                            draft.id
+                        ),
+                    })?;
+                }
+            }
+        };
         if let Some(err) = resp.not_destroyed.as_ref().and_then(|m| m.get(&draft.id)) {
             if err["type"].as_str() == Some("notFound") {
                 return Err(self.withdraw_copy(&account_id, &new_id, gone).await);
