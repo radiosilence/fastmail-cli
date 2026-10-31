@@ -279,8 +279,10 @@ impl CardDavClient {
         // Get all contacts from all addressbooks and filter
         let addressbooks = self.list_addressbooks().await?;
         use async_graphql::futures_util::{StreamExt, TryStreamExt, stream};
-        let books: Vec<Vec<Contact>> = stream::iter(&addressbooks)
-            .map(|ab: &AddressBook| self.list_contacts(&ab.href))
+        // Owned hrefs, so the closure borrows nothing from its argument; a
+        // borrowing one fails the `Send` check on the GraphQL resolver.
+        let books: Vec<Vec<Contact>> = stream::iter(addressbooks.into_iter().map(|ab| ab.href))
+            .map(|href| async move { self.list_contacts(&href).await })
             .buffered(CONCURRENT_BOOKS)
             .try_collect()
             .await?;
