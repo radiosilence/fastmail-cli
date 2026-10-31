@@ -284,8 +284,9 @@ async fn mock_server(count: usize) -> MockServer {
 }
 
 fn client_for(server: &MockServer) -> SharedClient {
-    Arc::new(tokio::sync::Mutex::new(JmapClient::with_test_session(
-        &format!("{}/jmap", server.uri()),
+    Arc::new(JmapClient::with_test_session(&format!(
+        "{}/jmap",
+        server.uri()
     )))
 }
 

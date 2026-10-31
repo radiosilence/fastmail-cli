@@ -9,7 +9,7 @@ pub async fn send(
     reply_to: Option<&str>,
     params: ComposeParams<'_>,
 ) -> anyhow::Result<()> {
-    let mut client = authenticated_client().await?;
+    let client = authenticated_client().await?;
     let draft = params.draft;
 
     let email_id = client

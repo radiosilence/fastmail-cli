@@ -39,9 +39,8 @@ impl MutationRoot {
         let bcc_addrs = bcc.as_deref().map(parse_addresses).unwrap_or_default();
         let nonce_store = ctx.data::<super::types::NonceStore>()?;
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let mut client = client.lock().await;
         let attachments = match attachments::resolve(
-            &client,
+            client,
             attachments.unwrap_or_default(),
             matches!(action, SendAction::Preview),
         )
@@ -151,9 +150,8 @@ impl MutationRoot {
         let nonce_store = ctx.data::<super::types::NonceStore>()?;
         let reply_all = all.unwrap_or(false);
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let mut client = client.lock().await;
         let attachments = match attachments::resolve(
-            &client,
+            client,
             attachments.unwrap_or_default(),
             matches!(action, SendAction::Preview),
         )
@@ -308,9 +306,8 @@ impl MutationRoot {
         let body_str = body.as_deref().unwrap_or("");
         let nonce_store = ctx.data::<super::types::NonceStore>()?;
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let mut client = client.lock().await;
         let attachments = match attachments::resolve(
-            &client,
+            client,
             attachments.unwrap_or_default(),
             matches!(action, SendAction::Preview),
         )
@@ -447,7 +444,6 @@ impl MutationRoot {
         let bytes = attachments::decode(&name, &base64, attachments::MAX_ATTACHMENT_BYTES)?;
         let size = bytes.len() as u64;
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let client = client.lock().await;
         let blob_id = client.upload_blob(bytes, &content_type).await?;
         Ok(GqlUploadedAttachment {
             blob_id,
@@ -479,10 +475,9 @@ impl MutationRoot {
         attachments: Option<Vec<AttachmentInput>>,
     ) -> Result<GqlComposeResult> {
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let client = client.lock().await;
         let draft = client.get_email(&email_id).await?;
         let attachments = match attachments {
-            Some(inputs) => match attachments::resolve(&client, inputs, true).await {
+            Some(inputs) => match attachments::resolve(client, inputs, true).await {
                 Ok(a) => Some(a.into_iter().map(|a| a.data).collect()),
                 Err(msg) => return Ok(failed(msg)),
             },
@@ -531,7 +526,6 @@ impl MutationRoot {
         // exactly what was previewed.
         let params = ["send_draft", email_id.as_str()];
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let mut client = client.lock().await;
         let draft = client.get_email(&email_id).await?;
 
         let failure = |msg: String| GqlComposeResult {
@@ -606,7 +600,6 @@ impl MutationRoot {
         #[graphql(desc = "The draft's email ID")] email_id: String,
     ) -> Result<GqlStatus> {
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let mut client = client.lock().await;
         let draft = client.get_email(&email_id).await?;
         if !draft.is_draft() {
             return Ok(GqlStatus {
@@ -615,7 +608,7 @@ impl MutationRoot {
                 error: Some(format!("Email {email_id} is not a draft")),
             });
         }
-        let trash = client.find_mailbox("trash").await?;
+        let trash = mailbox_named(ctx, "trash").await?;
         Ok(match client.move_email(&email_id, &trash.id).await {
             Ok(()) => GqlStatus {
                 success: true,
@@ -643,10 +636,9 @@ impl MutationRoot {
         target_mailbox: String,
     ) -> Result<GqlStatus> {
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let mut client = client.lock().await;
 
         let email = client.get_email(&email_id).await?;
-        let target = client.find_mailbox(&target_mailbox).await?;
+        let target = mailbox_named(ctx, &target_mailbox).await?;
 
         match client.move_email(&email_id, &target.id).await {
             Ok(()) => Ok(GqlStatus {
@@ -676,7 +668,6 @@ impl MutationRoot {
         >,
     ) -> Result<GqlStatus> {
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let client = client.lock().await;
         let read = read.unwrap_or(true);
 
         let email = client.get_email(&email_id).await?;
@@ -715,7 +706,6 @@ impl MutationRoot {
         #[graphql(desc = "PREVIEW first, then CONFIRM")] action: SpamAction,
     ) -> Result<GqlStatus> {
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let mut client = client.lock().await;
 
         let email = client.get_email(&email_id).await?;
 
@@ -737,7 +727,8 @@ impl MutationRoot {
             });
         }
 
-        match client.mark_spam(&email_id).await {
+        let junk = mailbox_named(ctx, "junk").await?;
+        match client.move_email(&email_id, &junk.id).await {
             Ok(()) => Ok(GqlStatus {
                 success: true,
                 message: Some(format!(
@@ -763,7 +754,6 @@ impl MutationRoot {
         #[graphql(desc = "Custom prefix for the email address")] prefix: Option<String>,
     ) -> Result<GqlMaskedEmail> {
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let client = client.lock().await;
         let masked = client
             .create_masked_email(
                 for_domain.as_deref(),
@@ -781,7 +771,6 @@ impl MutationRoot {
         #[graphql(desc = "The masked email ID")] id: String,
     ) -> Result<GqlStatus> {
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let client = client.lock().await;
         match client
             .update_masked_email(&id, Some("enabled"), None, None)
             .await
@@ -806,7 +795,6 @@ impl MutationRoot {
         #[graphql(desc = "The masked email ID")] id: String,
     ) -> Result<GqlStatus> {
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let client = client.lock().await;
         match client
             .update_masked_email(&id, Some("disabled"), None, None)
             .await
@@ -831,7 +819,6 @@ impl MutationRoot {
         #[graphql(desc = "The masked email ID")] id: String,
     ) -> Result<GqlStatus> {
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let client = client.lock().await;
         match client
             .update_masked_email(&id, Some("deleted"), None, None)
             .await
@@ -1037,4 +1024,14 @@ fn failed(msg: String) -> GqlComposeResult {
         confirmation_token: None,
         error: Some(msg),
     }
+}
+
+/// A mailbox by name or role, through the request's mailbox loader: one
+/// `Mailbox/get` however many mutations in the document need one, and never a
+/// list older than the request.
+async fn mailbox_named(ctx: &Context<'_>, name: &str) -> Result<crate::models::Mailbox> {
+    let mailboxes = all_mailboxes(ctx).await?;
+    find_by_name_or_role(&mailboxes, name)
+        .cloned()
+        .ok_or_else(|| crate::error::Error::MailboxNotFound(name.into()).into())
 }

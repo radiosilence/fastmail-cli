@@ -22,7 +22,7 @@ pub struct SearchFilter {
 }
 
 pub async fn search(filter: SearchFilter, limit: u32) -> anyhow::Result<()> {
-    let mut client = authenticated_client().await?;
+    let client = authenticated_client().await?;
 
     // Resolve mailbox name to ID if specified
     let mailbox_id = if let Some(ref mailbox_name) = filter.mailbox {

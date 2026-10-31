@@ -8,6 +8,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, instrument};
 
@@ -15,7 +16,13 @@ pub use events::{EventParser, ServerEvent};
 pub use watch::{ArrivalWatcher, Arrivals, SharedJmapClient};
 
 const SESSION_URL: &str = "https://api.fastmail.com/jmap/session";
-const TIMEOUT: Duration = Duration::from_secs(30);
+/// Limits on connecting and on silence mid-response, which catch a stalled
+/// server. The limit on a whole request is generous because downloading or
+/// uploading a large attachment is slow but healthy; it exists for what the
+/// read timeout cannot see, such as a server that stops reading an upload.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
+const REQUEST_CEILING: Duration = Duration::from_secs(15 * 60);
 
 /// Properties fetched for list/search results: everything that is cheap to
 /// serialise. Bodies and attachment metadata are deliberately excluded — those
@@ -77,20 +84,32 @@ const DESIRED_CAPABILITIES: &[&str] = &[
     "https://www.fastmail.com/dev/maskedemail",
 ];
 
+/// Blob downloads in flight per client. Each holds a whole attachment in
+/// memory, and the GraphQL loaders start every batch at once.
+const CONCURRENT_DOWNLOADS: usize = 4;
+
+/// Shared by every request for one token, concurrently: every method takes
+/// `&self`, and the only state that changes, the session, is swapped whole.
 pub struct JmapClient {
     client: Client,
     token: String,
     session_url: String,
-    session: Option<Session>,
-    available_capabilities: Vec<String>,
-    cached_mailboxes: Option<Vec<Mailbox>>,
+    session: std::sync::RwLock<Option<Arc<Connected>>>,
+    downloads: tokio::sync::Semaphore,
+}
+
+/// What one handshake established. Kept together so a reader never pairs one
+/// handshake's session with another's capabilities.
+struct Connected {
+    session: Arc<Session>,
+    capabilities: Vec<String>,
 }
 
 /// Create an authenticated JMAP client from config
 pub async fn authenticated_client() -> crate::error::Result<JmapClient> {
     let config = crate::config::Config::load()?;
     let token = config.get_token()?;
-    let mut client = JmapClient::new(token);
+    let client = JmapClient::new(token);
     client.authenticate().await?;
     Ok(client)
 }
@@ -621,7 +640,9 @@ fn dedup_by_email(addrs: &mut Vec<EmailAddress>) {
 impl JmapClient {
     pub fn new(token: String) -> Self {
         let client = Client::builder()
-            .timeout(TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_TIMEOUT)
+            .timeout(REQUEST_CEILING)
             .build()
             .expect("Failed to build HTTP client");
 
@@ -629,9 +650,8 @@ impl JmapClient {
             client,
             token,
             session_url: SESSION_URL.to_string(),
-            session: None,
-            available_capabilities: Vec::new(),
-            cached_mailboxes: None,
+            session: std::sync::RwLock::new(None),
+            downloads: tokio::sync::Semaphore::new(CONCURRENT_DOWNLOADS),
         }
     }
 
@@ -643,9 +663,7 @@ impl JmapClient {
     pub fn with_test_session(api_url: &str) -> Self {
         let mut client = Self::new("test-token".into());
         client.session_url = format!("{api_url}/session");
-        client.available_capabilities =
-            DESIRED_CAPABILITIES.iter().map(|s| s.to_string()).collect();
-        client.session = Some(Session {
+        client.set_session(Session {
             capabilities: DESIRED_CAPABILITIES
                 .iter()
                 .map(|c| (c.to_string(), json!({})))
@@ -665,8 +683,36 @@ impl JmapClient {
         client
     }
 
+    /// Install a handshake's result, replacing any earlier one.
+    fn set_session(&self, session: Session) -> Arc<Session> {
+        let session = Arc::new(session);
+        let capabilities = DESIRED_CAPABILITIES
+            .iter()
+            .filter(|cap| session.capabilities.contains_key(**cap))
+            .map(|s| s.to_string())
+            .collect();
+        // A panic elsewhere cannot leave this half-written: the value is
+        // replaced in one store, so a poisoned lock still holds a whole one.
+        *self
+            .session
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(Connected {
+            session: session.clone(),
+            capabilities,
+        }));
+        session
+    }
+
+    fn connected(&self) -> Result<Arc<Connected>> {
+        self.session
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .ok_or(Error::NotAuthenticated)
+    }
+
     #[instrument(skip(self))]
-    pub async fn authenticate(&mut self) -> Result<&Session> {
+    pub async fn authenticate(&self) -> Result<Arc<Session>> {
         debug!("Fetching JMAP session");
         let resp = self
             .client
@@ -684,22 +730,17 @@ impl JmapClient {
 
         let session: Session = resp.json().await?;
         debug!(username = %session.username, "Session established");
-        self.available_capabilities = DESIRED_CAPABILITIES
-            .iter()
-            .filter(|cap| session.capabilities.contains_key(**cap))
-            .map(|s| s.to_string())
-            .collect();
-        self.session = Some(session);
-        Ok(self.session.as_ref().unwrap())
+        Ok(self.set_session(session))
     }
 
-    pub fn session(&self) -> Result<&Session> {
-        self.session.as_ref().ok_or(Error::NotAuthenticated)
+    pub fn session(&self) -> Result<Arc<Session>> {
+        Ok(self.connected()?.session.clone())
     }
 
-    fn account_id(&self) -> Result<&str> {
+    fn account_id(&self) -> Result<String> {
         self.session()?
             .primary_account_id()
+            .map(str::to_owned)
             .ok_or_else(|| Error::Config("No primary account".into()))
     }
 
@@ -718,9 +759,10 @@ impl JmapClient {
 
     #[instrument(skip(self, method_calls))]
     async fn request(&self, method_calls: Vec<Value>) -> Result<Vec<Value>> {
-        let session = self.session()?;
+        let connected = self.connected()?;
+        let session = &connected.session;
         let req = JmapRequest {
-            using: self.available_capabilities.clone(),
+            using: connected.capabilities.clone(),
             method_calls,
         };
 
@@ -790,13 +832,12 @@ impl JmapClient {
         })
     }
 
-    /// Fetch the mailbox list from the server, always. Takes `&self` so callers
-    /// holding a shared client can use it concurrently.
+    /// Fetch the mailbox list from the server, always.
     ///
-    /// This is the primitive the GraphQL mailbox loader wraps: the loader has a
-    /// request-scoped cache of its own, and a cache *here* would outlive the
-    /// request — clients are pooled per token for the life of the process, so a
-    /// folder created after start-up would never appear.
+    /// Never memoised on the client: clients are pooled per token for the life
+    /// of the MCP server, so a cached list would never show a folder created
+    /// after start-up. The GraphQL mailbox loader has its own request-scoped
+    /// cache instead.
     #[instrument(skip(self))]
     pub async fn fetch_mailboxes(&self) -> Result<Vec<Mailbox>> {
         let account_id = self.account_id()?;
@@ -823,23 +864,9 @@ impl JmapClient {
         Ok(resp.list)
     }
 
-    /// Mailbox list, memoised for the life of this client.
-    ///
-    /// For the CLI, where the process is short-lived and several commands walk
-    /// the folder tree in one run. Long-lived callers want
-    /// [`Self::fetch_mailboxes`] instead.
     #[instrument(skip(self))]
-    pub async fn list_mailboxes(&mut self) -> Result<Vec<Mailbox>> {
-        if let Some(ref cached) = self.cached_mailboxes {
-            return Ok(cached.clone());
-        }
+    pub async fn find_mailbox(&self, name: &str) -> Result<Mailbox> {
         let mailboxes = self.fetch_mailboxes().await?;
-        self.cached_mailboxes = Some(mailboxes.clone());
-        Ok(mailboxes)
-    }
-
-    pub async fn find_mailbox(&mut self, name: &str) -> Result<Mailbox> {
-        let mailboxes = self.list_mailboxes().await?;
         let name_lower = name.to_lowercase();
 
         if let Some(m) = mailboxes
@@ -1111,8 +1138,8 @@ impl JmapClient {
             .replace("{closeafter}", "no")
             .replace("{ping}", &ping.to_string());
 
-        // The shared client caps every request at 30s; a push channel is meant
-        // to stay open for days. A read timeout of a few ping intervals stands
+        // The shared client caps every request at 15 minutes; a push channel is
+        // meant to stay open for days. A read timeout of a few ping intervals stands
         // in for it, so silence reads as a dead connection rather than an idle
         // one — the difference between reconnecting and hanging forever.
         let client = Client::builder()
@@ -1253,7 +1280,7 @@ impl JmapClient {
         self.resolve_identity(from).await.ok().map(|i| i.email)
     }
 
-    async fn prepare_compose(&mut self, from: Option<&str>, draft: bool) -> Result<ComposeContext> {
+    async fn prepare_compose(&self, from: Option<&str>, draft: bool) -> Result<ComposeContext> {
         if !draft {
             self.require_capability("urn:ietf:params:jmap:submission", "Email sending")?;
         }
@@ -1390,7 +1417,7 @@ impl JmapClient {
 
     #[instrument(skip(self, body, params))]
     pub async fn send_email(
-        &mut self,
+        &self,
         to: Vec<EmailAddress>,
         subject: &str,
         body: &str,
@@ -1461,7 +1488,7 @@ impl JmapClient {
     }
 
     #[instrument(skip(self))]
-    pub async fn mark_spam(&mut self, email_id: &str) -> Result<()> {
+    pub async fn mark_spam(&self, email_id: &str) -> Result<()> {
         let junk = self.find_mailbox("junk").await?;
         self.move_email(email_id, &junk.id).await
     }
@@ -1469,6 +1496,11 @@ impl JmapClient {
     /// Download a blob (attachment) by ID
     #[instrument(skip(self))]
     pub async fn download_blob(&self, blob_id: &str) -> Result<Vec<u8>> {
+        let _permit = self
+            .downloads
+            .acquire()
+            .await
+            .expect("the download semaphore is never closed");
         let bytes = self.fetch_blob(blob_id).await?.bytes().await?;
         Ok(bytes.to_vec())
     }
@@ -1501,7 +1533,7 @@ impl JmapClient {
         let url = apply_url_template(
             &session.download_url,
             &[
-                ("accountId", account_id),
+                ("accountId", account_id.as_str()),
                 ("blobId", blob_id),
                 ("name", "attachment"),
                 ("type", "application/octet-stream"),
@@ -1558,7 +1590,7 @@ impl JmapClient {
         let account_id = self.account_id()?;
         let session = self.session()?;
 
-        let url = apply_url_template(&session.upload_url, &[("accountId", account_id)]);
+        let url = apply_url_template(&session.upload_url, &[("accountId", account_id.as_str())]);
 
         debug!(url = %url, content_type = %content_type, size = data.len(), "Uploading blob");
         let resp = self
@@ -1598,7 +1630,7 @@ impl JmapClient {
     /// or diverge from what will actually be sent.
     #[instrument(skip(self, body, params))]
     pub async fn reply_email(
-        &mut self,
+        &self,
         original: &Email,
         body: &str,
         to: Vec<EmailAddress>,
@@ -1654,7 +1686,7 @@ impl JmapClient {
     /// Forward an email with proper attribution
     #[instrument(skip(self, body, params))]
     pub async fn forward_email(
-        &mut self,
+        &self,
         original: &Email,
         to: Vec<EmailAddress>,
         body: &str,
@@ -1845,7 +1877,7 @@ impl JmapClient {
     /// Submit an existing draft. On success the server moves it to Sent and
     /// drops `$draft`, which is what the web client does.
     #[instrument(skip(self, draft))]
-    pub async fn send_draft(&mut self, draft: &Email) -> Result<()> {
+    pub async fn send_draft(&self, draft: &Email) -> Result<()> {
         self.require_capability("urn:ietf:params:jmap:submission", "Email sending")?;
         if !draft.is_draft() {
             return Err(Error::NotADraft(draft.id.clone()));
@@ -2156,8 +2188,8 @@ mod tests {
 
     #[test]
     fn test_require_capability_succeeds_when_present() {
-        let mut client = JmapClient::new("test-token".to_string());
-        client.session = Some(create_test_session(vec![
+        let client = JmapClient::new("test-token".to_string());
+        client.set_session(create_test_session(vec![
             "urn:ietf:params:jmap:core",
             "urn:ietf:params:jmap:mail",
             "urn:ietf:params:jmap:submission",
@@ -2172,8 +2204,8 @@ mod tests {
 
     #[test]
     fn test_require_capability_fails_when_missing() {
-        let mut client = JmapClient::new("test-token".to_string());
-        client.session = Some(create_test_session(vec![
+        let client = JmapClient::new("test-token".to_string());
+        client.set_session(create_test_session(vec![
             "urn:ietf:params:jmap:core",
             "urn:ietf:params:jmap:mail",
         ]));
@@ -2200,8 +2232,8 @@ mod tests {
 
     #[test]
     fn test_require_capability_works_for_masked_email() {
-        let mut client = JmapClient::new("test-token".to_string());
-        client.session = Some(create_test_session(vec![
+        let client = JmapClient::new("test-token".to_string());
+        client.set_session(create_test_session(vec![
             "urn:ietf:params:jmap:core",
             "urn:ietf:params:jmap:mail",
         ]));
@@ -2582,14 +2614,13 @@ mod tests {
 
     /// Build a client pointed at a mock JMAP server.
     fn mock_client(uri: &str) -> JmapClient {
-        let mut client = JmapClient::new("test-token".to_string());
+        let client = JmapClient::new("test-token".to_string());
         let mut session = create_test_session(vec![
             "urn:ietf:params:jmap:core",
             "urn:ietf:params:jmap:mail",
         ]);
         session.api_url = format!("{uri}/jmap");
-        client.available_capabilities = session.capabilities.keys().cloned().collect();
-        client.session = Some(session);
+        client.set_session(session);
         client
     }
 
@@ -2748,11 +2779,13 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let mut client = mock_client(&mock_server.uri());
-        client.session.as_mut().unwrap().event_source_url = Some(format!(
+        let client = mock_client(&mock_server.uri());
+        let mut session = (*client.session().unwrap()).clone();
+        session.event_source_url = Some(format!(
             "{}/jmap/event-source/?types={{types}}&closeafter={{closeafter}}&ping={{ping}}",
             mock_server.uri()
         ));
+        client.set_session(session);
 
         let resp = client.open_event_stream(30, Some("evt-7")).await.unwrap();
         assert!(resp.status().is_success());
@@ -2787,10 +2820,10 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let mut client = JmapClient::new("test-token".to_string());
+        let client = JmapClient::new("test-token".to_string());
         let mut session = create_test_session(vec!["urn:ietf:params:jmap:core"]);
         session.upload_url = format!("{}/upload/{{accountId}}/", mock_server.uri());
-        client.session = Some(session);
+        client.set_session(session);
 
         let blob_id = client
             .upload_blob(b"fake image data".to_vec(), "image/jpeg")
@@ -2811,10 +2844,10 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let mut client = JmapClient::new("test-token".to_string());
+        let client = JmapClient::new("test-token".to_string());
         let mut session = create_test_session(vec!["urn:ietf:params:jmap:core"]);
         session.upload_url = format!("{}/upload/{{accountId}}/", mock_server.uri());
-        client.session = Some(session);
+        client.set_session(session);
 
         let result = client
             .upload_blob(b"huge file".to_vec(), "application/pdf")
@@ -2837,10 +2870,10 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let mut client = JmapClient::new("test-token".to_string());
+        let client = JmapClient::new("test-token".to_string());
         let mut session = create_test_session(vec!["urn:ietf:params:jmap:core"]);
         session.upload_url = format!("{}/upload/{{accountId}}/", mock_server.uri());
-        client.session = Some(session);
+        client.set_session(session);
 
         let result = client.upload_blob(b"data".to_vec(), "text/plain").await;
         assert!(result.is_err());

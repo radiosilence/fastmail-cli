@@ -702,10 +702,8 @@ impl GqlSession {
     /// exists to catch. One `GET /jmap/session`, no mail touched.
     pub(crate) async fn probe(client: &super::SharedClient, carddav_configured: bool) -> Self {
         use crate::error::Error;
-
-        let mut client = client.lock().await;
         let mut session = match client.authenticate().await {
-            Ok(session) => Self::from(session),
+            Ok(session) => Self::from(session.as_ref()),
             Err(e @ Error::InvalidToken(_)) => {
                 Self::disconnected(ConnectionStatus::InvalidCredentials, e)
             }
