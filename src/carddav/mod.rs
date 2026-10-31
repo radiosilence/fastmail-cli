@@ -11,9 +11,15 @@ use crate::error::{Error, Result};
 
 const CARDDAV_BASE: &str = "https://carddav.fastmail.com";
 
-/// Per-request limit, as for JMAP. Without one a stalled server holds the
-/// request, and the GraphQL resolver waiting on it, forever.
-const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Limits on connecting and on silence mid-response. Without them a stalled
+/// server holds the request, and the GraphQL resolver waiting on it, forever.
+/// There is no limit on the whole request: a large address book is a long
+/// download, and a healthy one keeps arriving.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Address books downloaded at once by a search.
+const CONCURRENT_BOOKS: usize = 4;
 
 /// One HTTP client for every CardDAV request in the process.
 ///
@@ -26,7 +32,8 @@ fn http_client() -> Client {
     CLIENT
         .get_or_init(|| {
             Client::builder()
-                .timeout(TIMEOUT)
+                .connect_timeout(CONNECT_TIMEOUT)
+                .read_timeout(READ_TIMEOUT)
                 .build()
                 .expect("Failed to build HTTP client")
         })
@@ -271,10 +278,12 @@ impl CardDavClient {
     pub async fn search_contacts(&self, query: &str) -> Result<Vec<Contact>> {
         // Get all contacts from all addressbooks and filter
         let addressbooks = self.list_addressbooks().await?;
-        let books = async_graphql::futures_util::future::try_join_all(
-            addressbooks.iter().map(|ab| self.list_contacts(&ab.href)),
-        )
-        .await?;
+        use async_graphql::futures_util::{StreamExt, TryStreamExt, stream};
+        let books: Vec<Vec<Contact>> = stream::iter(&addressbooks)
+            .map(|ab| self.list_contacts(&ab.href))
+            .buffered(CONCURRENT_BOOKS)
+            .try_collect()
+            .await?;
         let all_contacts: Vec<Contact> = books.into_iter().flatten().collect();
 
         let query_lower = query.to_lowercase();

@@ -1,1 +1,1 @@
-- **Contacts requests time out and reuse connections.** CardDAV calls now give up after 30 seconds instead of hanging on a stalled server, share one connection pool instead of a TLS handshake per request, and search all address books concurrently.
+- **Contacts requests time out and reuse connections.** CardDAV calls now give up on a server that stops responding instead of hanging, share one connection pool instead of a TLS handshake per request, and search all address books concurrently.
