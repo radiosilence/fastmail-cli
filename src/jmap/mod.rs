@@ -16,7 +16,11 @@ pub use events::{EventParser, ServerEvent};
 pub use watch::{ArrivalWatcher, Arrivals, SharedJmapClient};
 
 const SESSION_URL: &str = "https://api.fastmail.com/jmap/session";
-const TIMEOUT: Duration = Duration::from_secs(30);
+/// Limits on connecting and on silence mid-response. There is no limit on a
+/// whole request: downloading or uploading a large attachment is slow but
+/// healthy, and a stalled server is caught by the read timeout instead.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Properties fetched for list/search results: everything that is cheap to
 /// serialise. Bodies and attachment metadata are deliberately excluded — those
@@ -634,7 +638,8 @@ fn dedup_by_email(addrs: &mut Vec<EmailAddress>) {
 impl JmapClient {
     pub fn new(token: String) -> Self {
         let client = Client::builder()
-            .timeout(TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_TIMEOUT)
             .build()
             .expect("Failed to build HTTP client");
 
