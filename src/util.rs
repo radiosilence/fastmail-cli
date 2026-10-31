@@ -193,7 +193,15 @@ const MAX_IMAGE_ALLOC_PER_INPUT_BYTE: u64 = 16;
 
 /// Attempts at fitting `max_bytes`. JPEG size does not scale exactly with
 /// pixel count, so the first estimate can overshoot.
-const RESIZE_ATTEMPTS: usize = 3;
+const RESIZE_ATTEMPTS: usize = 6;
+
+/// Whether [`resize_image`] can decode this type.
+pub fn is_resizable(content_type: &str) -> bool {
+    matches!(
+        content_type,
+        "image/png" | "image/jpeg" | "image/jpg" | "image/gif" | "image/webp"
+    )
+}
 
 /// Resize image if needed to stay under a size limit
 /// Returns (processed_bytes, mime_type)
@@ -257,6 +265,12 @@ pub fn resize_image(
         scale *= (max_bytes as f64 / output.len() as f64).sqrt() * 0.9;
     }
 
+    if output.len() > max_bytes {
+        return Err(format!(
+            "Could not fit the image in {max_bytes} bytes; the smallest attempt was {}",
+            output.len()
+        ));
+    }
     Ok((output, "image/jpeg".to_string()))
 }
 

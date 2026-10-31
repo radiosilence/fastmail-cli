@@ -42,6 +42,9 @@ const TIMEOUT: Duration = Duration::from_secs(300);
 /// child that misbehaves.
 const MAX_OUTPUT_BYTES: usize = 100 * 1024 * 1024;
 
+/// Most of a child's stderr kept as its reason for failing.
+const MAX_REASON_BYTES: u64 = 4096;
+
 struct Worker {
     exe: PathBuf,
     /// TMPDIR for the child. kreuzberg unpacks its bundled pdfium library into
@@ -62,7 +65,10 @@ pub fn isolate() {
         tracing::warn!("Cannot locate own executable; processing attachments in-process");
         return;
     };
-    let tmp = private_tmp().unwrap_or_else(std::env::temp_dir);
+    let Some(tmp) = private_tmp().or_else(fresh_tmp) else {
+        tracing::warn!("No private temp directory; processing attachments in-process");
+        return;
+    };
     let _ = WORKER.set(Worker { exe, tmp });
 }
 
@@ -74,6 +80,18 @@ fn private_tmp() -> Option<PathBuf> {
     // Fails unless we own it, which is the other half of the check.
     #[cfg(unix)]
     std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700)).ok()?;
+    Some(dir)
+}
+
+/// A new directory in the system temp directory that only this process
+/// created: `create_dir` fails if the name exists, so nothing can be planted
+/// in it beforehand.
+fn fresh_tmp() -> Option<PathBuf> {
+    let dir = std::env::temp_dir().join(format!("fastmail-cli-{}", uuid::Uuid::new_v4()));
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(&dir).ok()?;
     Some(dir)
 }
 
@@ -116,6 +134,10 @@ pub async fn resize_image(
     if data.len() <= max_bytes {
         return Ok((data.to_vec(), content_type));
     }
+    // Refused here rather than by a child started only to refuse it.
+    if !crate::util::is_resizable(&content_type) {
+        return Err(format!("Unsupported image format: {content_type}"));
+    }
     let permit = RESIZERS.acquire().await.map_err(|e| e.to_string())?;
     match WORKER.get() {
         Some(worker) => {
@@ -149,12 +171,13 @@ async fn run_worker(worker: &Worker, args: &[&str], input: &[u8]) -> anyhow::Res
         .env("TMPDIR", &worker.tmp)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         // A dropped request drops this future, and with it the child.
         .kill_on_drop(true)
         .spawn()?;
     let mut stdin = process.stdin.take().expect("stdin is piped");
     let stdout = process.stdout.take().expect("stdout is piped");
+    let stderr = process.stderr.take().expect("stderr is piped");
 
     let run = async {
         // Written and read together: input bigger than the pipe buffer would
@@ -173,7 +196,16 @@ async fn run_worker(worker: &Worker, args: &[&str], input: &[u8]) -> anyhow::Res
                 .await
                 .map(|_| out)
         };
-        let ((), out) = tokio::join!(write, read);
+        // The child's reason for failing, if it gives one. Read to the end, so
+        // a chatty child cannot block on a full pipe.
+        let reason = async {
+            let mut reason = Vec::new();
+            let mut stderr = stderr.take(MAX_REASON_BYTES);
+            let _ = stderr.read_to_end(&mut reason).await;
+            let _ = tokio::io::copy(&mut stderr.into_inner(), &mut tokio::io::sink()).await;
+            String::from_utf8_lossy(&reason).trim().to_string()
+        };
+        let ((), out, reason) = tokio::join!(write, read, reason);
         let out = out?;
         if out.len() > MAX_OUTPUT_BYTES {
             process.start_kill()?;
@@ -181,7 +213,15 @@ async fn run_worker(worker: &Worker, args: &[&str], input: &[u8]) -> anyhow::Res
             anyhow::bail!("output exceeded {} MB", MAX_OUTPUT_BYTES / (1024 * 1024));
         }
         let status = process.wait().await?;
-        anyhow::ensure!(status.success(), "worker exited with {status}");
+        anyhow::ensure!(
+            status.success(),
+            "{}",
+            if reason.is_empty() {
+                format!("worker exited with {status}")
+            } else {
+                reason
+            }
+        );
         Ok(out)
     };
 
@@ -246,7 +286,10 @@ pub fn run_child(args: &[String]) -> ExitCode {
             };
             match crate::util::resize_image(&input, mime, max) {
                 Ok((bytes, _)) => bytes,
-                Err(_) => return ExitCode::FAILURE,
+                Err(reason) => {
+                    eprintln!("{reason}");
+                    return ExitCode::FAILURE;
+                }
             }
         }
         _ => return ExitCode::FAILURE,
@@ -271,7 +314,10 @@ pub fn run_child(args: &[String]) -> ExitCode {
 #[cfg(unix)]
 fn outlive_no_one(parent: &str) -> bool {
     use rustix::process::{Resource, Rlimit, setrlimit};
-    let secs = TIMEOUT.as_secs();
+    // CPU time is summed across threads, so a parse using every core reaches
+    // the wall-clock deadline that many times faster.
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get() as u64);
+    let secs = TIMEOUT.as_secs() * cores;
     // SIGXCPU at the soft limit, SIGKILL at the hard one.
     let _ = setrlimit(
         Resource::Cpu,
