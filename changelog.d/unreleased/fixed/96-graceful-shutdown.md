@@ -1,0 +1,1 @@
+- **The HTTP server stops promptly on SIGTERM.** As PID 1 in the container it ignored the signal, so `docker stop` waited out its timeout and then killed it mid-request. It now ends open subscriptions, lets in-flight requests finish for up to 8 seconds, and exits.
