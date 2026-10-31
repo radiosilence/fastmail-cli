@@ -13,8 +13,8 @@ use crate::models::Email;
 use std::time::Duration;
 use tracing::debug;
 
-/// A client shared between a watcher and whatever else is using the connection.
-/// [`JmapClient`] is safe to use concurrently, so there is no lock to hold.
+/// A client shared between a watcher and whatever else is using the
+/// connection. [`JmapClient`] is safe to use concurrently.
 pub type SharedJmapClient = std::sync::Arc<JmapClient>;
 
 /// How often to ask the server for a keep-alive, and the basis for the read

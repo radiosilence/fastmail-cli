@@ -40,7 +40,7 @@ impl MutationRoot {
         let nonce_store = ctx.data::<crate::mcp::graphql::SharedClient>()?.confirmations();
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let attachments = match attachments::resolve(
-            &client,
+            client,
             attachments.unwrap_or_default(),
             matches!(action, SendAction::Preview),
         )
@@ -151,7 +151,7 @@ impl MutationRoot {
         let reply_all = all.unwrap_or(false);
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let attachments = match attachments::resolve(
-            &client,
+            client,
             attachments.unwrap_or_default(),
             matches!(action, SendAction::Preview),
         )
@@ -307,7 +307,7 @@ impl MutationRoot {
         let nonce_store = ctx.data::<crate::mcp::graphql::SharedClient>()?.confirmations();
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let attachments = match attachments::resolve(
-            &client,
+            client,
             attachments.unwrap_or_default(),
             matches!(action, SendAction::Preview),
         )
@@ -477,7 +477,7 @@ impl MutationRoot {
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let draft = client.get_email(&email_id).await?;
         let attachments = match attachments {
-            Some(inputs) => match attachments::resolve(&client, inputs, true).await {
+            Some(inputs) => match attachments::resolve(client, inputs, true).await {
                 Ok(a) => Some(a.into_iter().map(|a| a.data).collect()),
                 Err(msg) => return Ok(failed(msg)),
             },
