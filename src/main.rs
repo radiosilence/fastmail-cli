@@ -1,7 +1,7 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 use fastmail_cli::models::Output;
-use fastmail_cli::{commands, jmap, mcp, util};
+use fastmail_cli::{commands, extract, jmap, mcp, util};
 use std::io;
 use tracing_subscriber::EnvFilter;
 
@@ -513,7 +513,20 @@ enum ContactsCommands {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> std::process::ExitCode {
+    // Before anything else reads config or writes to stdout: the child's
+    // stdout is the extracted text, and it is handed nothing but the document.
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() == Some(std::ffi::OsStr::new(extract::CHILD_ARG)) {
+        let filename = args.next().unwrap_or_default();
+        let input_len = args
+            .next()
+            .and_then(|n| n.to_str()?.parse().ok())
+            .unwrap_or(0);
+        return extract::run_child(std::path::Path::new(&filename), input_len).await;
+    }
+    extract::isolate();
+
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .with_target(false)
@@ -811,4 +824,5 @@ async fn main() {
         Output::<()>::error(e.to_string()).print();
         std::process::exit(1);
     }
+    std::process::ExitCode::SUCCESS
 }

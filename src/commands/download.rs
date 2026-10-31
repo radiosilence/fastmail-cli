@@ -1,8 +1,6 @@
 use crate::jmap::authenticated_client;
 use crate::models::Output;
-use crate::util::{
-    extract_text, infer_image_mime, is_image, parse_size, resize_image, sanitize_filename,
-};
+use crate::util::{infer_image_mime, is_image, parse_size, resize_image, sanitize_filename};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
@@ -41,7 +39,7 @@ pub async fn download_attachment(
             let content_type = attachment.content_type.clone().unwrap_or_default();
             let bytes = client.download_blob(blob_id).await?;
 
-            let text = extract_text(&bytes, &filename).await?;
+            let text = crate::extract::extract_text(&bytes, &filename).await?;
 
             results.push(AttachmentContent {
                 filename,
