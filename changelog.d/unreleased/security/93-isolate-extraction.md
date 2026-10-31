@@ -1,0 +1,1 @@
+- **Attachment text is extracted in a child process.** A hung, crashing or memory-hungry document, such as a PDF that wedges pdfium or an archive that inflates without bound, is now killed on its own instead of stalling or taking down the server. The child holds no credentials and has a memory limit that scales with the document, so large documents still extract.

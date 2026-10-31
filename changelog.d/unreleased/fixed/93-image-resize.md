@@ -1,0 +1,1 @@
+- **Image resizing no longer blocks other requests, and handles transparency.** Resizing runs off the async runtime with a bounded decode allocation. PNGs with an alpha channel resize instead of failing, and the result now fits `maxBytes`.
