@@ -778,10 +778,32 @@ impl JmapClient {
         let jmap_resp: JmapResponse = serde_json::from_slice(&body).map_err(|e| {
             debug!("Failed to parse JMAP response: {e}");
             // Enough to recognise an error page, not a whole mailbox's worth.
-            let text = String::from_utf8_lossy(&body[..body.len().min(1024)]);
-            Error::Server(text.trim().to_string())
+            let shown = &body[..body.len().min(1024)];
+            let text = String::from_utf8_lossy(shown).trim().to_string();
+            Error::Server(if shown.len() < body.len() {
+                format!("{text}… ({} bytes)", body.len())
+            } else {
+                text
+            })
         })?;
         Ok(jmap_resp.method_responses)
+    }
+
+    /// [`Self::parse_response`] for a response the caller no longer needs,
+    /// taking its data rather than copying out of it. For `Email/get` with
+    /// bodies, which runs to megabytes.
+    fn parse_response_owned<T: serde::de::DeserializeOwned>(
+        mut response: Value,
+        expected_method: &str,
+    ) -> Result<T> {
+        // Checks the envelope and any method error without allocating.
+        Self::parse_response::<serde::de::IgnoredAny>(&response, expected_method)?;
+        let data = response.get_mut(1).map(Value::take).unwrap_or_default();
+        serde_json::from_value(data).map_err(|e| Error::Jmap {
+            method: expected_method.into(),
+            error_type: "parse".into(),
+            description: e.to_string(),
+        })
     }
 
     fn parse_response<T: for<'de> Deserialize<'de>>(
@@ -819,8 +841,6 @@ impl JmapClient {
             description: "Missing response data".into(),
         })?;
 
-        // Deserialised from the borrowed tree: a full `Email/get` response is
-        // megabytes, and cloning it first would double that.
         T::deserialize(data).map_err(|e| Error::Jmap {
             method: expected_method.into(),
             error_type: "parse".into(),
@@ -924,15 +944,17 @@ impl JmapClient {
             ]));
         }
 
-        let responses = self.request(method_calls).await?;
+        let mut responses = self.request(method_calls).await?;
 
         let query_resp: QueryResponse =
             Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/query")?;
 
         let mut emails = Vec::new();
         if query.fetch_summaries {
-            let get_resp: GetResponse<Email> =
-                Self::parse_response(responses.get(1).unwrap_or(&Value::Null), "Email/get")?;
+            let get_resp: GetResponse<Email> = Self::parse_response_owned(
+                responses.get_mut(1).map(Value::take).unwrap_or_default(),
+                "Email/get",
+            )?;
             // `Email/get` makes no ordering guarantee, so restore the sort order
             // the query asked for rather than trusting the response order.
             let mut by_id: HashMap<String, Email> = get_resp
@@ -1015,8 +1037,10 @@ impl JmapClient {
             ])])
             .await?;
 
-        let resp: GetResponse<Email> =
-            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/get")?;
+        let resp: GetResponse<Email> = Self::parse_response_owned(
+            responses.into_iter().next().unwrap_or_default(),
+            "Email/get",
+        )?;
 
         Ok(resp.list)
     }
@@ -1492,14 +1516,15 @@ impl JmapClient {
     /// Download a blob (attachment) by ID
     #[instrument(skip(self))]
     pub async fn download_blob(&self, blob_id: &str) -> Result<Vec<u8>> {
-        // `Vec::from` takes the buffer over when the bytes are uniquely owned,
-        // as a whole response body is, rather than copying it.
         let _permit = self
             .downloads
             .acquire()
             .await
             .expect("the download semaphore is never closed");
         let bytes = self.fetch_blob(blob_id).await?.bytes().await?;
+        // Takes the buffer over without copying when the body is a single
+        // uniquely owned allocation, which reqwest's collected bodies usually
+        // are; otherwise copies, as `to_vec` always did.
         Ok(Vec::from(bytes))
     }
 

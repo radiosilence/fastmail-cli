@@ -148,10 +148,15 @@ pub fn decode(name: &str, encoded: &str, room: usize) -> Result<Vec<u8>, String>
     if decoded_len.saturating_sub(2) > room {
         return Err(over_cap(MAX_ATTACHMENT_BYTES - room + decoded_len));
     }
-    let compact: String = encoded
-        .chars()
-        .filter(|c| !c.is_ascii_whitespace())
-        .collect();
+    let compact: std::borrow::Cow<str> = if compact_len == encoded.len() {
+        encoded.into()
+    } else {
+        encoded
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .collect::<String>()
+            .into()
+    };
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(compact)
         .map_err(|e| format!("Attachment '{name}' is not valid base64: {e}"))?;

@@ -1,1 +1,0 @@
-- **MCP tool results are compact JSON.** The content is unchanged; dropping the indentation saves a copy of each response and the tokens a model spends reading it.
