@@ -1,1 +1,1 @@
-- **Builds use the latest stable Rust.** Mise installs `rust` at `latest`.
+- **Builds use the latest stable Rust.** mise installs `rust` at `latest`.
