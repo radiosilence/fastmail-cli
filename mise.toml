@@ -1,5 +1,5 @@
 [tools]
-rust = { version = "1", components = "rustfmt,clippy" }
+rust = { version = "latest", components = "rustfmt,clippy" }
 just = "latest"
 lefthook = "latest"
 actionlint = "1.7.12"

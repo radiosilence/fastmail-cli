@@ -1,0 +1,1 @@
+- **Builds use the latest stable Rust.** Mise installs `rust` at `latest`.
