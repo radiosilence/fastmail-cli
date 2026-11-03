@@ -739,7 +739,7 @@ impl MutationRoot {
             return Ok(GqlStatus {
                 success: true,
                 message: Some(format!(
-                    "SPAM PREVIEW — This will:\n1. Move to Junk folder\n2. Train spam filter\n\nEmail: \"{}\"\nFrom: {}\n\nUse action=CONFIRM to proceed.",
+                    "SPAM PREVIEW — This will:\n1. Move to Junk folder\n2. Mark it $junk, which trains the spam filter\n\nEmail: \"{}\"\nFrom: {}\n\nUse action=CONFIRM to proceed.",
                     email.subject.as_deref().unwrap_or("(no subject)"),
                     sender
                 )),
@@ -748,7 +748,14 @@ impl MutationRoot {
         }
 
         let junk = mailbox_named(ctx, "junk").await?;
-        match client.move_email(&email_id, &junk.id).await {
+        let outcome = client
+            .update_emails(
+                std::slice::from_ref(&email_id),
+                &crate::jmap::lists::spam_patch(&junk.id),
+            )
+            .await
+            .and_then(crate::jmap::JmapClient::single_update);
+        match outcome {
             Ok(()) => Ok(GqlStatus {
                 success: true,
                 message: Some(format!(
@@ -763,6 +770,291 @@ impl MutationRoot {
                 error: Some(e.to_string()),
             }),
         }
+    }
+
+    /// Undo a spam verdict: move the email back (to the inbox unless `moveTo`
+    /// says otherwise) and mark it `$notjunk`, which teaches the filter it was
+    /// wrong.
+    async fn mark_as_not_spam(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The email ID")] email_id: String,
+        #[graphql(desc = "Mailbox name or role to move it to (default: inbox)")] move_to: Option<
+            String,
+        >,
+    ) -> Result<GqlStatus> {
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
+        let target = mailbox_named(ctx, move_to.as_deref().unwrap_or("inbox")).await?;
+        let outcome = client
+            .mark_not_spam_many(std::slice::from_ref(&email_id), &target.id)
+            .await
+            .and_then(crate::jmap::JmapClient::single_update);
+        Ok(match outcome {
+            Ok(()) => GqlStatus {
+                success: true,
+                message: Some(format!("Marked as not spam and moved to {}", target.name)),
+                error: None,
+            },
+            Err(e) => GqlStatus {
+                success: false,
+                message: None,
+                error: Some(e.to_string()),
+            },
+        })
+    }
+
+    /// Leave the mailing list an email came from. ALWAYS PREVIEW first and
+    /// show the user, then CONFIRM with the token.
+    ///
+    /// Uses the email's own headers: an RFC 8058 one-click POST when the
+    /// sender supports it (no mail sent, nothing to click), otherwise an
+    /// email to its `mailto:` address, sent from the address the list wrote
+    /// to when that is one of your identities. When the sender only offers a
+    /// web page, `method` is MANUAL and `manualUrls` holds the links to open
+    /// in a browser. One-click POSTs go to public HTTPS addresses only and do
+    /// not follow redirects. Use the newest email from a sender
+    /// (`mailingLists` picks it): old links expire.
+    async fn unsubscribe(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "An email from the list, ideally the newest")] email_id: String,
+        #[graphql(desc = "PREVIEW first, then CONFIRM")] action: super::lists::ConfirmAction,
+        #[graphql(desc = "Token from PREVIEW — required for CONFIRM")] confirmation_token: Option<
+            String,
+        >,
+    ) -> Result<super::lists::GqlUnsubscribeResult> {
+        use super::lists::{ConfirmAction, GqlUnsubscribeResult, UnsubscribeMethod};
+        use crate::unsubscribe::Plan;
+
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
+        let nonce_store = ctx.data::<super::types::NonceStore>()?;
+        let email = client.get_list_email(&email_id).await?;
+        let plan = Plan::for_options(&email.unsubscribe());
+        let method = UnsubscribeMethod::of(&plan);
+        let target = plan.target();
+        let params = [
+            "unsubscribe",
+            email_id.as_str(),
+            plan.method(),
+            target.as_str(),
+        ];
+        let manual = match &plan {
+            Plan::Manual(urls) => urls.clone(),
+            _ => vec![],
+        };
+
+        if let Plan::Manual(_) = plan {
+            return Ok(GqlUnsubscribeResult {
+                success: false,
+                method,
+                message: plan.describe(),
+                confirmation_token: None,
+                manual_urls: manual,
+            });
+        }
+
+        if action == ConfirmAction::Preview {
+            let sender = email
+                .from
+                .as_ref()
+                .and_then(|f| f.first())
+                .map(|a| a.to_string())
+                .unwrap_or_else(|| "(unknown)".into());
+            let token = super::types::issue_nonce(nonce_store, client.tenant_key(), &params).await;
+            return Ok(GqlUnsubscribeResult {
+                success: true,
+                method,
+                message: format!(
+                    "UNSUBSCRIBE PREVIEW\nFrom: {sender}\nEmail: \"{}\"\nWill: {}\n\nUse action=CONFIRM with the token to proceed.",
+                    email.subject.as_deref().unwrap_or("(no subject)"),
+                    plan.describe()
+                ),
+                confirmation_token: Some(token),
+                manual_urls: vec![],
+            });
+        }
+
+        if let Err(msg) = super::types::consume_nonce(
+            nonce_store,
+            client.tenant_key(),
+            confirmation_token.as_deref(),
+            &params,
+        )
+        .await
+        {
+            return Ok(GqlUnsubscribeResult {
+                success: false,
+                method,
+                message: msg.to_string(),
+                confirmation_token: None,
+                manual_urls: vec![],
+            });
+        }
+
+        let outcome = crate::unsubscribe::carry_out(client, &email, &plan).await;
+        Ok(GqlUnsubscribeResult {
+            success: outcome.success,
+            method,
+            message: outcome.message,
+            confirmation_token: None,
+            manual_urls: outcome.manual_urls,
+        })
+    }
+
+    /// Apply one change to every email a filter matches, as a mail rule
+    /// would have: move them, mark them read, or mark them spam. For the mail
+    /// already there; Fastmail's own rules are not reachable over JMAP.
+    /// ALWAYS PREVIEW first (it reports the count and a sample), show the
+    /// user, then CONFIRM with the token and the same arguments.
+    async fn sweep_emails(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Which emails; must narrow something")] filter: super::filter::EmailFilter,
+        #[graphql(desc = "PREVIEW first, then CONFIRM")] action: super::lists::ConfirmAction,
+        #[graphql(desc = "Mailbox name or role to move them to")] move_to: Option<String>,
+        #[graphql(desc = "true marks read, false unread")] mark_read: Option<bool>,
+        #[graphql(desc = "Move to Junk and mark $junk, training the filter")] mark_spam: Option<
+            bool,
+        >,
+        #[graphql(desc = "Most emails to change, newest first (default 1000, max 10000)")]
+        limit: Option<i32>,
+        #[graphql(desc = "Token from PREVIEW — required for CONFIRM")] confirmation_token: Option<
+            String,
+        >,
+    ) -> Result<super::lists::GqlSweepResult> {
+        use super::lists::{ConfirmAction, GqlSweepResult};
+
+        let fail = |msg: String| GqlSweepResult {
+            success: false,
+            matched: 0,
+            affected: 0,
+            failed: 0,
+            preview: None,
+            confirmation_token: None,
+            error: Some(msg),
+        };
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
+        let nonce_store = ctx.data::<super::types::NonceStore>()?;
+        let limit = limit.unwrap_or(1000).clamp(1, 10_000) as usize;
+        let mark_spam = mark_spam.unwrap_or(false);
+
+        let mailboxes = super::connection::resolve_mailbox_names(ctx, Some(&filter)).await?;
+        let Some(jmap_filter) = filter.to_jmap(&mailboxes) else {
+            return Ok(fail("The filter matches every email; narrow it.".into()));
+        };
+
+        let mut patch = serde_json::Map::new();
+        let mut doing = Vec::new();
+        if mark_spam {
+            if move_to.is_some() {
+                return Ok(fail("markSpam moves to Junk; drop moveTo.".into()));
+            }
+            let junk = mailbox_named(ctx, "junk").await?;
+            if let serde_json::Value::Object(p) = crate::jmap::lists::spam_patch(&junk.id) {
+                patch.extend(p);
+            }
+            doing.push("marked spam (moved to Junk, $junk set: trains the filter)".to_string());
+        }
+        if let Some(name) = &move_to {
+            let target = mailbox_named(ctx, name).await?;
+            patch.insert(
+                "mailboxIds".into(),
+                serde_json::json!({ (target.id.clone()): true }),
+            );
+            doing.push(format!("moved to {}", target.name));
+        }
+        if let Some(read) = mark_read {
+            patch.insert(
+                "keywords/$seen".into(),
+                if read {
+                    serde_json::json!(true)
+                } else {
+                    serde_json::Value::Null
+                },
+            );
+            doing.push(if read { "marked read" } else { "marked unread" }.to_string());
+        }
+        if patch.is_empty() {
+            return Ok(fail(
+                "Nothing to do: set moveTo, markRead or markSpam.".into(),
+            ));
+        }
+        let patch = serde_json::Value::Object(patch);
+
+        let filter_key = jmap_filter.to_string();
+        let patch_key = patch.to_string();
+        let limit_key = limit.to_string();
+        let params = [
+            "sweep",
+            filter_key.as_str(),
+            patch_key.as_str(),
+            limit_key.as_str(),
+        ];
+
+        let (ids, total) = client.query_email_ids(jmap_filter, limit).await?;
+
+        if action == ConfirmAction::Preview {
+            let sample_ids: Vec<String> = ids.iter().take(8).cloned().collect();
+            let sample = client.get_email_summaries(&sample_ids).await?;
+            let mut text = format!(
+                "SWEEP PREVIEW — {} of {} matching emails will be {}.\n\nNewest of them:\n",
+                ids.len(),
+                total,
+                doing.join(", ")
+            );
+            for e in &sample {
+                text.push_str(&format!(
+                    "- {} | {} | {}\n",
+                    e.received_at
+                        .as_deref()
+                        .unwrap_or("?")
+                        .get(..10)
+                        .unwrap_or("?"),
+                    e.from
+                        .as_ref()
+                        .and_then(|f| f.first())
+                        .map(|a| a.email.as_str())
+                        .unwrap_or("?"),
+                    e.subject.as_deref().unwrap_or("(no subject)")
+                ));
+            }
+            text.push_str("\nUse action=CONFIRM with the token and the same arguments to proceed.");
+            let token = super::types::issue_nonce(nonce_store, client.tenant_key(), &params).await;
+            return Ok(GqlSweepResult {
+                success: true,
+                matched: total as i32,
+                affected: ids.len() as i32,
+                failed: 0,
+                preview: Some(text),
+                confirmation_token: Some(token),
+                error: None,
+            });
+        }
+
+        if let Err(msg) = super::types::consume_nonce(
+            nonce_store,
+            client.tenant_key(),
+            confirmation_token.as_deref(),
+            &params,
+        )
+        .await
+        {
+            return Ok(fail(msg.to_string()));
+        }
+
+        let outcome = client.update_emails(&ids, &patch).await?;
+        Ok(GqlSweepResult {
+            success: outcome.failed.is_empty(),
+            matched: total as i32,
+            affected: outcome.updated as i32,
+            failed: outcome.failed.len() as i32,
+            preview: None,
+            confirmation_token: None,
+            error: outcome
+                .failed
+                .first()
+                .map(|(id, why)| format!("{} refused, e.g. {id}: {why}", outcome.failed.len())),
+        })
     }
 
     /// Create a new masked email address.

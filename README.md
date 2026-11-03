@@ -7,7 +7,8 @@ CLI for Fastmail's JMAP API. Read, search, send, manage and *watch* email from y
 | Feature               | Description                                                            |
 | --------------------- | ---------------------------------------------------------------------- |
 | **Email**             | List, search, read, send, reply, forward, threads, identity selection, HTML bodies, file attachments |
-| **Mailboxes**         | List folders, move emails, mark spam/read                              |
+| **Mailboxes**         | List folders, move emails, mark spam/not spam/read                     |
+| **Mailing lists**     | Every sender with an unsubscribe header, grouped; one-click (RFC 8058) or mailto unsubscribe; bulk sweeps over a filter |
 | **Real-time**         | `fastmail watch` streams arriving mail as NDJSON over JMAP push — pipe it into a shell loop. Also a GraphQL subscription |
 | **Contacts**          | Search, create, update, delete contacts via CardDAV                    |
 | **Attachments**       | Download files, extract text, resize images                            |
@@ -42,6 +43,8 @@ the data path.
 | Move / archive / mark read                                 | ✅                                 | ✅                               |
 | Real-time stream of incoming mail                          | ✅ (CLI + GraphQL subscription)    | —                                |
 | Mark as spam (+ trains the filter)                         | ✅                                 | —                                |
+| Mailing lists: find them, unsubscribe (one-click / mailto) | ✅                                 | —                                |
+| Bulk move / mark read / mark spam over a filter            | ✅ (MCP)                           | —                                |
 | Masked Email (create / enable / disable / delete)          | ✅                                 | —                                |
 | Attachments: text extraction (56 formats) + image resize   | ✅                                 | —                                |
 | Contacts (create / update / delete / search)               | ✅ (CardDAV)                       | ✅                               |
@@ -284,6 +287,38 @@ fastmail spam EMAIL_ID
 # Skip confirmation
 fastmail spam EMAIL_ID -y
 ```
+
+### Not Spam
+
+```bash
+# Back to the inbox, flagged $notjunk so the filter learns from it
+fastmail not-spam EMAIL_ID
+```
+
+### Mailing Lists and Unsubscribing
+
+```bash
+# Every sender whose mail carries List-Unsubscribe, most prolific first,
+# with unread counts and the newest unsubscribe links
+fastmail lists
+fastmail lists --after 2025-01-01 --limit 2000
+
+# Leave the list an email came from. One-click (RFC 8058) when the sender
+# supports it, else an email to its mailto: address, sent from the address
+# the list wrote to when that is one of your identities. Senders that only
+# offer a web page are reported with the link, to finish in a browser.
+fastmail unsubscribe EMAIL_ID        # says what it would do
+fastmail unsubscribe EMAIL_ID -y     # does it
+```
+
+One-click POSTs only go to public HTTPS addresses (the host is resolved and
+checked, and the connection pinned to what was checked) and never follow
+redirects: the URL comes from a header anyone can write, and in a hosted
+deployment the request leaves from the server.
+
+Fastmail's filter rules are not exposed over JMAP, so they can't be managed
+here. Over MCP, `sweepEmails` applies a rule's action — move, mark read, mark
+spam — to everything a filter already matches, PREVIEW then CONFIRM.
 
 ### Mark as Read/Unread
 
@@ -614,8 +649,8 @@ anything — so reading mail cost a 27KB fetch first, and cost it again whenever
 the connection dropped. The common case is now answered where the model is
 already looking, and `schema_sdl` is for what the sketch explicitly says it
 doesn't cover: attachment payloads, masked email, contacts, identities,
-`moveEmail`, `markAsRead`, `markAsSpam`, and the remaining filter and sort
-options. `types` keeps that second hop small too. Named types come back whole
+`moveEmail`, `markAsRead`, `markAsSpam`, `markAsNotSpam`, `mailingLists`,
+`unsubscribe`, `sweepEmails`, and the remaining filter and sort options. `types` keeps that second hop small too. Named types come back whole
 but their references don't, so name those as well; an unrecognised name is
 reported alongside the list of names that do exist, rather than silently
 dropped.

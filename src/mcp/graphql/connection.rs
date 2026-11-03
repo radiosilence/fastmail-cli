@@ -225,7 +225,7 @@ fn stale_anchor_hint(e: crate::error::Error) -> async_graphql::Error {
 }
 
 /// Resolve every mailbox name mentioned in a filter tree to its ID, in one go.
-async fn resolve_mailbox_names(
+pub(crate) async fn resolve_mailbox_names(
     ctx: &Context<'_>,
     filter: Option<&EmailFilter>,
 ) -> Result<HashMap<String, String>> {

@@ -119,6 +119,39 @@ impl QueryRoot {
         .await
     }
 
+    /// Every sender that has sent mail with a `List-Unsubscribe` header —
+    /// newsletters, marketing, discussion lists — grouped by sender address,
+    /// most prolific first, each with the newest way to unsubscribe.
+    ///
+    /// Reads headers only, newest first, 500 emails per API call, so a whole
+    /// account of a few thousand list emails costs a handful of calls. Narrow
+    /// it with `filter` (e.g. `{after: "2025-01-01", inMailboxOtherThan:
+    /// ["trash", "junk"]}`); the unsubscribe-header condition is always added.
+    async fn mailing_lists(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Which emails to scan; the List-Unsubscribe condition is added to it.")]
+        filter: Option<EmailFilter>,
+        #[graphql(desc = "Most emails to read, newest first (default 10000, max 50000).")]
+        scan_limit: Option<i32>,
+    ) -> Result<super::lists::GqlMailingListReport> {
+        let limit = scan_limit.unwrap_or(10_000).clamp(1, 50_000) as usize;
+        let mailboxes = super::connection::resolve_mailbox_names(ctx, filter.as_ref()).await?;
+        let jmap_filter = super::filter::and_also(
+            filter.as_ref().and_then(|f| f.to_jmap(&mailboxes)),
+            serde_json::json!({ "header": ["List-Unsubscribe"] }),
+        );
+        let client = ctx.data::<SharedClient>()?;
+        let (emails, total) = client.scan_list_emails(jmap_filter, limit).await?;
+        let scanned = emails.len() as u32;
+        Ok(crate::jmap::lists::MailingListReport {
+            scanned,
+            total,
+            lists: crate::jmap::lists::group_by_sender(emails),
+        }
+        .into())
+    }
+
     /// Get a specific email by ID, with full content.
     ///
     /// Attachment payloads and the surrounding conversation resolve lazily, so

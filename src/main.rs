@@ -215,6 +215,33 @@ enum Commands {
         yes: bool,
     },
 
+    /// Mark email as not spam: back to the inbox, flagged $notjunk
+    NotSpam {
+        /// Email ID
+        email_id: String,
+    },
+
+    /// List every sender with an unsubscribe header, most prolific first
+    Lists {
+        /// Most emails to scan, newest first
+        #[arg(long, default_value_t = 10_000)]
+        limit: usize,
+
+        /// Only mail received on or after this date (YYYY-MM-DD)
+        #[arg(long)]
+        after: Option<String>,
+    },
+
+    /// Unsubscribe from the mailing list an email came from (one-click or mailto)
+    Unsubscribe {
+        /// Email ID (the newest from the list works best)
+        email_id: String,
+
+        /// Skip confirmation
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+
     /// Mark email as read or unread
     MarkRead {
         /// Email ID
@@ -662,6 +689,12 @@ async fn run() -> std::process::ExitCode {
             }
             commands::mark_spam(&email_id).await
         }
+
+        Commands::NotSpam { email_id } => commands::mark_not_spam(&email_id).await,
+
+        Commands::Lists { limit, after } => commands::mailing_lists(limit, after.as_deref()).await,
+
+        Commands::Unsubscribe { email_id, yes } => commands::unsubscribe(&email_id, yes).await,
 
         Commands::MarkRead { email_id, unread } => commands::mark_read(&email_id, !unread).await,
 

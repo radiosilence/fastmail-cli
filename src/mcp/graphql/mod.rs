@@ -8,6 +8,7 @@ use async_graphql::Schema;
 mod attachments;
 pub mod connection;
 pub mod filter;
+pub mod lists;
 pub mod loaders;
 mod mutation;
 mod query;
