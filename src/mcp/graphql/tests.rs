@@ -2495,3 +2495,350 @@ fn inline_content_is_fingerprinted_with_sha256() {
         "{keys:?}"
     );
 }
+
+/// A mock account of mailing-list mail: three newsletters, two from the same
+/// shop, answering with the `header:…` properties a scan asks for.
+async fn list_server() -> MockServer {
+    let server = MockServer::start().await;
+    let records = [
+        json!({
+            "id": "L3", "from": [{ "name": "Shop", "email": "News@Shop.test" }],
+            "to": [{ "email": "sender@example.com" }],
+            "subject": "Sale ends", "receivedAt": "2026-03-01T00:00:00Z", "keywords": {},
+            "header:List-Id:asText": "Shop <news.shop.test>",
+            "header:List-Unsubscribe:asURLs": ["https://shop.test/u/3"],
+            "header:List-Unsubscribe-Post:asText": "List-Unsubscribe=One-Click",
+        }),
+        json!({
+            "id": "L2", "from": [{ "email": "digest@club.test" }],
+            "to": [{ "email": "sender@example.com" }],
+            "subject": "Digest", "receivedAt": "2026-02-01T00:00:00Z",
+            "keywords": { "$seen": true },
+            "header:List-Unsubscribe:asURLs": ["mailto:leave@club.test?subject=stop"],
+        }),
+        json!({
+            "id": "L1", "from": [{ "email": "news@shop.test" }],
+            "subject": "Old sale", "receivedAt": "2026-01-01T00:00:00Z", "keywords": {},
+            "header:List-Unsubscribe:asURLs": ["https://shop.test/u/1"],
+        }),
+        json!({
+            "id": "L0", "from": [{ "email": "web@only.test" }],
+            "subject": "Hi", "receivedAt": "2025-12-01T00:00:00Z", "keywords": {},
+            "header:List-Unsubscribe:asURLs": ["https://only.test/page"],
+        }),
+    ];
+    let responder = move |req: &wiremock::Request| -> ResponseTemplate {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+        let mut responses = Vec::new();
+        for mc in body["methodCalls"].as_array().cloned().unwrap_or_default() {
+            let name = mc[0].as_str().unwrap_or("").to_string();
+            let args = &mc[1];
+            let tag = mc[2].clone();
+            let payload = match name.as_str() {
+                "Mailbox/get" => json!({ "list": [
+                    { "id": "mbI", "name": "Inbox", "role": "inbox" },
+                    { "id": "mbJ", "name": "Junk Mail", "role": "junk" },
+                    { "id": "mbS", "name": "Sent", "role": "sent" },
+                    { "id": "mbA", "name": "Archive", "role": "archive" },
+                ] }),
+                "Email/query" => {
+                    let pos = args["position"].as_u64().unwrap_or(0) as usize;
+                    let limit = args["limit"].as_u64().unwrap_or(100) as usize;
+                    let ids: Vec<&str> = ["L3", "L2", "L1", "L0"]
+                        .into_iter()
+                        .skip(pos)
+                        .take(limit)
+                        .collect();
+                    json!({ "ids": ids, "position": pos, "total": 4, "queryState": "q" })
+                }
+                "Email/get" => {
+                    let wanted: Option<Vec<String>> = args["ids"].as_array().map(|a| {
+                        a.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    });
+                    let list: Vec<Value> = records
+                        .iter()
+                        .filter(|r| {
+                            wanted
+                                .as_ref()
+                                .is_none_or(|w| w.iter().any(|id| r["id"] == json!(id)))
+                        })
+                        .cloned()
+                        .collect();
+                    json!({ "list": list, "notFound": [] })
+                }
+                "Identity/get" => json!({ "list": [
+                    { "id": "i1", "name": "Me", "email": "me@example.com" },
+                    { "id": "i2", "name": "Masked", "email": "sender@example.com" },
+                ] }),
+                "Email/set" => json!({
+                    "created": args.get("create").map(|_| json!({ "email": { "id": "new1" } })),
+                    "updated": args.get("update").map(|u| {
+                        u.as_object().unwrap().keys().map(|k| (k.clone(), Value::Null))
+                            .collect::<serde_json::Map<_, _>>()
+                    }),
+                }),
+                "EmailSubmission/set" => json!({ "created": { "submission": { "id": "sub1" } } }),
+                _ => json!({ "list": [] }),
+            };
+            responses.push(json!([name, payload, tag]));
+        }
+        ResponseTemplate::new(200).set_body_json(json!({ "methodResponses": responses }))
+    };
+    Mock::given(method("POST"))
+        .and(path("/jmap"))
+        .respond_with(responder)
+        .mount(&server)
+        .await;
+    server
+}
+
+/// The `Email/set` update maps the server was sent, in order.
+async fn email_updates(server: &MockServer) -> Vec<Value> {
+    let mut out = Vec::new();
+    for req in server.received_requests().await.unwrap_or_default() {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+        for mc in body["methodCalls"].as_array().cloned().unwrap_or_default() {
+            if mc[0] == "Email/set" && mc[1].get("update").is_some() {
+                out.push(mc[1]["update"].clone());
+            }
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn mailing_lists_groups_senders_in_one_round_trip() {
+    let server = list_server().await;
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "{ mailingLists { scanned total lists { senderEmail count unreadCount listIds \
+          latestEmailId unsubscribe { emailId oneClick http mailto } } } }",
+    )
+    .await;
+    let report = &data["mailingLists"];
+    assert_eq!(report["scanned"], 4);
+    let lists = report["lists"].as_array().unwrap();
+    assert_eq!(lists.len(), 3, "{report}");
+    assert_eq!(lists[0]["senderEmail"], "news@shop.test");
+    assert_eq!(lists[0]["count"], 2);
+    assert_eq!(lists[0]["unreadCount"], 2);
+    assert_eq!(lists[0]["latestEmailId"], "L3");
+    assert_eq!(lists[0]["listIds"], json!(["news.shop.test"]));
+    assert_eq!(lists[0]["unsubscribe"]["oneClick"], true);
+    assert_eq!(
+        lists[0]["unsubscribe"]["http"],
+        json!(["https://shop.test/u/3"])
+    );
+    assert_eq!(lists[1]["unreadCount"], 0);
+
+    // One HTTP request: the query and the header fetch chained together, and
+    // the unsubscribe condition always applied.
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 1);
+    let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    let query = &body["methodCalls"][0][1];
+    assert_eq!(query["filter"], json!({ "header": ["List-Unsubscribe"] }));
+    let props = body["methodCalls"][1][1]["properties"].to_string();
+    assert!(
+        props.contains("header:List-Unsubscribe-Post:asText"),
+        "{props}"
+    );
+}
+
+#[tokio::test]
+async fn email_unsubscribe_parses_raw_headers() {
+    // The shared fixture's full fetch carries `List-Unsubscribe: <https://…>`.
+    let server = mock_server(1).await;
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "{ email(id: \"e0\") { unsubscribe { oneClick http mailto } } }",
+    )
+    .await;
+    assert_eq!(
+        data["email"]["unsubscribe"],
+        json!({ "oneClick": false, "http": ["https://example.com/u"], "mailto": [] })
+    );
+}
+
+#[tokio::test]
+async fn unsubscribe_by_mailto_previews_then_sends_from_the_subscribed_identity() {
+    let server = list_server().await;
+    let client = client_for(&server);
+    let schema = build_schema();
+    let preview = exec(
+        &schema,
+        &client,
+        "mutation { unsubscribe(emailId: \"L2\", action: PREVIEW) { success method message confirmationToken } }",
+    )
+    .await;
+    let p = &preview["unsubscribe"];
+    assert_eq!(p["method"], "MAILTO");
+    assert!(
+        p["message"].as_str().unwrap().contains("leave@club.test"),
+        "{p}"
+    );
+    let token = p["confirmationToken"].as_str().unwrap();
+
+    // Nothing is sent by a preview.
+    let sent_before = calls(&server)
+        .await
+        .iter()
+        .filter(|c| c.method == "EmailSubmission/set")
+        .count();
+    assert_eq!(sent_before, 0);
+
+    let confirm = exec(
+        &schema,
+        &client,
+        &format!(
+            "mutation {{ unsubscribe(emailId: \"L2\", action: CONFIRM, confirmationToken: \"{token}\") \
+             {{ success message }} }}"
+        ),
+    )
+    .await;
+    assert_eq!(confirm["unsubscribe"]["success"], true, "{confirm}");
+    let message = confirm["unsubscribe"]["message"].as_str().unwrap();
+    assert!(message.contains("from sender@example.com"), "{message}");
+
+    // The token is spent.
+    let again = exec(
+        &schema,
+        &client,
+        &format!(
+            "mutation {{ unsubscribe(emailId: \"L2\", action: CONFIRM, confirmationToken: \"{token}\") \
+             {{ success }} }}"
+        ),
+    )
+    .await;
+    assert_eq!(again["unsubscribe"]["success"], false);
+}
+
+#[tokio::test]
+async fn unsubscribe_without_a_usable_link_hands_back_the_page() {
+    let server = list_server().await;
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "mutation { unsubscribe(emailId: \"L0\", action: PREVIEW) { success method confirmationToken manualUrls } }",
+    )
+    .await;
+    assert_eq!(
+        data["unsubscribe"],
+        json!({
+            "success": false, "method": "MANUAL", "confirmationToken": null,
+            "manualUrls": ["https://only.test/page"],
+        })
+    );
+}
+
+#[tokio::test]
+async fn sweep_previews_then_applies_one_patch_to_every_match() {
+    let server = list_server().await;
+    let client = client_for(&server);
+    let schema = build_schema();
+    let preview = exec(
+        &schema,
+        &client,
+        "mutation { sweepEmails(filter: {from: \"shop.test\"}, action: PREVIEW, moveTo: \"Archive\", markRead: true) \
+         { success matched affected preview confirmationToken } }",
+    )
+    .await;
+    let p = &preview["sweepEmails"];
+    assert_eq!(p["affected"], 4, "{p}");
+    assert!(
+        p["preview"].as_str().unwrap().contains("moved to Archive"),
+        "{p}"
+    );
+    assert!(
+        email_updates(&server).await.is_empty(),
+        "a preview changes nothing"
+    );
+    let token = p["confirmationToken"].as_str().unwrap();
+
+    // A different change is not what the token vouched for.
+    let swapped = exec(
+        &schema,
+        &client,
+        &format!(
+            "mutation {{ sweepEmails(filter: {{from: \"shop.test\"}}, action: CONFIRM, markSpam: true, \
+             confirmationToken: \"{token}\") {{ success error }} }}"
+        ),
+    )
+    .await;
+    assert_eq!(swapped["sweepEmails"]["success"], false);
+
+    let preview = exec(
+        &schema,
+        &client,
+        "mutation { sweepEmails(filter: {from: \"shop.test\"}, action: PREVIEW, moveTo: \"Archive\", markRead: true) \
+         { confirmationToken } }",
+    )
+    .await;
+    let token = preview["sweepEmails"]["confirmationToken"]
+        .as_str()
+        .unwrap();
+    let done = exec(
+        &schema,
+        &client,
+        &format!(
+            "mutation {{ sweepEmails(filter: {{from: \"shop.test\"}}, action: CONFIRM, moveTo: \"Archive\", \
+             markRead: true, confirmationToken: \"{token}\") {{ success affected }} }}"
+        ),
+    )
+    .await;
+    assert_eq!(
+        done["sweepEmails"],
+        json!({ "success": true, "affected": 4 })
+    );
+    let updates = email_updates(&server).await;
+    assert_eq!(updates.len(), 1);
+    assert_eq!(
+        updates[0]["L1"],
+        json!({ "mailboxIds": { "mbA": true }, "keywords/$seen": true })
+    );
+}
+
+#[tokio::test]
+async fn sweep_refuses_a_filter_that_matches_everything() {
+    let server = list_server().await;
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "mutation { sweepEmails(filter: {}, action: PREVIEW, markRead: true) { success error } }",
+    )
+    .await;
+    assert_eq!(data["sweepEmails"]["success"], false);
+}
+
+#[tokio::test]
+async fn spam_verdicts_set_the_training_keywords() {
+    let server = list_server().await;
+    let client = client_for(&server);
+    let schema = build_schema();
+    exec(
+        &schema,
+        &client,
+        "mutation { markAsSpam(emailId: \"L1\", action: CONFIRM) { success } }",
+    )
+    .await;
+    exec(
+        &schema,
+        &client,
+        "mutation { markAsNotSpam(emailId: \"L2\") { success } }",
+    )
+    .await;
+    let updates = email_updates(&server).await;
+    assert_eq!(
+        updates[0]["L1"],
+        json!({ "mailboxIds": { "mbJ": true }, "keywords/$junk": true, "keywords/$notjunk": null })
+    );
+    assert_eq!(
+        updates[1]["L2"],
+        json!({ "mailboxIds": { "mbI": true }, "keywords/$junk": null, "keywords/$notjunk": true })
+    );
+}

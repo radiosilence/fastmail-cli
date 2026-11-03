@@ -426,6 +426,29 @@ impl GqlEmail {
             .collect())
     }
 
+    /// How to leave the mailing list this came from, parsed from its
+    /// `List-Unsubscribe` and `List-Unsubscribe-Post` headers; null when it
+    /// has neither. Lazily fetched, like `headers`. Pass `emailId` to the
+    /// `unsubscribe` mutation to act on it.
+    async fn unsubscribe(
+        &self,
+        ctx: &Context<'_>,
+    ) -> Result<Option<super::lists::GqlUnsubscribeOptions>> {
+        let email = self.detail(ctx).await?;
+        let headers = email.headers.as_deref().unwrap_or_default();
+        let urls: Vec<String> = headers
+            .iter()
+            .filter(|h| h.name.eq_ignore_ascii_case("List-Unsubscribe"))
+            .flat_map(|h| crate::jmap::lists::parse_list_unsubscribe(&h.value))
+            .collect();
+        let post = headers
+            .iter()
+            .find(|h| h.name.eq_ignore_ascii_case("List-Unsubscribe-Post"))
+            .map(|h| h.value.as_str());
+        let options = crate::jmap::lists::UnsubscribeOptions::from_headers(&email.id, &urls, post);
+        Ok((!options.is_empty()).then(|| options.into()))
+    }
+
     /// Plain text body content. Lazily fetched — selecting it on a list of
     /// emails costs one batched call for the whole list.
     async fn text_body(&self, ctx: &Context<'_>) -> Result<Option<String>> {

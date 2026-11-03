@@ -1,4 +1,5 @@
 mod events;
+pub mod lists;
 mod watch;
 
 use crate::commands::SearchFilter;
@@ -1554,8 +1555,30 @@ impl JmapClient {
 
     #[instrument(skip(self))]
     pub async fn mark_spam(&self, email_id: &str) -> Result<()> {
-        let junk = self.find_mailbox("junk").await?;
-        self.move_email(email_id, &junk.id).await
+        let outcome = self.mark_spam_many(&[email_id.to_string()]).await?;
+        Self::single_update(outcome)
+    }
+
+    /// Move back to the inbox and mark `$notjunk`.
+    #[instrument(skip(self))]
+    pub async fn mark_not_spam(&self, email_id: &str) -> Result<()> {
+        let inbox = self.find_mailbox("inbox").await?;
+        let outcome = self
+            .mark_not_spam_many(&[email_id.to_string()], &inbox.id)
+            .await?;
+        Self::single_update(outcome)
+    }
+
+    /// A one-email [`lists::UpdateOutcome`] as a plain result.
+    pub(crate) fn single_update(outcome: lists::UpdateOutcome) -> Result<()> {
+        match outcome.failed.into_iter().next() {
+            Some((_, reason)) => Err(Error::Jmap {
+                method: "Email/set".into(),
+                error_type: "notUpdated".into(),
+                description: reason,
+            }),
+            None => Ok(()),
+        }
     }
 
     /// Download a blob (attachment) by ID

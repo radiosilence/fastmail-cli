@@ -72,8 +72,20 @@ fastmail forward EMAIL_ID --to ADDR [--body STR] [--cc] [--bcc] [--from IDENTITY
 ```bash
 fastmail move EMAIL_ID --to MAILBOX
 fastmail mark-read EMAIL_ID [--unread]
-fastmail spam EMAIL_ID [-y]
+fastmail spam EMAIL_ID [-y]          # Junk + $junk: trains the filter
+fastmail not-spam EMAIL_ID           # back to Inbox + $notjunk
 ```
+
+### Mailing Lists
+
+```bash
+fastmail lists [--after YYYY-MM-DD] [--limit N]   # senders with List-Unsubscribe, most prolific first
+fastmail unsubscribe EMAIL_ID [-y]               # one-click (RFC 8058) or mailto; without -y says what it would do
+```
+
+Use the sender's `latestEmailId` from `lists`: old links expire. A sender that
+only offers a web page is reported with the link, for a browser. Filter rules
+are not reachable over JMAP.
 
 ### Attachments
 

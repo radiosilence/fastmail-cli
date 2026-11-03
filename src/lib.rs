@@ -12,4 +12,5 @@ pub mod extract;
 pub mod jmap;
 pub mod mcp;
 pub mod models;
+pub mod unsubscribe;
 pub mod util;

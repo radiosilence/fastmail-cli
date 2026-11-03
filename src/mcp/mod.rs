@@ -291,7 +291,7 @@ impl FastmailMcp {
         title = "Fastmail schema",
         description = "The full GraphQL SDL for the Fastmail API, with documentation on every type, argument and per-field cost.\n\
 \n\
-You do not need this for everyday mail — the `graphql` tool's own description already carries the queries, filters, fields and send flow for that. Reach for this when you want something it lists as not covered (attachment payloads, masked email, contacts, identities, moveEmail, markAsRead, markAsSpam, the remaining filter and sort options), or the exact cost of a field.\n\
+You do not need this for everyday mail — the `graphql` tool's own description already carries the queries, filters, fields and send flow for that. Reach for this when you want something it lists as not covered (attachment payloads, masked email, contacts, identities, moveEmail, markAsRead, markAsSpam, markAsNotSpam, mailing lists and unsubscribing (mailingLists, unsubscribe), bulk changes (sweepEmails), the remaining filter and sort options), or the exact cost of a field.\n\
 \n\
 Pass `types` to fetch only what you need: the whole schema is ~27KB, and `types: [\"MutationRoot\"]` or `[\"Attachment\", \"MaskedEmail\"]` is usually a few hundred bytes. Named types come back whole and documented, but the types they reference do not — name those too. An unrecognised name is reported back with the list of names that do exist. Omit `types` for the lot."
     )]
@@ -378,7 +378,10 @@ as it arrives) for callers on the HTTP surface, which serves it over SSE at
 NOT LISTED ABOVE — ask `schema_sdl` for these rather than guessing: attachment
 payloads (base64/image/text), masked email, contacts and contact CRUD (CardDAV,
 so check `session { carddavConfigured }` first), identities, moveEmail,
-markAsRead, markAsSpam, and the remaining filter and sort options."
+markAsRead, markAsSpam, markAsNotSpam, mailingLists (every sender with an
+unsubscribe header, grouped) and unsubscribe (one-click or mailto), sweepEmails
+(move / mark read / mark spam everything a filter matches), and the remaining
+filter and sort options."
     )]
     async fn graphql(
         &self,
@@ -465,7 +468,13 @@ impl ServerHandler for FastmailMcp {
                 ## Safety\n\
                 Never send without showing the user a PREVIEW first, and never \
                 CONFIRM without their explicit approval. Marking spam trains the \
-                filter, so preview that too.",
+                filter, so preview that too; `unsubscribe` and `sweepEmails` \
+                are PREVIEW-then-CONFIRM for the same reason.\n\n\
+                ## Rules\n\
+                Fastmail's filter rules are not reachable over JMAP, so they \
+                cannot be read or changed here. `sweepEmails` applies a \
+                rule's action to the mail already there; a rule for future \
+                mail is set in Fastmail's Settings → Filters & Rules.",
             )
     }
 }
