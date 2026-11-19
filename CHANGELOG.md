@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.9.1
+
+### Security
+
+- **The container runs as non-root.** The MCP server holds a mail account's token for each request and parses mail from the internet, so the image now builds on distroless's `nonroot` variant and runs as uid 65532 rather than root.
+
+### Changed
+
+- **The container's home is `/home/nonroot`.** It was `/root`, so a config or cache mounted there is no longer found. Mount it under `/home/nonroot` instead, owned by uid 65532: the extraction directory in the cache must belong to the user running the server, or extraction falls back to a fresh directory under `/tmp` on every start.
+
 ## 3.9.0
 
 ### Added
