@@ -1,1 +1,1 @@
-- **The container runs as non-root.** The image builds on distroless's `nonroot` variant, so the MCP server runs as uid 65532 instead of root.
+- **The container runs as non-root.** The MCP server holds a mail account's token for each request and parses mail from the internet, so the image now builds on distroless's `nonroot` variant and runs as uid 65532 rather than root.

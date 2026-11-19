@@ -22,7 +22,10 @@
 #   - libstdc++ / libgcc_s / libc — kreuzberg embeds pdfium and dlopens it at
 #     runtime, so a dynamic loader and the C++ runtime have to be present.
 #     That extract-and-dlopen is also why a fully static musl build is out.
-#   - /tmp — where pdfium is extracted on first use (std::env::temp_dir()).
+#   - A home the runtime user owns, and a writable /tmp — attachment
+#     extraction, pdfium included, runs in a worker given a private temp
+#     directory in the user's cache, falling back to one under /tmp (see
+#     `isolate` in src/extract.rs for the order and the checks).
 #
 # glibc invariant: whatever builds the binary must be no newer than this base.
 # Symbol versioning is forward-compatible only, so a binary linked against a
@@ -32,7 +35,10 @@
 #
 # The `nonroot` variant runs as uid 65532. The server holds a mail account's
 # token for the duration of each request and parses mail from the internet, so
-# it gets no root to escalate from. /tmp stays world-writable for pdfium.
+# it gets no root to escalate from. Its home is /home/nonroot, owned by that
+# user. Overriding the uid at runtime (Kubernetes `runAsUser`, `docker --user`)
+# leaves HOME at `/` for a uid with no passwd entry, so set HOME to a directory
+# that uid owns as well.
 FROM gcr.io/distroless/cc-debian13:nonroot
 
 ARG TARGETARCH
