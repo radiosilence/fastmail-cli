@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.9.1
+
+### Security
+
+- **The container runs as non-root.** The image builds on distroless's `nonroot` variant, so the MCP server runs as uid 65532 instead of root.
+
 ## 3.9.0
 
 ### Added
