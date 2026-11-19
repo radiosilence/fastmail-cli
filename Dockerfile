@@ -29,7 +29,11 @@
 # newer glibc builds fine and dies at exec time. cc-debian13 is trixie, 2.41,
 # above the ubuntu-24.04 runners CI builds on (2.39). Bumping either end means
 # re-checking both. cc-debian12 is 2.36 and would not clear the runners.
-FROM gcr.io/distroless/cc-debian13
+#
+# The `nonroot` variant runs as uid 65532. The server holds a mail account's
+# token for the duration of each request and parses mail from the internet, so
+# it gets no root to escalate from. /tmp stays world-writable for pdfium.
+FROM gcr.io/distroless/cc-debian13:nonroot
 
 ARG TARGETARCH
 

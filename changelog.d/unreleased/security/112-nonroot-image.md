@@ -1,0 +1,1 @@
+- **The container runs as non-root.** The image builds on distroless's `nonroot` variant, so the MCP server runs as uid 65532 instead of root.
