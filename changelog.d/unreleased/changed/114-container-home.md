@@ -1,0 +1,1 @@
+- **The container's home is `/home/nonroot`.** It was `/root`, so a config or cache mounted there is no longer found. Mount it under `/home/nonroot` instead, owned by uid 65532: the extraction directory in the cache must belong to the user running the server, or extraction falls back to a fresh directory under `/tmp` on every start.
