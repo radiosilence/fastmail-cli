@@ -22,7 +22,10 @@
 #   - libstdc++ / libgcc_s / libc — kreuzberg embeds pdfium and dlopens it at
 #     runtime, so a dynamic loader and the C++ runtime have to be present.
 #     That extract-and-dlopen is also why a fully static musl build is out.
-#   - /tmp — where pdfium is extracted on first use (std::env::temp_dir()).
+#   - A writable home — attachment extraction runs in a worker whose TMPDIR is
+#     a private 0700 directory under $HOME/.cache/fastmail-cli/tmp, and pdfium
+#     is extracted there on first use. /tmp is only the fallback when that
+#     directory cannot be made.
 #
 # glibc invariant: whatever builds the binary must be no newer than this base.
 # Symbol versioning is forward-compatible only, so a binary linked against a
@@ -32,7 +35,8 @@
 #
 # The `nonroot` variant runs as uid 65532. The server holds a mail account's
 # token for the duration of each request and parses mail from the internet, so
-# it gets no root to escalate from. /tmp stays world-writable for pdfium.
+# it gets no root to escalate from. Its home is /home/nonroot, owned by that
+# user, which is what the extraction directory above needs.
 FROM gcr.io/distroless/cc-debian13:nonroot
 
 ARG TARGETARCH
