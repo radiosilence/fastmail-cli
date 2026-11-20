@@ -1,0 +1,1 @@
+- **Dependencies updated.** A fresh `cargo update`, with `zip` held at 8.6 until kreuzberg builds against zip 9.
