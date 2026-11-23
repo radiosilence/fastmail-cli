@@ -590,6 +590,20 @@ credential, which `session { carddavConfigured }` reports as `false` — rather
 than quietly completing itself from the host's local config and mixing two
 users together.
 
+**Requests must be addressed to this server.** One without a token header is
+answered with your own credentials, so a web page that rebinds a hostname of
+its own to 127.0.0.1 could otherwise reach your mailbox through the port. The
+server therefore refuses a `Host` other than the bind address, `localhost`,
+`127.0.0.1` and `[::1]`, and a browser `Origin` other than its own (GraphiQL,
+served from the same port, is its own). Behind a proxy that forwards a name of
+its own, such as a gateway sending the backend's service name, allow that name
+with `--allowed-host` (repeatable, or comma-separated) or
+`FASTMAIL_MCP_ALLOWED_HOSTS`; a port on the name is optional:
+
+```bash
+fastmail mcp --http 0.0.0.0:8080 --allowed-host fastmail.mcp.svc.cluster.local
+```
+
 Do **not** expose this to the internet without such an auth layer in front —
 the header is trusted unconditionally. Equally, do not run it with local
 credentials present on a non-loopback address: anything that can reach the port

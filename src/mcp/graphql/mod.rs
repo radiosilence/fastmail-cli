@@ -69,6 +69,39 @@ impl CardDavCreds {
     }
 }
 
+/// The CardDAV client for this request's credentials, for every contact query
+/// and mutation alike.
+///
+/// Only ever the request's own [`CardDavCreds`]: they were resolved from its
+/// headers, falling back to the local config only when it carried none, so
+/// reading the config again here would hand a hosted tenant the operator's
+/// address book.
+pub fn carddav_client(
+    ctx: &async_graphql::Context<'_>,
+) -> async_graphql::Result<crate::carddav::CardDavClient> {
+    let creds = ctx.data::<CardDavCreds>()?;
+    let username = creds.username.clone().ok_or_else(|| {
+        async_graphql::Error::new("Username not configured. Set FASTMAIL_USERNAME env var.")
+    })?;
+    let app_password = creds.app_password.clone().ok_or_else(|| {
+        async_graphql::Error::new(
+            "App password not configured. Set FASTMAIL_APP_PASSWORD env var (API tokens don't work for CardDAV).",
+        )
+    })?;
+    let client = crate::carddav::CardDavClient::new(username, app_password);
+    // Tests point the client at a mock server; nothing a request sends can.
+    #[cfg(test)]
+    let client = match ctx.data_opt::<TestCardDavBase>() {
+        Some(base) => client.at(&base.0),
+        None => client,
+    };
+    Ok(client)
+}
+
+/// Where a test's CardDAV requests go instead of Fastmail.
+#[cfg(test)]
+pub struct TestCardDavBase(pub String);
+
 /// Maximum selection-set nesting. The graph contains cycles by design — an
 /// email's thread contains emails, a mailbox's emails belong to mailboxes — so
 /// unbounded depth would let one query walk forever. 15 is far past any useful

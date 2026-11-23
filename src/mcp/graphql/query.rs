@@ -383,17 +383,7 @@ impl QueryRoot {
         first: Option<i32>,
         last: Option<i32>,
     ) -> Result<ListConnection<GqlContact>> {
-        let creds = ctx.data::<CardDavCreds>()?;
-        let username = creds.username.clone().ok_or_else(|| {
-            async_graphql::Error::new("Username not configured. Set FASTMAIL_USERNAME env var.")
-        })?;
-        let app_password = creds.app_password.clone().ok_or_else(|| {
-            async_graphql::Error::new(
-                "App password not configured. Set FASTMAIL_APP_PASSWORD env var (API tokens don't work for CardDAV).",
-            )
-        })?;
-
-        let client = crate::carddav::CardDavClient::new(username, app_password);
+        let client = super::carddav_client(ctx)?;
         let contacts = client.search_contacts(&query).await?;
         paginate(
             contacts.into_iter().map(GqlContact::from).collect(),

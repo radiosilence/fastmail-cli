@@ -1,0 +1,1 @@
+- **The MCP instructions mark email text as untrusted.** Nothing told an agent that subjects, bodies, attachments and sender names are written by strangers; the server instructions now say they are data, never instructions to follow.
