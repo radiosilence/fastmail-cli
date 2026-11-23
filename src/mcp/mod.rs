@@ -726,6 +726,41 @@ fn strip_port(host: &str) -> &str {
     }
 }
 
+/// Put [`host_guard`] in front of every route of `router` when `mcp` holds
+/// credentials of its own, and say which applies.
+///
+/// Decided per server rather than per request because rebinding gains an
+/// attacker something only when the server would act with credentials the
+/// request did not bring: the local token, or the local CardDAV pair. Holding
+/// none, as the hosted image does (no config file, no credential variables),
+/// every request must bring its own, so a page reaching the port gets nothing
+/// it did not already have, and a proxy forwarding its own `Host` (the
+/// gateway's service name) needs no setting. Holding any, the guard is on and
+/// such a proxy is named with `--allowed-host`.
+fn guarded(
+    router: axum::Router,
+    mcp: &FastmailMcp,
+    addr: &str,
+    allowed_hosts: &[String],
+) -> axum::Router {
+    let carddav = &mcp.default_carddav;
+    let local =
+        mcp.default_token.is_some() || carddav.username.is_some() || carddav.app_password.is_some();
+    if !local {
+        tracing::info!(
+            "No local credentials, so every request must bring its own: \
+             accepting any Host and Origin"
+        );
+        return router;
+    }
+    tracing::info!(
+        "Local credentials present: refusing any Host but {addr}, loopback \
+         names and --allowed-host, and any Origin but this server's own"
+    );
+    let policy = Arc::new(HostPolicy::new(addr, allowed_hosts));
+    router.layer(axum::middleware::from_fn_with_state(policy, host_guard))
+}
+
 /// Refuse what [`HostPolicy::refusal`] refuses, in front of every route.
 async fn host_guard(
     axum::extract::State(policy): axum::extract::State<Arc<HostPolicy>>,
@@ -762,9 +797,8 @@ pub struct HttpSurfaces {
 /// caller. Do **not** expose this to the internet without such a layer in
 /// front: the header is trusted unconditionally.
 ///
-/// Every request must be addressed to `addr`, a loopback name or one of
-/// `allowed_hosts` (see [`HostPolicy`]); a proxy that forwards its own `Host`
-/// names it there.
+/// While it holds local credentials, every request must be addressed to
+/// `addr`, a loopback name or one of `allowed_hosts` (see [`guarded`]).
 pub async fn run_http_server(
     addr: &str,
     surfaces: HttpSurfaces,
@@ -781,9 +815,9 @@ pub async fn run_http_server(
     // One shared instance (shared schema + client cache) cloned into each session
     // and used as the axum state for the GraphQL routes.
     let mcp = FastmailMcp::http();
-    // rmcp's own Host allowlist is off because `host_guard` does the same for
-    // every route rather than only /mcp, and knows the hosts `--allowed-host`
-    // adds, such as the internal service name a gateway forwards.
+    // rmcp's own Host allowlist is off because `guarded` decides for every
+    // route rather than only /mcp, knows the hosts `--allowed-host` adds, and
+    // stays out of the way of a server with no local credentials.
     //
     // rmcp is deliberately not handed the shutdown token: cancelling it aborts
     // tool calls in flight at once. Its sessions instead end with the process,
@@ -850,10 +884,7 @@ pub async fn run_http_server(
         std::process::exit(130);
     });
 
-    let policy = Arc::new(HostPolicy::new(addr, allowed_hosts));
-    let router = router
-        .with_state(mcp)
-        .layer(axum::middleware::from_fn_with_state(policy, host_guard));
+    let router = guarded(router.with_state(mcp.clone()), &mcp, addr, allowed_hosts);
     let serve =
         axum::serve(listener, router).with_graceful_shutdown(shutdown.clone().cancelled_owned());
     tokio::select! {
@@ -1391,29 +1422,83 @@ mod tests {
         assert_eq!(refusal(&local_policy(), &[]), None);
     }
 
-    #[tokio::test]
-    async fn the_http_server_refuses_a_foreign_host_before_any_route_runs() {
-        let router = axum::Router::new()
-            .route("/graphql", axum::routing::get(|| async { "ok" }))
-            .layer(axum::middleware::from_fn_with_state(
-                Arc::new(local_policy()),
-                host_guard,
-            ));
+    /// The status a GET of `/graphql` gets with `host` from `mcp`'s HTTP
+    /// server, guarded as `run_http_server` guards it.
+    async fn status_for_host(mcp: &FastmailMcp, host: &'static str) -> http::StatusCode {
+        let router = axum::Router::new().route("/graphql", axum::routing::get(|| async { "ok" }));
+        let router = guarded(router, mcp, "127.0.0.1:8080", &[]);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/graphql", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, router).await });
 
         // Straight to the listener, whatever proxy the environment names.
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
-        let status = |host: &'static str| {
-            let request = client.get(&url).header(http::header::HOST, host).send();
-            async move { request.await.unwrap().status() }
+        client
+            .get(&url)
+            .header(http::header::HOST, host)
+            .send()
+            .await
+            .unwrap()
+            .status()
+    }
+
+    /// A server holding no credentials of its own, as the hosted image does.
+    fn hosted_server() -> FastmailMcp {
+        FastmailMcp {
+            default_carddav: CardDavCreds::default(),
+            ..FastmailMcp::build(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_server_with_a_local_token_refuses_a_foreign_host_before_any_route_runs() {
+        let mcp = FastmailMcp {
+            default_carddav: CardDavCreds::default(),
+            ..FastmailMcp::build(Some("operator-token".to_string()))
         };
         assert_eq!(
-            status("rebind.evil.example").await,
+            status_for_host(&mcp, "rebind.evil.example").await,
             http::StatusCode::FORBIDDEN
         );
-        assert_eq!(status("localhost:8080").await, http::StatusCode::OK);
+        assert_eq!(
+            status_for_host(&mcp, "localhost:8080").await,
+            http::StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_with_only_local_carddav_credentials_refuses_a_foreign_host() {
+        let whole = FastmailMcp {
+            default_carddav: local_carddav(),
+            ..hosted_server()
+        };
+        assert_eq!(
+            status_for_host(&whole, "rebind.evil.example").await,
+            http::StatusCode::FORBIDDEN
+        );
+        let half = FastmailMcp {
+            default_carddav: CardDavCreds {
+                app_password: None,
+                ..local_carddav()
+            },
+            ..hosted_server()
+        };
+        assert_eq!(
+            status_for_host(&half, "rebind.evil.example").await,
+            http::StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_with_no_local_credentials_accepts_a_proxys_own_host() {
+        assert_eq!(
+            status_for_host(
+                &hosted_server(),
+                "mcp-gateway-mcp-fastmail.jaritanet.svc.cluster.local:8080"
+            )
+            .await,
+            http::StatusCode::OK
+        );
     }
 
     #[test]
