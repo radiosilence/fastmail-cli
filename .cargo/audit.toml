@@ -1,10 +1,23 @@
 [advisories]
-# zip 8.x reaches the build only through kreuzberg -> calamine, which reads
-# spreadsheet entries into memory and never calls ZipArchive::extract or
-# ZipStreamReader::extract, the APIs these advisories concern. Remove once
-# kreuzberg moves to a calamine release built on zip 9.
 ignore = [
+  # zip 8.6 reaches the build only through kreuzberg and its calamine, which
+  # open entries by name or index and read them into memory. Neither calls
+  # `ZipArchive::extract` or `ZipStreamReader` (0367, 0368, 0369, 0429, 0546,
+  # 0548), and the `aes-crypto` (0545) and `legacy-zip` (0547) features are not
+  # enabled. Remove once kreuzberg builds on zip 9.
   "RUSTSEC-2026-0367",
   "RUSTSEC-2026-0368",
   "RUSTSEC-2026-0369",
+  "RUSTSEC-2026-0429",
+  "RUSTSEC-2026-0545",
+  "RUSTSEC-2026-0546",
+  "RUSTSEC-2026-0547",
+  "RUSTSEC-2026-0548",
+  # calamine 0.36's OLE2 parser can panic or allocate without bound on a
+  # crafted .xls or .xlsb. kreuzberg runs it only on attachments, and only in
+  # the child process `extract::isolate` starts (under a memory limit on
+  # Linux, where the server runs), so a crafted file ends that child rather
+  # than the server. Remove once kreuzberg
+  # moves to calamine 0.38.
+  "RUSTSEC-2026-0436",
 ]

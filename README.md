@@ -590,6 +590,25 @@ credential, which `session { carddavConfigured }` reports as `false` — rather
 than quietly completing itself from the host's local config and mixing two
 users together.
 
+**With local credentials, requests must be addressed to this server.** A
+server holding a local token (config or `FASTMAIL_API_TOKEN`) or local CardDAV
+credentials answers a request that brings none with yours, so a web page that
+rebinds a hostname of its own to 127.0.0.1 could otherwise reach your mailbox
+through the port. Such a server refuses a `Host` other than the bind address,
+`localhost`, `127.0.0.1` and `[::1]`, and a browser `Origin` other than its own
+(GraphiQL, served from the same port, is its own). Allow another name, such as
+a proxy's, with `--allowed-host` (repeatable, or comma-separated) or
+`FASTMAIL_MCP_ALLOWED_HOSTS`; a port on the name is optional:
+
+```bash
+fastmail mcp --http 0.0.0.0:8080 --allowed-host fastmail.mcp.svc.cluster.local
+```
+
+A server holding no local credentials, as in a hosted deployment, accepts any
+`Host` and `Origin`: every request must bring its own credentials, so there is
+nothing of yours for a page to reach, and a gateway forwarding its own service
+name needs no setting. Which mode applies is logged at start.
+
 Do **not** expose this to the internet without such an auth layer in front —
 the header is trusted unconditionally. Equally, do not run it with local
 credentials present on a non-loopback address: anything that can reach the port

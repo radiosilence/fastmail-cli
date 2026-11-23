@@ -395,6 +395,18 @@ enum Commands {
         /// --graphiql)
         #[arg(long)]
         browser: bool,
+
+        /// Also answer requests addressed to this host, beside the bind
+        /// address and localhost; repeat it, or separate hosts with commas.
+        /// Any other Host is refused, against DNS rebinding, so a proxy that
+        /// forwards its own (a service name) must be named here.
+        #[arg(
+            long = "allowed-host",
+            value_name = "HOST",
+            env = "FASTMAIL_MCP_ALLOWED_HOSTS",
+            value_delimiter = ','
+        )]
+        allowed_hosts: Vec<String>,
     },
 }
 
@@ -852,6 +864,7 @@ async fn run() -> std::process::ExitCode {
             graphql,
             graphiql,
             browser,
+            allowed_hosts,
         } => {
             let graphiql = graphiql || browser;
             let surfaces = mcp::HttpSurfaces {
@@ -862,7 +875,7 @@ async fn run() -> std::process::ExitCode {
             // Any HTTP-only surface implies the HTTP transport, at its default address.
             let addr = http.or_else(|| (surfaces.graphql).then(|| DEFAULT_HTTP_ADDR.to_string()));
             match addr {
-                Some(addr) => mcp::run_http_server(&addr, surfaces).await,
+                Some(addr) => mcp::run_http_server(&addr, surfaces, &allowed_hosts).await,
                 None => mcp::run_server().await,
             }
         }

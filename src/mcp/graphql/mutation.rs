@@ -1148,9 +1148,10 @@ impl MutationRoot {
         }
     }
 
-    /// Create a new contact via CardDAV. Requires FASTMAIL_USERNAME and FASTMAIL_APP_PASSWORD.
+    /// Create a new contact via CardDAV, with the CardDAV credentials `session { carddavConfigured }` reports on.
     async fn create_contact(
         &self,
+        ctx: &Context<'_>,
         #[graphql(desc = "Full name")] name: String,
         #[graphql(desc = "Email address")] email: Option<String>,
         #[graphql(desc = "Phone number")] phone: Option<String>,
@@ -1158,7 +1159,8 @@ impl MutationRoot {
         #[graphql(desc = "Job title")] title: Option<String>,
         #[graphql(desc = "Notes")] notes: Option<String>,
     ) -> Result<GqlContact> {
-        let (client, emails, phones) = build_carddav_context(email, phone)?;
+        let client = super::carddav_client(ctx)?;
+        let (emails, phones) = contact_lists(email, phone);
 
         let contact = client
             .create_contact(&crate::carddav::ContactFields {
@@ -1176,6 +1178,7 @@ impl MutationRoot {
     /// Update an existing contact via CardDAV. Only provided fields are changed; others are preserved.
     async fn update_contact(
         &self,
+        ctx: &Context<'_>,
         #[graphql(desc = "Contact ID (UID from the vCard)")] id: String,
         #[graphql(desc = "New full name")] name: Option<String>,
         #[graphql(desc = "New email address (replaces existing)")] email: Option<String>,
@@ -1184,7 +1187,8 @@ impl MutationRoot {
         #[graphql(desc = "New job title")] title: Option<String>,
         #[graphql(desc = "New notes")] notes: Option<String>,
     ) -> Result<GqlContact> {
-        let (client, emails, phones) = build_carddav_context(email, phone)?;
+        let client = super::carddav_client(ctx)?;
+        let (emails, phones) = contact_lists(email, phone);
 
         let emails_ref = if emails.is_empty() {
             None
@@ -1216,19 +1220,10 @@ impl MutationRoot {
     /// Delete a contact via CardDAV. Cannot be undone!
     async fn delete_contact(
         &self,
+        ctx: &Context<'_>,
         #[graphql(desc = "Contact ID (UID from the vCard)")] id: String,
     ) -> Result<GqlStatus> {
-        let config = crate::config::Config::load()?;
-        let username = config.get_username().map_err(|_| {
-            async_graphql::Error::new("Username not configured. Set FASTMAIL_USERNAME env var.")
-        })?;
-        let app_password = config.get_app_password().map_err(|_| {
-            async_graphql::Error::new(
-                "App password not configured. Set FASTMAIL_APP_PASSWORD env var.",
-            )
-        })?;
-
-        let client = crate::carddav::CardDavClient::new(username, app_password);
+        let client = super::carddav_client(ctx)?;
         match client.delete_contact(&id).await {
             Ok(()) => Ok(GqlStatus {
                 success: true,
@@ -1246,24 +1241,14 @@ impl MutationRoot {
 
 // ============ CardDAV helpers ============
 
-fn build_carddav_context(
+/// The comma-separated email and phone arguments as vCard entries.
+fn contact_lists(
     email: Option<String>,
     phone: Option<String>,
-) -> async_graphql::Result<(
-    crate::carddav::CardDavClient,
+) -> (
     Vec<crate::carddav::ContactEmail>,
     Vec<crate::carddav::ContactPhone>,
-)> {
-    let config = crate::config::Config::load()?;
-    let username = config.get_username().map_err(|_| {
-        async_graphql::Error::new("Username not configured. Set FASTMAIL_USERNAME env var.")
-    })?;
-    let app_password = config.get_app_password().map_err(|_| {
-        async_graphql::Error::new("App password not configured. Set FASTMAIL_APP_PASSWORD env var.")
-    })?;
-
-    let client = crate::carddav::CardDavClient::new(username, app_password);
-
+) {
     let emails: Vec<crate::carddav::ContactEmail> = email
         .map(|e| {
             e.split(',')
@@ -1286,7 +1271,7 @@ fn build_carddav_context(
         })
         .unwrap_or_default();
 
-    Ok((client, emails, phones))
+    (emails, phones)
 }
 
 // ============ Formatting helpers (preview only) ============

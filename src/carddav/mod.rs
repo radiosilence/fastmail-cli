@@ -108,6 +108,8 @@ pub struct ContactFields<'a> {
 /// CardDAV client
 pub struct CardDavClient {
     client: Client,
+    /// Fastmail's CardDAV server, except in tests, which point it at a mock.
+    base: String,
     username: String,
     app_password: String,
 }
@@ -116,8 +118,18 @@ impl CardDavClient {
     pub fn new(username: String, app_password: String) -> Self {
         Self {
             client: http_client(),
+            base: CARDDAV_BASE.to_string(),
             username,
             app_password,
+        }
+    }
+
+    /// The same client against another server, so tests can watch what it sends.
+    #[cfg(test)]
+    pub fn at(self, base: &str) -> Self {
+        Self {
+            base: base.to_string(),
+            ..self
         }
     }
 
@@ -125,7 +137,7 @@ impl CardDavClient {
     #[instrument(skip(self))]
     pub async fn list_addressbooks(&self) -> Result<Vec<AddressBook>> {
         let encoded_user = utf8_percent_encode(&self.username, PATH_SEGMENT);
-        let url = format!("{}/dav/addressbooks/user/{}/", CARDDAV_BASE, encoded_user);
+        let url = format!("{}/dav/addressbooks/user/{}/", self.base, encoded_user);
 
         let body = r#"<?xml version="1.0" encoding="utf-8"?>
 <d:propfind xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
@@ -213,7 +225,7 @@ impl CardDavClient {
     /// List all contacts in an address book
     #[instrument(skip(self))]
     pub async fn list_contacts(&self, addressbook_href: &str) -> Result<Vec<Contact>> {
-        let url = format!("{}{}", CARDDAV_BASE, addressbook_href);
+        let url = format!("{}{}", self.base, addressbook_href);
 
         let body = r#"<?xml version="1.0" encoding="utf-8"?>
 <card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
@@ -321,7 +333,7 @@ impl CardDavClient {
         let addressbooks = self.list_addressbooks().await?;
 
         for ab in addressbooks {
-            let url = format!("{}{}", CARDDAV_BASE, ab.href);
+            let url = format!("{}{}", self.base, ab.href);
 
             let body = r#"<?xml version="1.0" encoding="utf-8"?>
 <card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
@@ -407,7 +419,7 @@ impl CardDavClient {
             fields.notes,
         );
 
-        let url = format!("{}{}{}.vcf", CARDDAV_BASE, ab_href, uid);
+        let url = format!("{}{}{}.vcf", self.base, ab_href, uid);
         debug!(url = %url, "Creating contact");
 
         let response = self
@@ -489,7 +501,7 @@ impl CardDavClient {
             final_notes,
         );
 
-        let url = format!("{}{}", CARDDAV_BASE, href);
+        let url = format!("{}{}", self.base, href);
         debug!(url = %url, "Updating contact");
 
         let response = self
@@ -530,7 +542,7 @@ impl CardDavClient {
             .await?
             .ok_or_else(|| Error::Server(format!("Contact not found: {contact_id}")))?;
 
-        let url = format!("{}{}", CARDDAV_BASE, href);
+        let url = format!("{}{}", self.base, href);
         debug!(url = %url, "Deleting contact");
 
         let response = self
