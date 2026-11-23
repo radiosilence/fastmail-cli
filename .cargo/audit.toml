@@ -15,8 +15,9 @@ ignore = [
   "RUSTSEC-2026-0548",
   # calamine 0.36's OLE2 parser can panic or allocate without bound on a
   # crafted .xls or .xlsb. kreuzberg runs it only on attachments, and only in
-  # the child process `extract::isolate` starts, under a memory limit, so a
-  # crafted file ends that child rather than the server. Remove once kreuzberg
+  # the child process `extract::isolate` starts (under a memory limit on
+  # Linux, where the server runs), so a crafted file ends that child rather
+  # than the server. Remove once kreuzberg
   # moves to calamine 0.38.
   "RUSTSEC-2026-0436",
 ]
