@@ -511,13 +511,20 @@ Skills are in `.claude/skills/` in this repo. Each one includes concrete example
 
 ## MCP Server (Claude Integration)
 
-Run as an MCP server for use with Claude Desktop or other MCP clients:
+`fastmail mcp` serves the MCP over stdio by default, or over HTTP with
+`--http`. Choose by where the server runs and who uses it.
+
+### On your own machine (stdio)
+
+The client starts the binary itself. With credentials saved by `fastmail auth`
+(or in the config file) nothing else is needed. Claude Code:
 
 ```bash
-fastmail mcp
+claude mcp add fastmail -- fastmail mcp
 ```
 
-Configure in Claude Desktop's `claude_desktop_config.json`:
+Claude Desktop's `claude_desktop_config.json`, passing credentials as
+environment variables instead:
 
 ```json
 {
@@ -535,7 +542,103 @@ Configure in Claude Desktop's `claude_desktop_config.json`:
 }
 ```
 
-Username and app password are optional - only needed for contact search (CardDAV requires app password, API tokens don't work).
+Username and app password are optional: they are only needed for contacts,
+since CardDAV does not accept API tokens.
+
+### On your own machine (HTTP)
+
+One long-running server several clients can share, using your local
+credentials. It listens on `127.0.0.1:8080` and accepts only requests addressed
+to it (see [HTTP transport](#http-transport)).
+
+```bash
+fastmail mcp --http
+claude mcp add --transport http fastmail http://127.0.0.1:8080/mcp
+```
+
+### In a container
+
+The image runs `fastmail mcp --http 0.0.0.0:8080` and holds no credentials, so
+every request carries its own in headers:
+
+| Header                     | Needed for              |
+| -------------------------- | ----------------------- |
+| `X-Fastmail-Token`         | everything over JMAP    |
+| `X-Fastmail-Username`      | contacts (CardDAV)      |
+| `X-Fastmail-App-Password`  | contacts (CardDAV)      |
+
+```bash
+docker run --rm -p 127.0.0.1:8080:8080 ghcr.io/radiosilence/fastmail-cli:latest
+
+claude mcp add --transport http fastmail http://127.0.0.1:8080/mcp \
+  --header "X-Fastmail-Token: fmu1-..." \
+  --header "X-Fastmail-Username: you@fastmail.com" \
+  --header "X-Fastmail-App-Password: xxxx..."
+```
+
+Tags are `latest`, `vX`, `vX.Y` and `vX.Y.Z` for releases, and `main` for the
+current main branch.
+
+The server trusts these headers unconditionally, so a container reachable by
+anyone other than you belongs behind a gateway that authenticates the caller
+and injects the headers itself.
+
+### Behind a gateway
+
+A minimal single-user gateway is a reverse proxy that checks a shared secret
+and adds your credentials. With [Caddy](https://caddyserver.com), which also
+provides TLS:
+
+```caddyfile
+mail.example.com {
+	@authed {
+		path /mcp
+		header Authorization "Bearer {$GATEWAY_SECRET}"
+	}
+	handle @authed {
+		reverse_proxy fastmail:8080 {
+			header_up X-Fastmail-Token {$FASTMAIL_API_TOKEN}
+			header_up X-Fastmail-Username {$FASTMAIL_USERNAME}
+			header_up X-Fastmail-App-Password {$FASTMAIL_APP_PASSWORD}
+		}
+	}
+	respond 401
+}
+```
+
+```yaml
+# compose.yaml
+services:
+  fastmail:
+    image: ghcr.io/radiosilence/fastmail-cli:latest
+  caddy:
+    image: caddy:2
+    ports: ["80:80", "443:443"]
+    env_file: .env # GATEWAY_SECRET and the three FASTMAIL_ variables
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy-data:/data
+volumes:
+  caddy-data:
+```
+
+```bash
+claude mcp add --transport http fastmail https://mail.example.com/mcp \
+  --header "Authorization: Bearer $GATEWAY_SECRET"
+```
+
+The credentials live only in the proxy's environment, and `header_up`
+replaces any `X-Fastmail-*` header a client sends rather than passing it on.
+Leave them out of the `fastmail` container's environment: a server holding
+local credentials refuses requests whose `Host` is not its own, and Caddy
+forwards the client's `mail.example.com`.
+
+A shared secret suits clients that let you set a header, such as Claude Code.
+Claude's remote connectors (claude.ai, Desktop and mobile) authenticate with
+OAuth instead. [mcp-gateway](https://github.com/radiosilence/mcp-gateway)
+provides that: it signs users in over OAuth, stores each user's Fastmail
+credentials encrypted, and proxies to this image injecting them per request,
+so one deployment serves several people.
 
 ### HTTP transport
 
