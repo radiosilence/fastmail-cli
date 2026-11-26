@@ -512,7 +512,20 @@ Skills are in `.claude/skills/` in this repo. Each one includes concrete example
 ## MCP Server (Claude Integration)
 
 `fastmail mcp` serves the MCP over stdio by default, or over HTTP with
-`--http`. Choose by where the server runs and who uses it.
+`--http`. Which setup fits depends on where the client runs.
+
+**Local.** Claude Code and Claude Desktop can start the binary themselves on
+your machine and talk to it over stdio, using the credentials from
+`fastmail auth`. Nothing listens on a port and nothing needs authenticating
+beyond your own login. This is the simplest setup and covers most use.
+
+**Remote.** Claude on the web and on mobile, and connectors added in Claude
+Desktop's settings, are not running on your machine: Anthropic's servers make
+the MCP calls, so they can neither start a binary nor reach `localhost`. They
+need an HTTPS URL on the internet, and the only authentication they support is OAuth;
+there is no way to give them a fixed header. Exposing `fastmail mcp --http`
+directly would hand your mailbox to anyone who finds the URL, so a remote
+setup puts a gateway in front (see [Behind a gateway](#behind-a-gateway)).
 
 ### On your own machine (stdio)
 
@@ -633,12 +646,42 @@ Leave them out of the `fastmail` container's environment: a server holding
 local credentials refuses requests whose `Host` is not its own, and Caddy
 forwards the client's `mail.example.com`.
 
-A shared secret suits clients that let you set a header, such as Claude Code.
-Claude's remote connectors (claude.ai, Desktop and mobile) authenticate with
-OAuth instead. [mcp-gateway](https://github.com/radiosilence/mcp-gateway)
-provides that: it signs users in over OAuth, stores each user's Fastmail
-credentials encrypted, and proxies to this image injecting them per request,
-so one deployment serves several people.
+That proxy is enough for clients that let you set a header, such as Claude
+Code. It does not work for Claude's remote connectors, which expect OAuth.
+
+#### Remote connectors and OAuth
+
+A gateway separates two questions this server does not answer itself: who is
+calling, and which Fastmail account they may use. `fastmail-cli` only knows the
+second, from the `X-Fastmail-*` headers on each request, and trusts them
+completely. The gateway answers the first, then supplies the second, so the
+Fastmail credentials never leave the server side and the client only ever holds
+a token for the gateway.
+
+For a remote connector the client side follows the MCP authorization spec, which
+is standard OAuth 2.1:
+
+1. The connector calls the gateway's URL without a token and gets a 401 pointing
+   at the gateway's protected-resource metadata, which names its authorization
+   server.
+2. It registers itself there (dynamic client registration) and sends you to the
+   authorization server's login page, using PKCE.
+3. You sign in, with whatever identity provider the gateway uses, and approve the
+   connection. The connector receives an access token.
+4. Every MCP request then carries that token. The gateway validates it, looks up
+   the Fastmail credentials stored for that user, and forwards the request to
+   `fastmail mcp` with them as headers.
+
+Because credentials are looked up per user, one gateway and one `fastmail-cli`
+container can serve several people, and revoking a connector's token cuts it
+off without changing any Fastmail credential. A gateway can also front several
+MCP servers under one login, each with its own credentials.
+
+[mcp-gateway](https://github.com/radiosilence/mcp-gateway) implements this: an
+OAuth authorization server for sign-in, a dashboard where each user enters their
+Fastmail credentials (stored encrypted), and a proxy that injects them per
+request. Its README covers deployment. Any OAuth-capable gateway or proxy that
+can set request headers per user works the same way.
 
 ### HTTP transport
 
