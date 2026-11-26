@@ -4,63 +4,78 @@ CLI for Fastmail's JMAP API. Read, search, send, manage and *watch* email from y
 
 ## Features
 
-| Feature               | Description                                                            |
-| --------------------- | ---------------------------------------------------------------------- |
-| **Email**             | List, search, read, send, reply, forward, threads, identity selection, HTML bodies, file attachments |
-| **Mailboxes**         | List folders, move emails, mark spam/not spam/read                     |
-| **Mailing lists**     | Every sender with an unsubscribe header, grouped; one-click (RFC 8058) or mailto unsubscribe; bulk sweeps over a filter |
-| **Real-time**         | `fastmail watch` streams arriving mail as NDJSON over JMAP push — pipe it into a shell loop. Also a GraphQL subscription |
-| **Contacts**          | Search, create, update, delete contacts via CardDAV                    |
-| **Attachments**       | Download files, extract text, resize images                            |
-| **Text Extraction**   | 56 formats via [kreuzberg](https://github.com/kreuzberg-dev/kreuzberg) |
-| **Image Resizing**    | `--max-size` to resize images on download                              |
-| **Masked Email**      | Create, list, enable/disable aliases                                   |
-| **MCP Server**        | Claude integration via Model Context Protocol                          |
-| **Shell Completions** | Bash, Zsh, Fish, PowerShell                                            |
-| **JSON Output**       | All commands output JSON for scripting                                 |
+| Feature               | Description |
+| --------------------- | ----------- |
+| **Email**             | List, search, read, threads; send, reply, reply-all and forward with HTML bodies, attachments and a choice of identity |
+| **Drafts**            | Save any send, reply or forward as a draft, then edit, send or discard it (MCP) |
+| **Search**            | JMAP's whole filter tree: nested `and` / `or` / `not`, keywords, thread-wide keyword conditions, raw header matching, every sort comparator |
+| **Mailboxes**         | List folders, move emails, mark read/unread, spam and not spam (both train the filter) |
+| **Mailing lists**     | Every sender with an unsubscribe header, grouped; one-click (RFC 8058) or mailto unsubscribe |
+| **Bulk sweeps**       | Move, mark read or mark spam everything a filter matches, previewed with a count and sample first (MCP) |
+| **Real-time**         | `fastmail watch` streams arriving mail as NDJSON over JMAP push, with a polling fallback; also a GraphQL subscription over SSE |
+| **Contacts**          | Search, create, update, delete via CardDAV |
+| **Attachments**       | Download, upload, extract text from 56 formats via [kreuzberg](https://github.com/kreuzberg-dev/kreuzberg), resize images to a byte budget |
+| **Masked Email**      | List, create (with a prefix), enable, disable, delete |
+| **MCP Server**        | Two tools over one GraphQL schema: a whole question in one query, with nested fields batched into single JMAP calls |
+| **HTTP**              | Streamable-HTTP MCP, plain GraphQL and a GraphiQL IDE on one port; per-request credential headers for hosting it for several users |
+| **Container image**   | Multi-arch (amd64, arm64) on GHCR, running as non-root |
+| **Shell Completions** | Bash, Zsh, Fish, PowerShell |
+| **JSON Output**       | All commands output JSON for scripting |
 
 ## Compared to Fastmail's official MCP
 
 Fastmail [ships an official MCP server](https://www.fastmail.com/blog/an-mcp-server-for-fastmail/)
-(hosted at `api.fastmail.com/mcp`, OAuth with read/write/send scopes). It's
-zero-setup and covers more of Fastmail's suite — calendar, notes, and org
-directory that `fastmail-cli` doesn't touch. `fastmail-cli` is the self-hosted
-alternative: a CLI *and* an MCP server you run yourself, open source, with
-masked email, attachment text extraction, spam-filter training, and a real-time
-stream of incoming mail the official server doesn't offer — plus full custody of
-the data path.
+at `api.fastmail.com/mcp`, authorised by OAuth with read, write and send access
+levels. It needs no setup and covers more of Fastmail's suite: calendar
+(including answering invitations), notes, message memos and the organisation
+directory, none of which `fastmail-cli` touches. It also deletes mail, which
+`fastmail-cli` does not. `fastmail-cli` is a CLI and an MCP server you run
+yourself, open source, and goes further on mail: forwarding, attachment
+contents, masked email, spam training, unsubscribing, bulk sweeps, and a
+real-time stream of incoming mail.
 
-|                                                            | `fastmail-cli`                     | Fastmail official MCP            |
-| ---------------------------------------------------------- | ---------------------------------- | -------------------------------- |
-| Interface                                                  | CLI **and** MCP (stdio / HTTP)     | MCP only                         |
-| Setup                                                      | install + run the binary           | add URL + OAuth, nothing to run  |
-| Auth                                                       | API token (+ app password for CardDAV) | OAuth: `read` / `write` / `send` |
-| Hosting / data path                                        | your machine or your own server    | Fastmail-hosted                  |
-| Source                                                     | open source (MIT), extensible      | proprietary                      |
-| Email: read / search / threads                             | ✅ (rich search filters)           | ✅                               |
-| Send / reply / forward (preview → confirm/draft)           | ✅                                 | ✅                               |
-| Drafts: edit / send / discard                              | ✅ (MCP)                           | —                                |
-| Move / archive / mark read                                 | ✅                                 | ✅                               |
-| Real-time stream of incoming mail                          | ✅ (CLI + GraphQL subscription)    | —                                |
-| Mark as spam (+ trains the filter)                         | ✅                                 | —                                |
-| Mailing lists: find them, unsubscribe (one-click / mailto) | ✅                                 | —                                |
-| Bulk move / mark read / mark spam over a filter            | ✅ (MCP)                           | —                                |
-| Masked Email (create / enable / disable / delete)          | ✅                                 | —                                |
-| Attachments: text extraction (56 formats) + image resize   | ✅                                 | —                                |
-| Contacts (create / update / delete / search)               | ✅ (CardDAV)                       | ✅                               |
-| Org directory search                                       | —                                  | ✅                               |
-| Calendar                                                   | —                                  | ✅                               |
-| Notes                                                      | —                                  | ✅                               |
-| Identities / signatures                                    | ✅                                 | ✅                               |
+|                                                       | `fastmail-cli`                          | Fastmail official MCP                |
+| ----------------------------------------------------- | --------------------------------------- | ------------------------------------ |
+| Interface                                             | CLI **and** MCP (stdio / HTTP)          | MCP only                             |
+| Tools                                                 | 2: one GraphQL schema                   | 29 individual tools                  |
+| Setup                                                 | install the binary or run the image     | add the URL and authorise            |
+| Auth                                                  | API token (+ app password for CardDAV)  | OAuth, or an MCP API token           |
+| Hosting / data path                                   | your machine or your own server         | Fastmail-hosted                      |
+| Source                                                | open source (MIT)                       | proprietary                          |
+| Email: search / read / threads                        | ✅ (full JMAP filter tree)               | ✅                                    |
+| Several emails, bodies and attachments in one call    | ✅ (one GraphQL query)                   | —                                    |
+| Send / reply                                          | ✅ (preview → confirm)                   | ✅ (drafts; sending needs Send access) |
+| Forward                                               | ✅                                       | —                                    |
+| Drafts: create / edit / send / discard                | ✅ (MCP)                                 | create                               |
+| Move / archive / mark read                            | ✅                                       | ✅                                    |
+| Delete email                                          | —                                       | ✅                                    |
+| Message memos                                         | —                                       | ✅                                    |
+| Mark spam / not spam (trains the filter)              | ✅                                       | —                                    |
+| Mailing lists: find them, unsubscribe                 | ✅ (one-click or mailto)                 | —                                    |
+| Bulk move / mark read / mark spam over a filter       | ✅ (MCP)                                 | —                                    |
+| Real-time stream of incoming mail                     | ✅ (CLI + GraphQL subscription)          | —                                    |
+| Attachments: download, text from 56 formats, resize   | ✅                                       | —                                    |
+| Attachments: upload                                   | ✅                                       | ✅                                    |
+| Masked Email: create / enable / disable / delete      | ✅                                       | —                                    |
+| Identities                                            | ✅ (with signatures)                     | ✅                                    |
+| Contacts: search / create / update / delete           | ✅ (CardDAV)                             | ✅                                    |
+| Organisation directory search                         | —                                       | ✅                                    |
+| Calendar: search / create / update / delete / RSVP    | —                                       | ✅                                    |
+| Notes: search / read / create / update / delete       | —                                       | ✅                                    |
+| Connection check (token valid, capabilities)          | ✅ (`session`)                           | —                                    |
+| GraphiQL IDE                                          | ✅                                       | —                                    |
 
-Use Fastmail's for zero maintenance and the wider suite (calendar, notes);
-use `fastmail-cli` for a scriptable CLI, mail that streams as it arrives, the
-masked-email / attachment-extraction / spam-training tooling, or to self-host and
-keep the data path yours. Streaming is the one difference that isn't a matter of
-scope: MCP tools are request/response, so a hosted MCP server cannot hand you a
-subscription that never returns, whichever tools it grows.
-(`fastmail-cli`'s column is verified against its GraphQL schema; Fastmail's is
-its current hosted tool set and may grow.)
+Use Fastmail's for zero maintenance and the wider suite; use `fastmail-cli`
+for a scriptable CLI, the mail tooling above, or to keep the data path on a
+machine you control. Streaming is the one difference that is not a matter of
+scope: MCP tools are request/response, so a hosted MCP server cannot return a
+subscription that never ends, whatever tools it adds.
+
+`fastmail-cli`'s column is checked against its GraphQL schema. Fastmail
+publishes no tool list of its own; its column follows the 29 tools in its
+[Claude connector listing](https://claude.com/connectors/fastmail) and its
+[help article](https://www.fastmail.help/hc/en-us/articles/15869557281295) as
+of November 2026, and the set may grow.
 
 ## Quick Start
 
