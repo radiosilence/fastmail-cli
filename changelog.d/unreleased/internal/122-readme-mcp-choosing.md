@@ -1,0 +1,1 @@
+- **README explains choosing between a local and a remote MCP setup.** Why Claude's web, mobile and Desktop connectors need a public URL with OAuth, how an OAuth gateway sits in front of `fastmail mcp` and injects per-user credentials, and where mcp-gateway fits.
