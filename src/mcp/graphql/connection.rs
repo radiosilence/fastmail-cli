@@ -21,7 +21,7 @@ use serde_json::Value;
 
 use super::SharedClient;
 use super::filter::{EmailFilter, EmailSort, and_also, sort_to_jmap};
-use super::types::{GqlEmail, all_mailboxes, clamp_page, find_by_name_or_role};
+use super::types::{GqlEmail, all_mailboxes, clamp_page, find_by_name_or_role, resolve_mailbox};
 use crate::jmap::{EmailQuery, QueryStart};
 
 /// Connection-level fields beyond the Relay defaults.
@@ -243,15 +243,18 @@ pub(crate) async fn resolve_mailbox_names(
 
     let mut resolved = HashMap::new();
     for name in names {
-        match find_by_name_or_role(&mailboxes, &name) {
-            Some(m) => {
+        // Strict: of two folders sharing a name, picking one would read, or
+        // with sweepEmails change, the wrong folder's mail.
+        match resolve_mailbox(&mailboxes, &name) {
+            Ok(m) => {
                 resolved.insert(name, m.id.clone());
             }
-            None => {
+            Err(_) if find_by_name_or_role(&mailboxes, &name).is_none() => {
                 return Err(async_graphql::Error::new(format!(
                     "Unknown mailbox: {name}"
                 )));
             }
+            Err(ambiguous) => return Err(async_graphql::Error::new(ambiguous)),
         }
     }
     Ok(resolved)

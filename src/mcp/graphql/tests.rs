@@ -3595,3 +3595,39 @@ async fn sweep_accepts_the_same_move_named_twice() {
     .await;
     assert_eq!(data["sweepEmails"]["success"], true, "{data}");
 }
+
+#[tokio::test]
+async fn a_filter_naming_a_shared_folder_is_refused() {
+    let server = folder_server().await;
+    let resp = build_schema()
+        .execute(request(
+            "{ emails(filter: { inMailbox: \"2024\" }) { nodes { id } } }",
+            client_for(&server),
+            CardDavCreds::default(),
+        ))
+        .await;
+    assert!(
+        resp.errors
+            .iter()
+            .any(|e| e.message.contains("names 2 mailboxes")),
+        "{:?}",
+        resp.errors
+    );
+    // A path names one of them; the request then reaches Email/query, which
+    // this mock does not answer, so only the absence of the refusal counts.
+    let by_path = build_schema()
+        .execute(request(
+            "{ emails(filter: { inMailbox: \"Receipts/2024\" }) { nodes { id } } }",
+            client_for(&server),
+            CardDavCreds::default(),
+        ))
+        .await;
+    assert!(
+        !by_path
+            .errors
+            .iter()
+            .any(|e| e.message.contains("mailboxes")),
+        "{:?}",
+        by_path.errors
+    );
+}

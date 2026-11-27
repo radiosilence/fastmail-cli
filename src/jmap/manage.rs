@@ -599,6 +599,9 @@ impl JmapClient {
         for (blob_id, mut email) in resp.parsed {
             if let Some(obj) = email.as_object_mut() {
                 obj.insert("id".into(), json!(blob_id));
+                // Not in the mailbox, so not unread: no keyword field should
+                // suggest it needs attention.
+                obj.insert("keywords".into(), json!({ "$seen": true }));
                 obj.entry("blobId").or_insert_with(|| json!(blob_id));
             }
             let email: Email = serde_json::from_value(email).map_err(|e| Error::Jmap {

@@ -113,14 +113,24 @@ pub(crate) fn resolve_mailbox<'a>(
             [] => {}
             [one] => return Ok(one),
             many => {
+                let paths: Vec<String> = many.iter().map(|m| mailbox_path(mailboxes, m)).collect();
                 let listed: Vec<String> = many
                     .iter()
-                    .map(|m| format!("\"{}\" (id {})", mailbox_path(mailboxes, m), m.id))
+                    .zip(&paths)
+                    .map(|(m, p)| format!("\"{p}\" (id {})", m.id))
                     .collect();
+                // A name holding a `/` can share its path with a nested folder,
+                // and then only an id tells them apart.
+                let same_path = paths.windows(2).all(|w| w[0].eq_ignore_ascii_case(&w[1]));
                 return Err(format!(
-                    "\"{reference}\" names {} mailboxes: {}. Pass a path or an id.",
+                    "\"{reference}\" names {} mailboxes: {}. Pass {}.",
                     many.len(),
-                    listed.join(", ")
+                    listed.join(", "),
+                    if same_path {
+                        "an id"
+                    } else {
+                        "a path or an id"
+                    }
                 ));
             }
         }

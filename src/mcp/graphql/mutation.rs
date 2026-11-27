@@ -49,6 +49,14 @@ impl MailMutation {
         let bcc_addrs = bcc.as_deref().map(parse_addresses).unwrap_or_default();
         let nonce_store = ctx.data::<super::types::NonceStore>()?;
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
+        let send_at = match schedule(
+            client,
+            send_at.as_deref(),
+            matches!(action, SendAction::Draft),
+        ) {
+            Ok(v) => v,
+            Err(msg) => return Ok(failed(msg)),
+        };
         let attachments = match attachments::resolve(
             client,
             attachments.unwrap_or_default(),
@@ -60,14 +68,6 @@ impl MailMutation {
             Err(msg) => return Ok(failed(msg)),
         };
         let attachment_keys = attachments::fingerprint(&attachments);
-        let send_at = match schedule(
-            client,
-            send_at.as_deref(),
-            matches!(action, SendAction::Draft),
-        ) {
-            Ok(v) => v,
-            Err(msg) => return Ok(failed(msg)),
-        };
         let mut params = vec![
             to.as_str(),
             subject.as_str(),
@@ -179,6 +179,14 @@ impl MailMutation {
         let nonce_store = ctx.data::<super::types::NonceStore>()?;
         let reply_all = all.unwrap_or(false);
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
+        let send_at = match schedule(
+            client,
+            send_at.as_deref(),
+            matches!(action, SendAction::Draft),
+        ) {
+            Ok(v) => v,
+            Err(msg) => return Ok(failed(msg)),
+        };
         let attachments = match attachments::resolve(
             client,
             attachments.unwrap_or_default(),
@@ -190,14 +198,6 @@ impl MailMutation {
             Err(msg) => return Ok(failed(msg)),
         };
         let attachment_keys = attachments::fingerprint(&attachments);
-        let send_at = match schedule(
-            client,
-            send_at.as_deref(),
-            matches!(action, SendAction::Draft),
-        ) {
-            Ok(v) => v,
-            Err(msg) => return Ok(failed(msg)),
-        };
         let mut params = vec![
             email_id.as_str(),
             body.as_str(),
@@ -354,6 +354,14 @@ impl MailMutation {
         let body_str = body.as_deref().unwrap_or("");
         let nonce_store = ctx.data::<super::types::NonceStore>()?;
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
+        let send_at = match schedule(
+            client,
+            send_at.as_deref(),
+            matches!(action, SendAction::Draft),
+        ) {
+            Ok(v) => v,
+            Err(msg) => return Ok(failed(msg)),
+        };
         let attachments = match attachments::resolve(
             client,
             attachments.unwrap_or_default(),
@@ -365,14 +373,6 @@ impl MailMutation {
             Err(msg) => return Ok(failed(msg)),
         };
         let attachment_keys = attachments::fingerprint(&attachments);
-        let send_at = match schedule(
-            client,
-            send_at.as_deref(),
-            matches!(action, SendAction::Draft),
-        ) {
-            Ok(v) => v,
-            Err(msg) => return Ok(failed(msg)),
-        };
         let mut params = vec![
             email_id.as_str(),
             to.as_str(),
@@ -1292,10 +1292,14 @@ impl MailMutation {
             .filter(|m| m.parent_id.as_deref() == Some(target.id.as_str()))
             .map(|m| mailbox_path(&all, m))
             .collect();
+        // The count is in the token so mail filed there after the preview is
+        // never destroyed unseen: CONFIRM asks for a fresh preview instead.
+        let held = format!("{}:{}", target.total_emails, target.total_threads);
         let params = [
             "delete_mailbox",
             target.id.as_str(),
             if remove_emails { "remove" } else { "keep" },
+            held.as_str(),
         ];
 
         if action == ConfirmAction::Preview {
