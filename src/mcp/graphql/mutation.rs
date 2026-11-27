@@ -8,11 +8,17 @@ use crate::util::parse_addresses;
 use super::attachments::{self, AttachmentInput, GqlUploadedAttachment};
 use super::types::*;
 
-pub struct MutationRoot;
+/// Every mutation: composing and filing mail here, managing it in
+/// [`super::manage`].
+#[derive(async_graphql::MergedObject, Default)]
+pub struct MutationRoot(MailMutation, super::manage::ManageMutation);
+
+#[derive(Default)]
+pub struct MailMutation;
 
 #[Object]
 #[allow(clippy::too_many_arguments)]
-impl MutationRoot {
+impl MailMutation {
     /// Compose and send a new email. ALWAYS use action=PREVIEW first, show the user, then CONFIRM or DRAFT with the confirmation_token from the preview.
     async fn send_email(
         &self,
@@ -33,12 +39,24 @@ impl MutationRoot {
         >,
         #[graphql(desc = "Token from PREVIEW response — required for CONFIRM/DRAFT")]
         confirmation_token: Option<String>,
+        #[graphql(
+            desc = "Send later rather than now: RFC 3339 with an offset, e.g. 2026-11-28T09:00:00Z"
+        )]
+        send_at: Option<String>,
     ) -> Result<GqlComposeResult> {
         let to_addrs = parse_addresses(&to);
         let cc_addrs = cc.as_deref().map(parse_addresses).unwrap_or_default();
         let bcc_addrs = bcc.as_deref().map(parse_addresses).unwrap_or_default();
         let nonce_store = ctx.data::<super::types::NonceStore>()?;
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
+        let send_at = match schedule(
+            client,
+            send_at.as_deref(),
+            matches!(action, SendAction::Draft),
+        ) {
+            Ok(v) => v,
+            Err(msg) => return Ok(failed(msg)),
+        };
         let attachments = match attachments::resolve(
             client,
             attachments.unwrap_or_default(),
@@ -60,6 +78,7 @@ impl MutationRoot {
             html_body.as_deref().unwrap_or(""),
         ];
         params.extend(attachment_keys.iter().map(String::as_str));
+        params.push(send_at.as_deref().unwrap_or(""));
 
         if matches!(action, SendAction::Preview) {
             let nonce = super::types::issue_nonce(nonce_store, client.tenant_key(), &params).await;
@@ -73,7 +92,7 @@ impl MutationRoot {
             return Ok(GqlComposeResult {
                 success: true,
                 email_id: None,
-                preview: Some(preview),
+                preview: Some(scheduled_note(preview, send_at.as_deref())),
                 confirmation_token: Some(nonce),
                 error: None,
             });
@@ -110,6 +129,7 @@ impl MutationRoot {
                     draft,
                     html_body,
                     attachments: attachments.into_iter().map(|a| a.data).collect(),
+                    send_at,
                 },
             )
             .await
@@ -151,10 +171,22 @@ impl MutationRoot {
         >,
         #[graphql(desc = "Token from PREVIEW response — required for CONFIRM/DRAFT")]
         confirmation_token: Option<String>,
+        #[graphql(
+            desc = "Send later rather than now: RFC 3339 with an offset, e.g. 2026-11-28T09:00:00Z"
+        )]
+        send_at: Option<String>,
     ) -> Result<GqlComposeResult> {
         let nonce_store = ctx.data::<super::types::NonceStore>()?;
         let reply_all = all.unwrap_or(false);
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
+        let send_at = match schedule(
+            client,
+            send_at.as_deref(),
+            matches!(action, SendAction::Draft),
+        ) {
+            Ok(v) => v,
+            Err(msg) => return Ok(failed(msg)),
+        };
         let attachments = match attachments::resolve(
             client,
             attachments.unwrap_or_default(),
@@ -176,6 +208,7 @@ impl MutationRoot {
             html_body.as_deref().unwrap_or(""),
         ];
         params.extend(attachment_keys.iter().map(String::as_str));
+        params.push(send_at.as_deref().unwrap_or(""));
 
         let original = client.get_email(&email_id).await?;
         let extra_cc = cc.as_deref().map(parse_addresses).unwrap_or_default();
@@ -235,7 +268,7 @@ impl MutationRoot {
             return Ok(GqlComposeResult {
                 success: true,
                 email_id: None,
-                preview: Some(preview),
+                preview: Some(scheduled_note(preview, send_at.as_deref())),
                 confirmation_token: Some(nonce),
                 error: None,
             });
@@ -271,6 +304,7 @@ impl MutationRoot {
                     draft,
                     html_body,
                     attachments: attachments.into_iter().map(|a| a.data).collect(),
+                    send_at,
                 },
             )
             .await
@@ -312,10 +346,22 @@ impl MutationRoot {
         >,
         #[graphql(desc = "Token from PREVIEW response — required for CONFIRM/DRAFT")]
         confirmation_token: Option<String>,
+        #[graphql(
+            desc = "Send later rather than now: RFC 3339 with an offset, e.g. 2026-11-28T09:00:00Z"
+        )]
+        send_at: Option<String>,
     ) -> Result<GqlComposeResult> {
         let body_str = body.as_deref().unwrap_or("");
         let nonce_store = ctx.data::<super::types::NonceStore>()?;
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
+        let send_at = match schedule(
+            client,
+            send_at.as_deref(),
+            matches!(action, SendAction::Draft),
+        ) {
+            Ok(v) => v,
+            Err(msg) => return Ok(failed(msg)),
+        };
         let attachments = match attachments::resolve(
             client,
             attachments.unwrap_or_default(),
@@ -337,6 +383,7 @@ impl MutationRoot {
             html_body.as_deref().unwrap_or(""),
         ];
         params.extend(attachment_keys.iter().map(String::as_str));
+        params.push(send_at.as_deref().unwrap_or(""));
 
         let original = client.get_email(&email_id).await?;
         let to_addrs = parse_addresses(&to);
@@ -386,7 +433,7 @@ impl MutationRoot {
             return Ok(GqlComposeResult {
                 success: true,
                 email_id: None,
-                preview: Some(preview),
+                preview: Some(scheduled_note(preview, send_at.as_deref())),
                 confirmation_token: Some(nonce),
                 error: None,
             });
@@ -422,6 +469,7 @@ impl MutationRoot {
                     draft,
                     html_body,
                     attachments: attachments.into_iter().map(|a| a.data).collect(),
+                    send_at,
                 },
             )
             .await
@@ -535,12 +583,24 @@ impl MutationRoot {
         #[graphql(desc = "The draft's email ID")] email_id: String,
         #[graphql(desc = "Token from PREVIEW response — required for CONFIRM")]
         confirmation_token: Option<String>,
+        #[graphql(
+            desc = "Send later rather than now: RFC 3339 with an offset, e.g. 2026-11-28T09:00:00Z"
+        )]
+        send_at: Option<String>,
     ) -> Result<GqlComposeResult> {
         let nonce_store = ctx.data::<super::types::NonceStore>()?;
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
+        let send_at = match schedule(client, send_at.as_deref(), false) {
+            Ok(v) => v,
+            Err(msg) => return Ok(failed(msg)),
+        };
         // An email's content can't change under its ID, so the ID alone pins
         // exactly what was previewed.
-        let params = ["send_draft", email_id.as_str()];
-        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
+        let params = [
+            "send_draft",
+            email_id.as_str(),
+            send_at.as_deref().unwrap_or(""),
+        ];
         let draft = client.get_email(&email_id).await?;
 
         let failure = |msg: String| GqlComposeResult {
@@ -584,7 +644,7 @@ impl MutationRoot {
             return Ok(GqlComposeResult {
                 success: true,
                 email_id: None,
-                preview: Some(preview),
+                preview: Some(scheduled_note(preview, send_at.as_deref())),
                 confirmation_token: Some(nonce),
                 error: None,
             });
@@ -601,7 +661,7 @@ impl MutationRoot {
             return Ok(failure(msg.to_string()));
         }
 
-        Ok(match client.send_draft(&draft).await {
+        Ok(match client.send_draft(&draft, send_at.as_deref()).await {
             Ok(()) => GqlComposeResult {
                 success: true,
                 email_id: Some(email_id),
@@ -916,6 +976,8 @@ impl MutationRoot {
         #[graphql(desc = "Move to Junk and mark $junk, training the filter")] mark_spam: Option<
             bool,
         >,
+        #[graphql(desc = "More changes: flag, keywords, add to or remove from folders")]
+        changes: Option<super::manage::EmailChanges>,
         #[graphql(desc = "Most emails to change, newest first (default 1000, max 10000)")]
         limit: Option<i32>,
         #[graphql(desc = "Token from PREVIEW — required for CONFIRM")] confirmation_token: Option<
@@ -974,9 +1036,33 @@ impl MutationRoot {
             );
             doing.push(if read { "marked read" } else { "marked unread" }.to_string());
         }
+        if let Some(changes) = &changes {
+            let (more, more_doing) = match super::manage::build_patch(ctx, changes).await? {
+                Ok(p) => p,
+                Err(e) => return Ok(fail(e)),
+            };
+            for (key, value) in more {
+                // The same key must agree; a whole `mailboxIds` and a
+                // `mailboxIds/<id>` patch cannot go in one update.
+                let clash = match patch.get(&key) {
+                    Some(v) => *v != value,
+                    None if key == "mailboxIds" => {
+                        patch.keys().any(|k| k.starts_with("mailboxIds/"))
+                    }
+                    None => key.starts_with("mailboxIds/") && patch.contains_key("mailboxIds"),
+                };
+                if clash {
+                    return Ok(fail(format!(
+                        "changes conflict with moveTo, markRead or markSpam over {key}"
+                    )));
+                }
+                patch.insert(key, value);
+            }
+            doing.extend(more_doing);
+        }
         if patch.is_empty() {
             return Ok(fail(
-                "Nothing to do: set moveTo, markRead or markSpam.".into(),
+                "Nothing to do: set moveTo, markRead, markSpam or changes.".into(),
             ));
         }
         let patch = serde_json::Value::Object(patch);
@@ -1055,6 +1141,244 @@ impl MutationRoot {
                 .first()
                 .map(|(id, why)| format!("{} refused, e.g. {id}: {why}", outcome.failed.len())),
         })
+    }
+
+    /// Create a mailbox (folder), at the top level or under `parent`.
+    async fn create_mailbox(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The new folder's name, without its parent's")] name: String,
+        #[graphql(desc = "The parent, by id, path, name or role; omit for the top level")]
+        parent: Option<String>,
+        #[graphql(desc = "Position among its siblings; lower sorts first")] sort_order: Option<u32>,
+        #[graphql(desc = "Show it in IMAP clients (default true)")] is_subscribed: Option<bool>,
+    ) -> Result<GqlMailboxResult> {
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
+        let parent = match parent {
+            Some(p) => match mailbox_ref(ctx, &p).await? {
+                Ok(m) => Some(m),
+                Err(e) => return Ok(GqlMailboxResult::failed(e)),
+            },
+            None => None,
+        };
+        let created = client
+            .create_mailbox(
+                &name,
+                parent.as_ref().map(|m| m.id.as_str()),
+                sort_order,
+                is_subscribed,
+            )
+            .await;
+        Ok(match created {
+            Ok(id) => {
+                let mailbox = reload_mailbox(ctx, &id).await?;
+                GqlMailboxResult {
+                    success: true,
+                    message: Some(match &parent {
+                        Some(p) => format!("Created \"{name}\" in {}", p.name),
+                        None => format!("Created \"{name}\""),
+                    }),
+                    mailbox,
+                    confirmation_token: None,
+                    error: None,
+                }
+            }
+            Err(e) => GqlMailboxResult::failed(e.to_string()),
+        })
+    }
+
+    /// Rename a mailbox, move it under another (or to the top level), reorder
+    /// it or (un)subscribe it. Only the arguments given change. Its mail moves
+    /// with it. System folders (Inbox) cannot be renamed: see `myRights`.
+    async fn update_mailbox(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Which mailbox, by id, path, name or role")] mailbox: String,
+        #[graphql(desc = "New name")] name: Option<String>,
+        #[graphql(desc = "The new parent, by id, path, name or role")] parent: Option<String>,
+        #[graphql(desc = "Move it to the top level; not with parent")] to_top_level: Option<bool>,
+        #[graphql(desc = "Position among its siblings; lower sorts first")] sort_order: Option<u32>,
+        #[graphql(desc = "Show it in IMAP clients")] is_subscribed: Option<bool>,
+    ) -> Result<GqlMailboxResult> {
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
+        let target = match mailbox_ref(ctx, &mailbox).await? {
+            Ok(m) => m,
+            Err(e) => return Ok(GqlMailboxResult::failed(e)),
+        };
+        let to_top_level = to_top_level.unwrap_or(false);
+        if to_top_level && parent.is_some() {
+            return Ok(GqlMailboxResult::failed(
+                "Pass parent or toTopLevel, not both.",
+            ));
+        }
+        let parent_id = if to_top_level {
+            Some(None)
+        } else if let Some(p) = &parent {
+            match mailbox_ref(ctx, p).await? {
+                Ok(m) if m.id == target.id => {
+                    return Ok(GqlMailboxResult::failed(
+                        "A mailbox cannot be its own parent.",
+                    ));
+                }
+                Ok(m) => Some(Some(m.id)),
+                Err(e) => return Ok(GqlMailboxResult::failed(e)),
+            }
+        } else {
+            None
+        };
+        let patch = crate::jmap::MailboxPatch {
+            name,
+            parent_id,
+            sort_order,
+            is_subscribed,
+        };
+        if patch.is_empty() {
+            return Ok(GqlMailboxResult::failed(
+                "Nothing to change: pass name, parent, toTopLevel, sortOrder or isSubscribed.",
+            ));
+        }
+        Ok(match client.update_mailbox(&target.id, &patch).await {
+            Ok(()) => {
+                let mailbox = reload_mailbox(ctx, &target.id).await?;
+                let all = all_mailboxes(ctx).await?;
+                let now = mailbox.as_ref().map(|m| mailbox_path(&all, &m.0));
+                GqlMailboxResult {
+                    success: true,
+                    message: Some(format!(
+                        "Updated \"{}\", now \"{}\"",
+                        target.name,
+                        now.as_deref().unwrap_or(&target.name)
+                    )),
+                    mailbox,
+                    confirmation_token: None,
+                    error: None,
+                }
+            }
+            Err(e) => GqlMailboxResult::failed(e.to_string()),
+        })
+    }
+
+    /// Delete a mailbox. ALWAYS PREVIEW first (it reports what the folder
+    /// holds), show the user, then CONFIRM with the token and the same
+    /// arguments. A folder with subfolders is refused: delete or move those
+    /// first. One still holding mail is refused unless `removeEmails` is true,
+    /// which takes its mail with it: mail in no other folder is destroyed for
+    /// good, NOT moved to Trash. To keep the mail, move it out first
+    /// (`sweepEmails` with `inMailbox` and `moveTo`).
+    async fn delete_mailbox(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Which mailbox, by id, path, name or role")] mailbox: String,
+        #[graphql(desc = "PREVIEW first, then CONFIRM")] action: super::lists::ConfirmAction,
+        #[graphql(desc = "Also remove its mail, destroying what is in no other folder")]
+        remove_emails: Option<bool>,
+        #[graphql(desc = "Token from PREVIEW — required for CONFIRM")] confirmation_token: Option<
+            String,
+        >,
+    ) -> Result<GqlMailboxResult> {
+        use super::lists::ConfirmAction;
+
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
+        let nonce_store = ctx.data::<super::types::NonceStore>()?;
+        let all = all_mailboxes(ctx).await?;
+        let target = match resolve_mailbox(&all, &mailbox) {
+            Ok(m) => m.clone(),
+            Err(e) => return Ok(GqlMailboxResult::failed(e)),
+        };
+        let remove_emails = remove_emails.unwrap_or(false);
+        let path = mailbox_path(&all, &target);
+        let children: Vec<String> = all
+            .iter()
+            .filter(|m| m.parent_id.as_deref() == Some(target.id.as_str()))
+            .map(|m| mailbox_path(&all, m))
+            .collect();
+        // The count is in the token so mail filed there after the preview is
+        // never destroyed unseen: CONFIRM asks for a fresh preview instead.
+        let held = format!("{}:{}", target.total_emails, target.total_threads);
+        let params = [
+            "delete_mailbox",
+            target.id.as_str(),
+            if remove_emails { "remove" } else { "keep" },
+            held.as_str(),
+        ];
+
+        if action == ConfirmAction::Preview {
+            let mut text = format!(
+                "DELETE MAILBOX PREVIEW\nMailbox: \"{path}\" (id {})\nHolds: {} emails in {} threads\n",
+                target.id, target.total_emails, target.total_threads
+            );
+            let blocked = if !children.is_empty() {
+                text.push_str(&format!(
+                    "\nIt has subfolders, so the server will refuse: {}. Delete or move them first.\n",
+                    children.join(", ")
+                ));
+                true
+            } else if !target.my_rights.may_delete {
+                text.push_str("\nYou may not delete this mailbox (myRights.mayDelete is false).\n");
+                true
+            } else if target.total_emails > 0 && !remove_emails {
+                text.push_str(
+                    "\nIt still holds mail, so the server will refuse. Move the mail out first \
+                     (sweepEmails), or pass removeEmails: true to remove it with the folder: \
+                     mail in no other folder is then destroyed for good, not moved to Trash.\n",
+                );
+                true
+            } else {
+                if target.total_emails > 0 {
+                    text.push_str(&format!(
+                        "\nWill remove its {} emails with it. Those in no other folder are \
+                         DESTROYED PERMANENTLY, not moved to Trash.\n",
+                        target.total_emails
+                    ));
+                }
+                false
+            };
+            if blocked {
+                return Ok(GqlMailboxResult {
+                    success: false,
+                    mailbox: Some(GqlMailbox::from(target)),
+                    message: Some(text),
+                    confirmation_token: None,
+                    error: Some("This delete would be refused; see message.".into()),
+                });
+            }
+            text.push_str("\nUse action=CONFIRM with the token and the same arguments to proceed.");
+            let token = super::types::issue_nonce(nonce_store, client.tenant_key(), &params).await;
+            return Ok(GqlMailboxResult {
+                success: true,
+                mailbox: Some(GqlMailbox::from(target)),
+                message: Some(text),
+                confirmation_token: Some(token),
+                error: None,
+            });
+        }
+
+        if let Err(msg) = super::types::consume_nonce(
+            nonce_store,
+            client.tenant_key(),
+            confirmation_token.as_deref(),
+            &params,
+        )
+        .await
+        {
+            return Ok(GqlMailboxResult::failed(msg));
+        }
+
+        Ok(
+            match client.destroy_mailbox(&target.id, remove_emails).await {
+                Ok(()) => {
+                    forget_mailboxes(ctx)?;
+                    GqlMailboxResult {
+                        success: true,
+                        mailbox: None,
+                        message: Some(format!("Deleted \"{path}\"")),
+                        confirmation_token: None,
+                        error: None,
+                    }
+                }
+                Err(e) => GqlMailboxResult::failed(e.to_string()),
+            },
+        )
     }
 
     /// Create a new masked email address.
@@ -1313,6 +1637,36 @@ fn format_send_preview(
     )
 }
 
+/// A requested send time, checked against what the server allows and given
+/// back in UTC.
+fn schedule(
+    client: &crate::jmap::JmapClient,
+    send_at: Option<&str>,
+    draft: bool,
+) -> std::result::Result<Option<String>, String> {
+    match send_at {
+        None => Ok(None),
+        Some(_) if draft => Err(
+            "sendAt schedules a send; it does not apply to DRAFT. Save the draft, then sendDraft with sendAt."
+                .into(),
+        ),
+        Some(at) => client
+            .validate_send_at(at)
+            .map(Some)
+            .map_err(|e| e.to_string()),
+    }
+}
+
+/// A preview, saying when it will go if it is scheduled.
+fn scheduled_note(mut preview: String, send_at: Option<&str>) -> String {
+    if let Some(at) = send_at {
+        preview.push_str(&format!(
+            "\n\nSCHEDULED: held by the server until {at} (UTC). Cancel before then with cancelScheduledEmail."
+        ));
+    }
+    preview
+}
+
 fn failed(msg: String) -> GqlComposeResult {
     GqlComposeResult {
         success: false,
@@ -1323,12 +1677,39 @@ fn failed(msg: String) -> GqlComposeResult {
     }
 }
 
-/// A mailbox by name or role, through the request's mailbox loader: one
-/// `Mailbox/get` however many mutations in the document need one, and never a
-/// list older than the request.
+/// A mailbox by id, path, name or role, through the request's mailbox loader:
+/// one `Mailbox/get` however many mutations in the document need one, and
+/// never a list older than the request. A name two folders share is an error
+/// rather than a guess, since this picks where mail goes.
 async fn mailbox_named(ctx: &Context<'_>, name: &str) -> Result<crate::models::Mailbox> {
+    mailbox_ref(ctx, name).await?.map_err(Into::into)
+}
+
+/// As [`mailbox_named`], with a reference that names nothing (or two things)
+/// kept apart from a failure to load the list, so a mailbox mutation can
+/// report it in its result.
+async fn mailbox_ref(
+    ctx: &Context<'_>,
+    reference: &str,
+) -> Result<std::result::Result<crate::models::Mailbox, String>> {
     let mailboxes = all_mailboxes(ctx).await?;
-    find_by_name_or_role(&mailboxes, name)
+    Ok(resolve_mailbox(&mailboxes, reference).cloned())
+}
+
+/// Drop the request's cached mailbox list after changing the folder tree, so
+/// the result, and later mutations in the same document, see the change.
+pub(crate) fn forget_mailboxes(ctx: &Context<'_>) -> Result<()> {
+    ctx.data::<super::loaders::Mailboxes>()?.clear::<()>();
+    Ok(())
+}
+
+/// A mailbox as the server now has it, after a change.
+async fn reload_mailbox(ctx: &Context<'_>, id: &str) -> Result<Option<GqlMailbox>> {
+    forget_mailboxes(ctx)?;
+    Ok(all_mailboxes(ctx)
+        .await?
+        .iter()
+        .find(|m| m.id == id)
         .cloned()
-        .ok_or_else(|| crate::error::Error::MailboxNotFound(name.into()).into())
+        .map(GqlMailbox::from))
 }

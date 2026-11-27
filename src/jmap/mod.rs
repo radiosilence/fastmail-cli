@@ -1,5 +1,7 @@
 mod events;
 pub mod lists;
+mod mailboxes;
+mod manage;
 mod watch;
 
 use crate::commands::SearchFilter;
@@ -14,6 +16,8 @@ use std::time::Duration;
 use tracing::{debug, instrument};
 
 pub use events::{EventParser, ServerEvent};
+pub use mailboxes::MailboxPatch;
+pub use manage::{IdentityFields, Snippet, Submission, format_utc, parse_rfc3339};
 pub use watch::{ArrivalWatcher, Arrivals, SharedJmapClient};
 
 const SESSION_URL: &str = "https://api.fastmail.com/jmap/session";
@@ -150,6 +154,8 @@ pub struct ComposeParams<'a> {
     pub draft: bool,
     pub html_body: Option<String>,
     pub attachments: Vec<AttachmentData>,
+    /// Hold the message until then (UTC, from [`JmapClient::validate_send_at`]).
+    pub send_at: Option<String>,
 }
 
 /// Changes to apply to a draft. `None` keeps the draft's current value; an
@@ -271,6 +277,23 @@ struct ComposeContext {
     mailbox: Mailbox,
     identity: Option<Identity>,
     draft: bool,
+    send_at: Option<String>,
+}
+
+/// An SMTP envelope holding the message until `send_at` (RFC 4865
+/// FUTURERELEASE). Setting an envelope means naming every recipient, BCC
+/// included, which the server would otherwise take from the headers.
+fn held_envelope(from: &str, recipients: &[&EmailAddress], send_at: &str) -> Value {
+    let mut seen = std::collections::HashSet::new();
+    let rcpt: Vec<Value> = recipients
+        .iter()
+        .filter(|a| seen.insert(a.email.to_lowercase()))
+        .map(|a| json!({ "email": a.email }))
+        .collect();
+    json!({
+        "mailFrom": { "email": from, "parameters": { "HOLDUNTIL": send_at } },
+        "rcptTo": rcpt
+    })
 }
 
 impl ComposeContext {
@@ -290,7 +313,11 @@ impl ComposeContext {
         }
     }
 
-    fn build_method_calls(&self, email_create: HashMap<String, Value>) -> Vec<Value> {
+    fn build_method_calls(
+        &self,
+        email_create: HashMap<String, Value>,
+        envelope: Option<Value>,
+    ) -> Vec<Value> {
         let mut calls = vec![json!([
             "Email/set",
             {
@@ -320,6 +347,9 @@ impl ComposeContext {
                 },
                 "s0"
             ]));
+            if let Some(envelope) = envelope {
+                calls[1][1]["create"]["submission"]["envelope"] = envelope;
+            }
         }
         calls
     }
@@ -716,6 +746,15 @@ impl JmapClient {
             state: None,
         });
         client
+    }
+
+    /// Give a test session's capability a value, such as the submission
+    /// limits scheduled sending reads.
+    #[cfg(test)]
+    pub fn set_test_capability(&self, capability: &str, value: Value) {
+        let mut session = (*self.session().expect("test session")).clone();
+        session.capabilities.insert(capability.to_string(), value);
+        self.set_session(session);
     }
 
     /// Install a handshake's result, replacing any earlier one.
@@ -1346,7 +1385,8 @@ impl JmapClient {
         self.resolve_identity(from).await.ok().map(|i| i.email)
     }
 
-    async fn prepare_compose(&self, from: Option<&str>, draft: bool) -> Result<ComposeContext> {
+    async fn prepare_compose(&self, params: &ComposeParams<'_>) -> Result<ComposeContext> {
+        let (from, draft) = (params.from, params.draft);
         if !draft {
             self.require_capability("urn:ietf:params:jmap:submission", "Email sending")?;
         }
@@ -1366,6 +1406,7 @@ impl JmapClient {
             mailbox,
             identity,
             draft,
+            send_at: params.send_at.clone(),
         })
     }
 
@@ -1474,7 +1515,17 @@ impl JmapClient {
             }
         }
 
-        let responses = self.request(ctx.build_method_calls(email_create)).await?;
+        let envelope = match (&ctx.send_at, &ctx.identity) {
+            (Some(at), Some(identity)) if !ctx.draft => {
+                let all: Vec<&EmailAddress> =
+                    draft.to.iter().chain(draft.cc).chain(draft.bcc).collect();
+                Some(held_envelope(&identity.email, &all, at))
+            }
+            _ => None,
+        };
+        let responses = self
+            .request(ctx.build_method_calls(email_create, envelope))
+            .await?;
         let email_id = Self::parse_email_create_response(&responses)?;
 
         debug!(email_id = %email_id, draft = ctx.draft, "Email created successfully");
@@ -1490,7 +1541,7 @@ impl JmapClient {
         in_reply_to: Option<&str>,
         params: ComposeParams<'_>,
     ) -> Result<String> {
-        let ctx = self.prepare_compose(params.from, params.draft).await?;
+        let ctx = self.prepare_compose(&params).await?;
         self.create_and_submit_email(
             &ctx,
             EmailDraft {
@@ -1727,7 +1778,7 @@ impl JmapClient {
         to: Vec<EmailAddress>,
         params: ComposeParams<'_>,
     ) -> Result<String> {
-        let ctx = self.prepare_compose(params.from, params.draft).await?;
+        let ctx = self.prepare_compose(&params).await?;
         let to_addrs = to;
         let cc_addrs = params.cc;
 
@@ -1783,7 +1834,7 @@ impl JmapClient {
         body: &str,
         params: ComposeParams<'_>,
     ) -> Result<String> {
-        let ctx = self.prepare_compose(params.from, params.draft).await?;
+        let ctx = self.prepare_compose(&params).await?;
 
         // Build subject with Fwd: prefix if not already present
         let subject = if original
@@ -2082,7 +2133,7 @@ impl JmapClient {
     /// Submit an existing draft. On success the server moves it to Sent and
     /// drops `$draft`, which is what the web client does.
     #[instrument(skip(self, draft))]
-    pub async fn send_draft(&self, draft: &Email) -> Result<()> {
+    pub async fn send_draft(&self, draft: &Email, send_at: Option<&str>) -> Result<()> {
         self.require_capability("urn:ietf:params:jmap:submission", "Email sending")?;
         if !draft.is_draft() {
             return Err(Error::NotADraft(draft.id.clone()));
@@ -2097,14 +2148,21 @@ impl JmapClient {
         let sent = self.find_mailbox("sent").await?;
         let account_id = self.account_id()?;
 
+        let mut submission = json!({ "identityId": identity.id, "emailId": draft.id });
+        if let Some(at) = send_at {
+            let all: Vec<&EmailAddress> = [&draft.to, &draft.cc, &draft.bcc]
+                .into_iter()
+                .flatten()
+                .flatten()
+                .collect();
+            submission["envelope"] = held_envelope(&identity.email, &all, at);
+        }
         let responses = self
             .request(vec![json!([
                 "EmailSubmission/set",
                 {
                     "accountId": account_id,
-                    "create": {
-                        "submission": { "identityId": identity.id, "emailId": draft.id }
-                    },
+                    "create": { "submission": submission },
                     "onSuccessUpdateEmail": {
                         "#submission": {
                             "mailboxIds": { (sent.id): true },

@@ -17,7 +17,7 @@ use super::connection::{
     thread_connection,
 };
 use super::filter::{EmailFilter, EmailSort};
-use super::loaders::{Blobs, Emails, Mailboxes, Threads, to_gql_error};
+use super::loaders::{Blobs, Emails, Mailboxes, ParsedEmails, Snippets, Threads, to_gql_error};
 use crate::carddav::{Contact, ContactEmail, ContactPhone};
 use crate::models::{
     Email, EmailAddress, EmailHeader, Identity, Mailbox, MailboxRights, MaskedEmail, Session,
@@ -47,6 +47,8 @@ pub(crate) async fn all_mailboxes(ctx: &Context<'_>) -> Result<std::sync::Arc<Ve
 
 /// Find a mailbox by name, falling back to matching its role. Case-insensitive
 /// both ways, so `"INBOX"`, `"Inbox"` and `"inbox"` all land on the same folder.
+/// An ID or a full path (`"Parent/Child"`) is matched first, so a folder whose
+/// name is shared with another can still be reached.
 pub(crate) fn find_by_name_or_role<'a>(
     mailboxes: &'a [Mailbox],
     name: &str,
@@ -54,12 +56,89 @@ pub(crate) fn find_by_name_or_role<'a>(
     let wanted = name.to_lowercase();
     mailboxes
         .iter()
-        .find(|m| m.name.to_lowercase() == wanted)
+        .find(|m| m.id == name)
+        .or_else(|| {
+            mailboxes
+                .iter()
+                .find(|m| mailbox_path(mailboxes, m).to_lowercase() == wanted)
+        })
+        .or_else(|| mailboxes.iter().find(|m| m.name.to_lowercase() == wanted))
         .or_else(|| {
             mailboxes
                 .iter()
                 .find(|m| m.role.as_deref().map(str::to_lowercase).as_deref() == Some(&wanted))
         })
+}
+
+/// A mailbox's names from the top of the tree down, joined by `/`.
+pub(crate) fn mailbox_path(mailboxes: &[Mailbox], mailbox: &Mailbox) -> String {
+    let mut names = vec![mailbox.name.as_str()];
+    let mut parent = mailbox.parent_id.as_deref();
+    // Bounded, so a cycle in a malformed tree cannot hang the request.
+    while let Some(id) = parent
+        && names.len() <= mailboxes.len()
+    {
+        let Some(p) = mailboxes.iter().find(|m| m.id == id) else {
+            break;
+        };
+        names.push(&p.name);
+        parent = p.parent_id.as_deref();
+    }
+    names.reverse();
+    names.join("/")
+}
+
+/// The one mailbox a reference names, for writes, where landing on the wrong
+/// one of two same-named folders is worse than asking. Tries, in order: an ID,
+/// a full path (`"Parent/Child"`), a name, a role; all case-insensitive except
+/// the ID. A name two folders share is refused with both paths and IDs.
+pub(crate) fn resolve_mailbox<'a>(
+    mailboxes: &'a [Mailbox],
+    reference: &str,
+) -> std::result::Result<&'a Mailbox, String> {
+    if let Some(m) = mailboxes.iter().find(|m| m.id == reference) {
+        return Ok(m);
+    }
+    let wanted = reference.to_lowercase();
+    let by_path: Vec<&Mailbox> = mailboxes
+        .iter()
+        .filter(|m| mailbox_path(mailboxes, m).to_lowercase() == wanted)
+        .collect();
+    let by_name: Vec<&Mailbox> = mailboxes
+        .iter()
+        .filter(|m| m.name.to_lowercase() == wanted)
+        .collect();
+    for candidates in [by_path, by_name] {
+        match candidates.as_slice() {
+            [] => {}
+            [one] => return Ok(one),
+            many => {
+                let paths: Vec<String> = many.iter().map(|m| mailbox_path(mailboxes, m)).collect();
+                let listed: Vec<String> = many
+                    .iter()
+                    .zip(&paths)
+                    .map(|(m, p)| format!("\"{p}\" (id {})", m.id))
+                    .collect();
+                // A name holding a `/` can share its path with a nested folder,
+                // and then only an id tells them apart.
+                let same_path = paths.windows(2).all(|w| w[0].eq_ignore_ascii_case(&w[1]));
+                return Err(format!(
+                    "\"{reference}\" names {} mailboxes: {}. Pass {}.",
+                    many.len(),
+                    listed.join(", "),
+                    if same_path {
+                        "an id"
+                    } else {
+                        "a path or an id"
+                    }
+                ));
+            }
+        }
+    }
+    mailboxes
+        .iter()
+        .find(|m| m.role.as_deref().map(str::to_lowercase).as_deref() == Some(&wanted))
+        .ok_or_else(|| crate::error::Error::MailboxNotFound(reference.into()).to_string())
 }
 
 /// What the account may do in a mailbox. Check these before a move or a flag
@@ -141,6 +220,13 @@ impl GqlMailbox {
     /// Permissions the account holds on this mailbox.
     async fn my_rights(&self) -> GqlMailboxRights {
         GqlMailboxRights::from(&self.0.my_rights)
+    }
+
+    /// The names from the top of the folder tree down to this one, joined
+    /// by `/`, e.g. `"Archive/2024"`. Accepted wherever a mailbox is named,
+    /// and the way to tell apart two folders with the same name.
+    async fn path(&self, ctx: &Context<'_>) -> Result<String> {
+        Ok(mailbox_path(&all_mailboxes(ctx).await?, &self.0))
     }
 
     /// The mailbox this one is nested under, if any.
@@ -297,6 +383,8 @@ pub struct GqlEmail {
     /// Whether `inner` came from a full fetch (bodies + attachment metadata),
     /// as opposed to a list/search result carrying headers only.
     complete: bool,
+    /// The JMAP filter of the search that found it, as JSON, for `snippet`.
+    search: Option<Arc<str>>,
 }
 
 impl GqlEmail {
@@ -311,6 +399,7 @@ impl GqlEmail {
         Self {
             inner: email.into(),
             complete: true,
+            search: None,
         }
     }
 
@@ -319,7 +408,14 @@ impl GqlEmail {
         Self {
             inner: Arc::new(email),
             complete: false,
+            search: None,
         }
+    }
+
+    /// Remember the search that found this email, so `snippet` can say why.
+    pub fn found_by(mut self, filter: Option<Arc<str>>) -> Self {
+        self.search = filter;
+        self
     }
 
     /// The full record: borrowed when we already have it, otherwise batch-loaded.
@@ -512,6 +608,25 @@ impl GqlEmail {
         self.inner.keywords.keys().cloned().collect()
     }
 
+    /// Why this email matched the search that found it: its subject and a
+    /// body excerpt with the matching terms in `<mark>` tags. Null outside a
+    /// filtered `emails` result; a part with no match is null too. One
+    /// `SearchSnippet/get` per page of results.
+    async fn snippet(&self, ctx: &Context<'_>) -> Result<Option<GqlSearchSnippet>> {
+        let Some(filter) = &self.search else {
+            return Ok(None);
+        };
+        let snippet = ctx
+            .data::<Snippets>()?
+            .load_one((filter.to_string(), self.inner.id.clone()))
+            .await
+            .map_err(to_gql_error)?;
+        Ok(snippet.map(|s| GqlSearchSnippet {
+            subject: s.subject.clone(),
+            preview: s.preview.clone(),
+        }))
+    }
+
     /// The conversation this email belongs to, with every message in it.
     #[graphql(complexity = "10 * child_complexity")]
     async fn thread(&self, ctx: &Context<'_>) -> Result<Option<GqlThread>> {
@@ -623,6 +738,28 @@ impl GqlAttachment {
         )))
     }
 
+    /// An attached email (`message/rfc822`, or a `.eml` file), parsed so its
+    /// headers, bodies and own attachments read like any other email. Null
+    /// for any other attachment. Not in a mailbox, so it has no thread or
+    /// mailboxes, and its `id` is its blob ID; `importEmail` files it.
+    async fn message(&self, ctx: &Context<'_>) -> Result<Option<GqlEmail>> {
+        let is_message = self.content_type.as_deref().is_some_and(|t| {
+            t.eq_ignore_ascii_case("message/rfc822") || t.eq_ignore_ascii_case("message/global")
+        }) || self
+            .name
+            .as_deref()
+            .is_some_and(|n| n.to_lowercase().ends_with(".eml"));
+        if !is_message {
+            return Ok(None);
+        }
+        Ok(ctx
+            .data::<ParsedEmails>()?
+            .load_one(self.blob_id.clone())
+            .await
+            .map_err(to_gql_error)?
+            .map(GqlEmail::full))
+    }
+
     /// Text extracted from a document (PDF, DOCX, XLSX, …). Null when nothing
     /// can be extracted — an image, or a format with no text in it.
     ///
@@ -637,6 +774,45 @@ impl GqlAttachment {
             .await
             .map_err(|e| async_graphql::Error::new(format!("Failed to extract text: {e}")))
     }
+}
+
+/// An email the server is holding to send later.
+pub struct GqlScheduledEmail(pub crate::jmap::Submission);
+
+#[Object(name = "ScheduledEmail")]
+impl GqlScheduledEmail {
+    /// The submission's id, for `cancelScheduledEmail`.
+    async fn id(&self) -> &str {
+        &self.0.id
+    }
+    /// When it goes, UTC.
+    async fn send_at(&self) -> Option<&str> {
+        self.0.send_at.as_deref()
+    }
+    async fn email_id(&self) -> &str {
+        &self.0.email_id
+    }
+    /// Every address it will be delivered to, BCC included.
+    async fn recipients(&self) -> Vec<String> {
+        self.0.recipients()
+    }
+    /// The message itself.
+    async fn email(&self, ctx: &Context<'_>) -> Result<Option<GqlEmail>> {
+        Ok(ctx
+            .data::<Emails>()?
+            .load_one(self.0.email_id.clone())
+            .await
+            .map_err(to_gql_error)?
+            .map(GqlEmail::full))
+    }
+}
+
+/// Why an email matched a search, with the matching terms in `<mark>` tags.
+#[derive(SimpleObject)]
+#[graphql(name = "SearchSnippet")]
+pub struct GqlSearchSnippet {
+    pub subject: Option<String>,
+    pub preview: Option<String>,
 }
 
 #[derive(SimpleObject)]
@@ -1044,6 +1220,31 @@ pub async fn consume_nonce(
         return Err("Params changed between PREVIEW and CONFIRM. Re-run PREVIEW.");
     }
     Ok(())
+}
+
+/// What a mailbox create, update or delete did.
+#[derive(SimpleObject)]
+#[graphql(name = "MailboxResult")]
+pub struct GqlMailboxResult {
+    pub success: bool,
+    /// The mailbox as it now is: null after a delete or a failure.
+    pub mailbox: Option<GqlMailbox>,
+    pub message: Option<String>,
+    /// From a deleteMailbox PREVIEW: pass it back with CONFIRM.
+    pub confirmation_token: Option<String>,
+    pub error: Option<String>,
+}
+
+impl GqlMailboxResult {
+    pub(crate) fn failed(error: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            mailbox: None,
+            message: None,
+            confirmation_token: None,
+            error: Some(error.into()),
+        }
+    }
 }
 
 #[derive(SimpleObject)]

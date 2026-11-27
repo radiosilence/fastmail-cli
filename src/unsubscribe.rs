@@ -300,6 +300,7 @@ pub async fn carry_out(client: &JmapClient, email: &ListEmail, plan: &Plan) -> O
                 email: m.to.clone(),
             }];
             let params = ComposeParams {
+                send_at: None,
                 cc: vec![],
                 bcc: vec![],
                 from: from.as_deref(),

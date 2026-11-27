@@ -10,6 +10,7 @@ pub mod connection;
 pub mod filter;
 pub mod lists;
 pub mod loaders;
+mod manage;
 mod mutation;
 mod query;
 mod subscription;
@@ -124,7 +125,7 @@ pub fn build_schema() -> FastmailSchema {
     //
     // Depth stays capped: the graph contains cycles, and nothing else bounds
     // them.
-    Schema::build(QueryRoot, MutationRoot, SubscriptionRoot)
+    Schema::build(QueryRoot, MutationRoot::default(), SubscriptionRoot)
         .data(types::NonceStore::default())
         .limit_depth(MAX_DEPTH)
         .finish()
@@ -148,4 +149,6 @@ pub fn request(query: &str, client: SharedClient, carddav: CardDavCreds) -> asyn
         .data(loaders.masked)
         .data(loaders.thread)
         .data(loaders.blob)
+        .data(loaders.snippet)
+        .data(loaders.parsed)
 }
