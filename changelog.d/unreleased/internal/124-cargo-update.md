@@ -1,0 +1,1 @@
+- **Dependencies updated.** A fresh `cargo update` (rmcp 3.12, hyper 1.13, clap 4.6.10 and others), with `zip` still held at 8.6: kreuzberg 4.10.4 now resolves to zip 9 but does not build against it.
