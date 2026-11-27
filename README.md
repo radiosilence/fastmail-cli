@@ -8,14 +8,17 @@ CLI for Fastmail's JMAP API. Read, search, send, manage and *watch* email from y
 | --------------------- | ----------- |
 | **Email**             | List, search, read, threads; send, reply, reply-all and forward with HTML bodies, attachments and a choice of identity |
 | **Drafts**            | Save any send, reply or forward as a draft, then edit, send or discard it (MCP) |
-| **Search**            | JMAP's whole filter tree: nested `and` / `or` / `not`, keywords, thread-wide keyword conditions, raw header matching, every sort comparator |
+| **Search**            | JMAP's whole filter tree: nested `and` / `or` / `not`, keywords, thread-wide keyword conditions, raw header matching, every sort comparator; highlighted snippets of why each result matched |
 | **Mailboxes**         | List, create, rename, move, (un)subscribe and delete folders (MCP); move emails, mark read/unread, spam and not spam (both train the filter) |
+| **Flags & labels**    | Flag, set any keyword, file an email in several folders or take it out of one, by ID or over a filter (MCP) |
+| **Deleting**          | Permanently destroy emails or empty Trash and Junk, previewed first (MCP) |
+| **Scheduled send**    | `sendAt` on any send, list what is pending, cancel back to Drafts (MCP) |
 | **Mailing lists**     | Every sender with an unsubscribe header, grouped; one-click (RFC 8058) or mailto unsubscribe |
 | **Bulk sweeps**       | Move, mark read or mark spam everything a filter matches, previewed with a count and sample first (MCP) |
 | **Real-time**         | `fastmail watch` streams arriving mail as NDJSON over JMAP push, with a polling fallback; also a GraphQL subscription over SSE |
 | **Contacts**          | Search, create, update, delete via CardDAV |
-| **Attachments**       | Download, upload, extract text from 56 formats via [kreuzberg](https://github.com/kreuzberg-dev/kreuzberg), resize images to a byte budget |
-| **Masked Email**      | List, create (with a prefix), enable, disable, delete |
+| **Attachments**       | Download, upload, extract text from 56 formats via [kreuzberg](https://github.com/kreuzberg-dev/kreuzberg), resize images to a byte budget, read attached emails; import `.eml` files (MCP) |
+| **Masked Email**      | List, create (with a prefix), enable, disable, delete, edit notes |
 | **MCP Server**        | Two tools over one GraphQL schema: a whole question in one query, with nested fields batched into single JMAP calls |
 | **HTTP**              | Streamable-HTTP MCP, plain GraphQL and a GraphiQL IDE on one port; per-request credential headers for hosting it for several users |
 | **Container image**   | Multi-arch (amd64, arm64) on GHCR, running as non-root |
@@ -28,11 +31,11 @@ Fastmail [ships an official MCP server](https://www.fastmail.com/blog/an-mcp-ser
 at `api.fastmail.com/mcp`, authorised by OAuth with read, write and send access
 levels. It needs no setup and covers more of Fastmail's suite: calendar
 (including answering invitations), notes, message memos and the organisation
-directory, none of which `fastmail-cli` touches. It also deletes mail, which
-`fastmail-cli` does not. `fastmail-cli` is a CLI and an MCP server you run
-yourself, open source, and goes further on mail: forwarding, attachment
-contents, masked email, spam training, unsubscribing, bulk sweeps, and a
-real-time stream of incoming mail.
+directory, none of which `fastmail-cli` touches. `fastmail-cli` is a CLI and
+an MCP server you run yourself, open source, and goes further on mail:
+forwarding, scheduled sends, folder management, attachment contents and
+attached emails, masked email, spam training, unsubscribing, bulk sweeps, and
+a real-time stream of incoming mail.
 
 |                                                       | `fastmail-cli`                          | Fastmail official MCP                |
 | ----------------------------------------------------- | --------------------------------------- | ------------------------------------ |
@@ -49,7 +52,7 @@ real-time stream of incoming mail.
 | Drafts: create / edit / send / discard                | ✅ (MCP)                                 | create                               |
 | Move / archive / mark read                            | ✅                                       | ✅                                    |
 | Folders: create / rename / move / delete             | ✅ (MCP)                                 | —                                    |
-| Delete email                                          | —                                       | ✅                                    |
+| Delete email                                          | ✅ (MCP, permanent; preview → confirm)   | ✅                                    |
 | Message memos                                         | —                                       | ✅                                    |
 | Mark spam / not spam (trains the filter)              | ✅                                       | —                                    |
 | Mailing lists: find them, unsubscribe                 | ✅ (one-click or mailto)                 | —                                    |
@@ -58,7 +61,8 @@ real-time stream of incoming mail.
 | Attachments: download, text from 56 formats, resize   | ✅                                       | —                                    |
 | Attachments: upload                                   | ✅                                       | ✅                                    |
 | Masked Email: create / enable / disable / delete      | ✅                                       | —                                    |
-| Identities                                            | ✅ (with signatures)                     | ✅                                    |
+| Identities                                            | ✅ (with signatures; create / edit)      | ✅                                    |
+| Scheduled send / cancel                               | ✅ (MCP)                                 | —                                    |
 | Contacts: search / create / update / delete           | ✅ (CardDAV)                             | ✅                                    |
 | Organisation directory search                         | —                                       | ✅                                    |
 | Calendar: search / create / update / delete / RSVP    | —                                       | ✅                                    |

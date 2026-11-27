@@ -17,7 +17,7 @@ use super::connection::{
     thread_connection,
 };
 use super::filter::{EmailFilter, EmailSort};
-use super::loaders::{Blobs, Emails, Mailboxes, Threads, to_gql_error};
+use super::loaders::{Blobs, Emails, Mailboxes, ParsedEmails, Snippets, Threads, to_gql_error};
 use crate::carddav::{Contact, ContactEmail, ContactPhone};
 use crate::models::{
     Email, EmailAddress, EmailHeader, Identity, Mailbox, MailboxRights, MaskedEmail, Session,
@@ -373,6 +373,8 @@ pub struct GqlEmail {
     /// Whether `inner` came from a full fetch (bodies + attachment metadata),
     /// as opposed to a list/search result carrying headers only.
     complete: bool,
+    /// The JMAP filter of the search that found it, as JSON, for `snippet`.
+    search: Option<Arc<str>>,
 }
 
 impl GqlEmail {
@@ -387,6 +389,7 @@ impl GqlEmail {
         Self {
             inner: email.into(),
             complete: true,
+            search: None,
         }
     }
 
@@ -395,7 +398,14 @@ impl GqlEmail {
         Self {
             inner: Arc::new(email),
             complete: false,
+            search: None,
         }
+    }
+
+    /// Remember the search that found this email, so `snippet` can say why.
+    pub fn found_by(mut self, filter: Option<Arc<str>>) -> Self {
+        self.search = filter;
+        self
     }
 
     /// The full record: borrowed when we already have it, otherwise batch-loaded.
@@ -588,6 +598,25 @@ impl GqlEmail {
         self.inner.keywords.keys().cloned().collect()
     }
 
+    /// Why this email matched the search that found it: its subject and a
+    /// body excerpt with the matching terms in `<mark>` tags. Null outside a
+    /// filtered `emails` result; a part with no match is null too. One
+    /// `SearchSnippet/get` per page of results.
+    async fn snippet(&self, ctx: &Context<'_>) -> Result<Option<GqlSearchSnippet>> {
+        let Some(filter) = &self.search else {
+            return Ok(None);
+        };
+        let snippet = ctx
+            .data::<Snippets>()?
+            .load_one((filter.to_string(), self.inner.id.clone()))
+            .await
+            .map_err(to_gql_error)?;
+        Ok(snippet.map(|s| GqlSearchSnippet {
+            subject: s.subject.clone(),
+            preview: s.preview.clone(),
+        }))
+    }
+
     /// The conversation this email belongs to, with every message in it.
     #[graphql(complexity = "10 * child_complexity")]
     async fn thread(&self, ctx: &Context<'_>) -> Result<Option<GqlThread>> {
@@ -699,6 +728,28 @@ impl GqlAttachment {
         )))
     }
 
+    /// An attached email (`message/rfc822`, or a `.eml` file), parsed so its
+    /// headers, bodies and own attachments read like any other email. Null
+    /// for any other attachment. Not in a mailbox, so it has no thread or
+    /// mailboxes, and its `id` is its blob ID; `importEmail` files it.
+    async fn message(&self, ctx: &Context<'_>) -> Result<Option<GqlEmail>> {
+        let is_message = self.content_type.as_deref().is_some_and(|t| {
+            t.eq_ignore_ascii_case("message/rfc822") || t.eq_ignore_ascii_case("message/global")
+        }) || self
+            .name
+            .as_deref()
+            .is_some_and(|n| n.to_lowercase().ends_with(".eml"));
+        if !is_message {
+            return Ok(None);
+        }
+        Ok(ctx
+            .data::<ParsedEmails>()?
+            .load_one(self.blob_id.clone())
+            .await
+            .map_err(to_gql_error)?
+            .map(GqlEmail::full))
+    }
+
     /// Text extracted from a document (PDF, DOCX, XLSX, …). Null when nothing
     /// can be extracted — an image, or a format with no text in it.
     ///
@@ -713,6 +764,45 @@ impl GqlAttachment {
             .await
             .map_err(|e| async_graphql::Error::new(format!("Failed to extract text: {e}")))
     }
+}
+
+/// An email the server is holding to send later.
+pub struct GqlScheduledEmail(pub crate::jmap::Submission);
+
+#[Object(name = "ScheduledEmail")]
+impl GqlScheduledEmail {
+    /// The submission's id, for `cancelScheduledEmail`.
+    async fn id(&self) -> &str {
+        &self.0.id
+    }
+    /// When it goes, UTC.
+    async fn send_at(&self) -> Option<&str> {
+        self.0.send_at.as_deref()
+    }
+    async fn email_id(&self) -> &str {
+        &self.0.email_id
+    }
+    /// Every address it will be delivered to, BCC included.
+    async fn recipients(&self) -> Vec<String> {
+        self.0.recipients()
+    }
+    /// The message itself.
+    async fn email(&self, ctx: &Context<'_>) -> Result<Option<GqlEmail>> {
+        Ok(ctx
+            .data::<Emails>()?
+            .load_one(self.0.email_id.clone())
+            .await
+            .map_err(to_gql_error)?
+            .map(GqlEmail::full))
+    }
+}
+
+/// Why an email matched a search, with the matching terms in `<mark>` tags.
+#[derive(SimpleObject)]
+#[graphql(name = "SearchSnippet")]
+pub struct GqlSearchSnippet {
+    pub subject: Option<String>,
+    pub preview: Option<String>,
 }
 
 #[derive(SimpleObject)]

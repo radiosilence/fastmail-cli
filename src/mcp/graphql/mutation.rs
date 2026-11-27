@@ -8,11 +8,17 @@ use crate::util::parse_addresses;
 use super::attachments::{self, AttachmentInput, GqlUploadedAttachment};
 use super::types::*;
 
-pub struct MutationRoot;
+/// Every mutation: composing and filing mail here, managing it in
+/// [`super::manage`].
+#[derive(async_graphql::MergedObject, Default)]
+pub struct MutationRoot(MailMutation, super::manage::ManageMutation);
+
+#[derive(Default)]
+pub struct MailMutation;
 
 #[Object]
 #[allow(clippy::too_many_arguments)]
-impl MutationRoot {
+impl MailMutation {
     /// Compose and send a new email. ALWAYS use action=PREVIEW first, show the user, then CONFIRM or DRAFT with the confirmation_token from the preview.
     async fn send_email(
         &self,
@@ -33,6 +39,10 @@ impl MutationRoot {
         >,
         #[graphql(desc = "Token from PREVIEW response — required for CONFIRM/DRAFT")]
         confirmation_token: Option<String>,
+        #[graphql(
+            desc = "Send later rather than now: RFC 3339 with an offset, e.g. 2026-11-28T09:00:00Z"
+        )]
+        send_at: Option<String>,
     ) -> Result<GqlComposeResult> {
         let to_addrs = parse_addresses(&to);
         let cc_addrs = cc.as_deref().map(parse_addresses).unwrap_or_default();
@@ -50,6 +60,14 @@ impl MutationRoot {
             Err(msg) => return Ok(failed(msg)),
         };
         let attachment_keys = attachments::fingerprint(&attachments);
+        let send_at = match schedule(
+            client,
+            send_at.as_deref(),
+            matches!(action, SendAction::Draft),
+        ) {
+            Ok(v) => v,
+            Err(msg) => return Ok(failed(msg)),
+        };
         let mut params = vec![
             to.as_str(),
             subject.as_str(),
@@ -60,6 +78,7 @@ impl MutationRoot {
             html_body.as_deref().unwrap_or(""),
         ];
         params.extend(attachment_keys.iter().map(String::as_str));
+        params.push(send_at.as_deref().unwrap_or(""));
 
         if matches!(action, SendAction::Preview) {
             let nonce = super::types::issue_nonce(nonce_store, client.tenant_key(), &params).await;
@@ -73,7 +92,7 @@ impl MutationRoot {
             return Ok(GqlComposeResult {
                 success: true,
                 email_id: None,
-                preview: Some(preview),
+                preview: Some(scheduled_note(preview, send_at.as_deref())),
                 confirmation_token: Some(nonce),
                 error: None,
             });
@@ -110,6 +129,7 @@ impl MutationRoot {
                     draft,
                     html_body,
                     attachments: attachments.into_iter().map(|a| a.data).collect(),
+                    send_at,
                 },
             )
             .await
@@ -151,6 +171,10 @@ impl MutationRoot {
         >,
         #[graphql(desc = "Token from PREVIEW response — required for CONFIRM/DRAFT")]
         confirmation_token: Option<String>,
+        #[graphql(
+            desc = "Send later rather than now: RFC 3339 with an offset, e.g. 2026-11-28T09:00:00Z"
+        )]
+        send_at: Option<String>,
     ) -> Result<GqlComposeResult> {
         let nonce_store = ctx.data::<super::types::NonceStore>()?;
         let reply_all = all.unwrap_or(false);
@@ -166,6 +190,14 @@ impl MutationRoot {
             Err(msg) => return Ok(failed(msg)),
         };
         let attachment_keys = attachments::fingerprint(&attachments);
+        let send_at = match schedule(
+            client,
+            send_at.as_deref(),
+            matches!(action, SendAction::Draft),
+        ) {
+            Ok(v) => v,
+            Err(msg) => return Ok(failed(msg)),
+        };
         let mut params = vec![
             email_id.as_str(),
             body.as_str(),
@@ -176,6 +208,7 @@ impl MutationRoot {
             html_body.as_deref().unwrap_or(""),
         ];
         params.extend(attachment_keys.iter().map(String::as_str));
+        params.push(send_at.as_deref().unwrap_or(""));
 
         let original = client.get_email(&email_id).await?;
         let extra_cc = cc.as_deref().map(parse_addresses).unwrap_or_default();
@@ -235,7 +268,7 @@ impl MutationRoot {
             return Ok(GqlComposeResult {
                 success: true,
                 email_id: None,
-                preview: Some(preview),
+                preview: Some(scheduled_note(preview, send_at.as_deref())),
                 confirmation_token: Some(nonce),
                 error: None,
             });
@@ -271,6 +304,7 @@ impl MutationRoot {
                     draft,
                     html_body,
                     attachments: attachments.into_iter().map(|a| a.data).collect(),
+                    send_at,
                 },
             )
             .await
@@ -312,6 +346,10 @@ impl MutationRoot {
         >,
         #[graphql(desc = "Token from PREVIEW response — required for CONFIRM/DRAFT")]
         confirmation_token: Option<String>,
+        #[graphql(
+            desc = "Send later rather than now: RFC 3339 with an offset, e.g. 2026-11-28T09:00:00Z"
+        )]
+        send_at: Option<String>,
     ) -> Result<GqlComposeResult> {
         let body_str = body.as_deref().unwrap_or("");
         let nonce_store = ctx.data::<super::types::NonceStore>()?;
@@ -327,6 +365,14 @@ impl MutationRoot {
             Err(msg) => return Ok(failed(msg)),
         };
         let attachment_keys = attachments::fingerprint(&attachments);
+        let send_at = match schedule(
+            client,
+            send_at.as_deref(),
+            matches!(action, SendAction::Draft),
+        ) {
+            Ok(v) => v,
+            Err(msg) => return Ok(failed(msg)),
+        };
         let mut params = vec![
             email_id.as_str(),
             to.as_str(),
@@ -337,6 +383,7 @@ impl MutationRoot {
             html_body.as_deref().unwrap_or(""),
         ];
         params.extend(attachment_keys.iter().map(String::as_str));
+        params.push(send_at.as_deref().unwrap_or(""));
 
         let original = client.get_email(&email_id).await?;
         let to_addrs = parse_addresses(&to);
@@ -386,7 +433,7 @@ impl MutationRoot {
             return Ok(GqlComposeResult {
                 success: true,
                 email_id: None,
-                preview: Some(preview),
+                preview: Some(scheduled_note(preview, send_at.as_deref())),
                 confirmation_token: Some(nonce),
                 error: None,
             });
@@ -422,6 +469,7 @@ impl MutationRoot {
                     draft,
                     html_body,
                     attachments: attachments.into_iter().map(|a| a.data).collect(),
+                    send_at,
                 },
             )
             .await
@@ -535,12 +583,24 @@ impl MutationRoot {
         #[graphql(desc = "The draft's email ID")] email_id: String,
         #[graphql(desc = "Token from PREVIEW response — required for CONFIRM")]
         confirmation_token: Option<String>,
+        #[graphql(
+            desc = "Send later rather than now: RFC 3339 with an offset, e.g. 2026-11-28T09:00:00Z"
+        )]
+        send_at: Option<String>,
     ) -> Result<GqlComposeResult> {
         let nonce_store = ctx.data::<super::types::NonceStore>()?;
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
+        let send_at = match schedule(client, send_at.as_deref(), false) {
+            Ok(v) => v,
+            Err(msg) => return Ok(failed(msg)),
+        };
         // An email's content can't change under its ID, so the ID alone pins
         // exactly what was previewed.
-        let params = ["send_draft", email_id.as_str()];
-        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
+        let params = [
+            "send_draft",
+            email_id.as_str(),
+            send_at.as_deref().unwrap_or(""),
+        ];
         let draft = client.get_email(&email_id).await?;
 
         let failure = |msg: String| GqlComposeResult {
@@ -584,7 +644,7 @@ impl MutationRoot {
             return Ok(GqlComposeResult {
                 success: true,
                 email_id: None,
-                preview: Some(preview),
+                preview: Some(scheduled_note(preview, send_at.as_deref())),
                 confirmation_token: Some(nonce),
                 error: None,
             });
@@ -601,7 +661,7 @@ impl MutationRoot {
             return Ok(failure(msg.to_string()));
         }
 
-        Ok(match client.send_draft(&draft).await {
+        Ok(match client.send_draft(&draft, send_at.as_deref()).await {
             Ok(()) => GqlComposeResult {
                 success: true,
                 email_id: Some(email_id),
@@ -916,6 +976,8 @@ impl MutationRoot {
         #[graphql(desc = "Move to Junk and mark $junk, training the filter")] mark_spam: Option<
             bool,
         >,
+        #[graphql(desc = "More changes: flag, keywords, add to or remove from folders")]
+        changes: Option<super::manage::EmailChanges>,
         #[graphql(desc = "Most emails to change, newest first (default 1000, max 10000)")]
         limit: Option<i32>,
         #[graphql(desc = "Token from PREVIEW — required for CONFIRM")] confirmation_token: Option<
@@ -974,9 +1036,27 @@ impl MutationRoot {
             );
             doing.push(if read { "marked read" } else { "marked unread" }.to_string());
         }
+        if let Some(changes) = &changes {
+            let (more, more_doing) = match super::manage::build_patch(ctx, changes).await? {
+                Ok(p) => p,
+                Err(e) => return Ok(fail(e)),
+            };
+            for (key, value) in more {
+                let clash = patch.get(&key).is_some_and(|v| *v != value)
+                    || (key.starts_with("mailboxIds") && patch.contains_key("mailboxIds"))
+                    || (key == "mailboxIds" && patch.keys().any(|k| k.starts_with("mailboxIds")));
+                if clash {
+                    return Ok(fail(format!(
+                        "changes conflict with moveTo, markRead or markSpam over {key}"
+                    )));
+                }
+                patch.insert(key, value);
+            }
+            doing.extend(more_doing);
+        }
         if patch.is_empty() {
             return Ok(fail(
-                "Nothing to do: set moveTo, markRead or markSpam.".into(),
+                "Nothing to do: set moveTo, markRead, markSpam or changes.".into(),
             ));
         }
         let patch = serde_json::Value::Object(patch);
@@ -1538,6 +1618,36 @@ fn format_send_preview(
     )
 }
 
+/// A requested send time, checked against what the server allows and given
+/// back in UTC.
+fn schedule(
+    client: &crate::jmap::JmapClient,
+    send_at: Option<&str>,
+    draft: bool,
+) -> std::result::Result<Option<String>, String> {
+    match send_at {
+        None => Ok(None),
+        Some(_) if draft => Err(
+            "sendAt schedules a send; it does not apply to DRAFT. Save the draft, then sendDraft with sendAt."
+                .into(),
+        ),
+        Some(at) => client
+            .validate_send_at(at)
+            .map(Some)
+            .map_err(|e| e.to_string()),
+    }
+}
+
+/// A preview, saying when it will go if it is scheduled.
+fn scheduled_note(mut preview: String, send_at: Option<&str>) -> String {
+    if let Some(at) = send_at {
+        preview.push_str(&format!(
+            "\n\nSCHEDULED: held by the server until {at} (UTC). Cancel before then with cancelScheduledEmail."
+        ));
+    }
+    preview
+}
+
 fn failed(msg: String) -> GqlComposeResult {
     GqlComposeResult {
         success: false,
@@ -1569,7 +1679,7 @@ async fn mailbox_ref(
 
 /// Drop the request's cached mailbox list after changing the folder tree, so
 /// the result, and later mutations in the same document, see the change.
-fn forget_mailboxes(ctx: &Context<'_>) -> Result<()> {
+pub(crate) fn forget_mailboxes(ctx: &Context<'_>) -> Result<()> {
     ctx.data::<super::loaders::Mailboxes>()?.clear::<()>();
     Ok(())
 }

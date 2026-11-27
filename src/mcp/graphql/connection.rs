@@ -287,6 +287,7 @@ pub async fn emails_connection(
         None => jmap_filter,
     };
     let jmap_sort = sort_to_jmap(sort.as_deref()).map_err(async_graphql::Error::new)?;
+    let search: Option<std::sync::Arc<str>> = jmap_filter.as_ref().map(|f| f.to_string().into());
 
     // Selecting nothing but `totalCount` should not fetch a single email; and
     // `totalCount` is the only thing that makes the server compute the total.
@@ -359,7 +360,7 @@ pub async fn emails_connection(
                 .map(|email| {
                     Edge::with_additional_fields(
                         email.id.clone(),
-                        GqlEmail::summary(email),
+                        GqlEmail::summary(email).found_by(search.clone()),
                         EmptyFields,
                     )
                 })

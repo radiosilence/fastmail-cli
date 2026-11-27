@@ -1,0 +1,1 @@
+- **Edit a masked email's notes.** `updateMaskedEmail` changes its description, domain and URL; until now only its state could change.

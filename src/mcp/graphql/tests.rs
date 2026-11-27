@@ -3081,3 +3081,461 @@ async fn deleting_a_folder_with_mail_needs_remove_emails_and_a_token() {
         json!({ "accountId": "acct1", "destroy": ["mbA24"], "onDestroyRemoveEmails": true })
     );
 }
+
+// ============ Managing mail: keywords, destroy, schedule, identities ============
+
+/// Answers every method the management mutations use. Trash holds x1 and x3
+/// alone and x2 also filed in Archive; x1 carries an attached email.
+async fn manage_server() -> MockServer {
+    let server = MockServer::start().await;
+    let folders = json!([
+        { "id": "mbI", "name": "Inbox", "role": "inbox" },
+        { "id": "mbT", "name": "Trash", "role": "trash" },
+        { "id": "mbD", "name": "Drafts", "role": "drafts" },
+        { "id": "mbS", "name": "Sent", "role": "sent" },
+        { "id": "mbA", "name": "Archive", "role": "archive" },
+        { "id": "mbL", "name": "Receipts" },
+    ]);
+    Mock::given(method("POST"))
+        .and(path("/jmap"))
+        .respond_with(move |req: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+            let responses: Vec<Value> = body["methodCalls"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|mc| {
+                    let args = &mc[1];
+                    // A back-reference (`#ids`) stands for the query's result.
+                    let ids: Vec<String> = args["ids"]
+                        .as_array()
+                        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+                        .unwrap_or_else(|| vec!["x1".into(), "x2".into(), "x3".into()]);
+                    let payload = match mc[0].as_str().unwrap_or("") {
+                        "Mailbox/get" => json!({ "list": folders }),
+                        "Email/query" => json!({ "ids": ["x1", "x2", "x3"], "total": 3, "position": 0 }),
+                        "Email/get" if args["properties"] == json!(["id", "mailboxIds"]) => json!({
+                            "list": ids.iter().map(|id| json!({
+                                "id": id,
+                                "mailboxIds": if id == "x2" {
+                                    json!({ "mbT": true, "mbA": true })
+                                } else {
+                                    json!({ "mbT": true })
+                                }
+                            })).collect::<Vec<_>>()
+                        }),
+                        "Email/get" => json!({
+                            "list": ids.iter().map(|id| {
+                                let mut e = email_json(id, "t1", true);
+                                e["attachments"] = json!([
+                                    { "partId": "2", "blobId": "blob-eml", "type": "message/rfc822",
+                                      "name": "fwd.eml", "size": 100 },
+                                    { "partId": "3", "blobId": "blob-pdf", "type": "application/pdf",
+                                      "name": "a.pdf", "size": 100 },
+                                ]);
+                                e
+                            }).collect::<Vec<_>>(),
+                            "notFound": []
+                        }),
+                        "Email/set" => json!({
+                            "created": args.get("create").map(|_| json!({ "email": { "id": "new1" } })),
+                            "destroyed": args.get("destroy"),
+                        }),
+                        "SearchSnippet/get" => json!({
+                            "list": args["emailIds"].as_array().cloned().unwrap_or_default()
+                                .iter().map(|id| json!({
+                                    "emailId": id, "subject": null,
+                                    "preview": "a <mark>hit</mark> here"
+                                })).collect::<Vec<_>>()
+                        }),
+                        "Email/parse" => json!({
+                            "parsed": args["blobIds"].as_array().cloned().unwrap_or_default()
+                                .iter().filter_map(Value::as_str).map(|b| (b.to_string(), json!({
+                                    "subject": "Inner message",
+                                    "from": [{ "email": "inner@example.com" }],
+                                    "textBody": [{ "partId": "1", "type": "text/plain" }],
+                                    "bodyValues": { "1": { "value": "inner body" } }
+                                }))).collect::<serde_json::Map<_, _>>()
+                        }),
+                        "Email/import" => json!({ "created": { "new": { "id": "imp1" } } }),
+                        "EmailSubmission/query" => json!({ "ids": ["sub1"] }),
+                        "EmailSubmission/get" => json!({ "list": [{
+                            "id": "sub1", "emailId": "x1", "sendAt": "2030-01-01T09:00:00Z",
+                            "undoStatus": "pending",
+                            "envelope": { "mailFrom": { "email": "me@example.com" },
+                                          "rcptTo": [{ "email": "a@b.com" }, { "email": "hidden@b.com" }] }
+                        }] }),
+                        "EmailSubmission/set" => json!({
+                            "created": args.get("create").map(|_| json!({ "submission": { "id": "sub2" } }))
+                        }),
+                        "Identity/get" => json!({ "list": [
+                            { "id": "ident1", "name": "Me", "email": "me@example.com" }
+                        ] }),
+                        "Identity/set" => json!({
+                            "created": args.get("create").map(|_| json!({ "new": { "id": "ident1" } }))
+                        }),
+                        _ => json!({}),
+                    };
+                    json!([mc[0], payload, mc[2]])
+                })
+                .collect();
+            ResponseTemplate::new(200).set_body_json(json!({ "methodResponses": responses }))
+        })
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/jmap/upload"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "accountId": "acct1", "blobId": "Gup1", "size": 5
+        })))
+        .mount(&server)
+        .await;
+    server
+}
+
+/// The arguments of every call to `name`, in order.
+async fn args_of(server: &MockServer, name: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    for req in server.received_requests().await.unwrap_or_default() {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+        for mc in body["methodCalls"].as_array().cloned().unwrap_or_default() {
+            if mc[0] == name {
+                out.push(mc[1].clone());
+            }
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn update_emails_flags_labels_and_sets_keywords() {
+    let server = manage_server().await;
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "mutation { updateEmails(emailIds: [\"x1\", \"x2\", \"x1\"], changes: { \
+            flagged: true, read: false, addKeywords: [\"$Important\"], \
+            addToMailboxes: [\"Receipts\"], removeFromMailboxes: [\"inbox\"] }) \
+            { success affected error } }",
+    )
+    .await;
+    assert_eq!(data["updateEmails"]["success"], true, "{data}");
+    assert_eq!(data["updateEmails"]["affected"], 2);
+    let sets = args_of(&server, "Email/set").await;
+    assert_eq!(
+        sets[0]["update"]["x1"],
+        json!({
+            "keywords/$flagged": true, "keywords/$seen": null, "keywords/$important": true,
+            "mailboxIds/mbL": true, "mailboxIds/mbI": null
+        })
+    );
+}
+
+#[tokio::test]
+async fn move_to_does_not_mix_with_labels_or_bad_keywords() {
+    let server = manage_server().await;
+    let schema = build_schema();
+    let client = client_for(&server);
+    for changes in [
+        "{ moveTo: \"Archive\", addToMailboxes: [\"Receipts\"] }",
+        "{ addKeywords: [\"two words\"] }",
+        "{ addKeywords: [\"x\"], removeKeywords: [\"X\"] }",
+    ] {
+        let data = exec(
+            &schema,
+            &client,
+            &format!("mutation {{ updateEmails(emailIds: [\"x1\"], changes: {changes}) {{ success error }} }}"),
+        )
+        .await;
+        assert_eq!(data["updateEmails"]["success"], false, "{changes}");
+    }
+    assert!(args_of(&server, "Email/set").await.is_empty());
+}
+
+#[tokio::test]
+async fn sweep_takes_the_same_changes() {
+    let server = manage_server().await;
+    let schema = build_schema();
+    let client = client_for(&server);
+    let q = "mutation($t: String) { sweepEmails(filter: { from: \"a@b.com\" }, action: ACTION, \
+             changes: { flagged: true }, markRead: true, confirmationToken: $t) \
+             { success confirmationToken error } }";
+    let preview = exec_with(&schema, &client, &q.replace("ACTION", "PREVIEW"), json!({})).await;
+    let token = preview["sweepEmails"]["confirmationToken"].clone();
+    let done = exec_with(
+        &schema,
+        &client,
+        &q.replace("ACTION", "CONFIRM"),
+        json!({ "t": token }),
+    )
+    .await;
+    assert_eq!(done["sweepEmails"]["success"], true, "{done}");
+    assert_eq!(
+        args_of(&server, "Email/set").await[0]["update"]["x1"],
+        json!({ "keywords/$seen": true, "keywords/$flagged": true })
+    );
+}
+
+#[tokio::test]
+async fn destroy_emails_needs_a_token_for_exactly_those_ids() {
+    let server = manage_server().await;
+    let schema = build_schema();
+    let client = client_for(&server);
+    let preview = exec(
+        &schema,
+        &client,
+        "mutation { destroyEmails(emailIds: [\"x2\", \"x1\"], action: PREVIEW) { message confirmationToken } }",
+    )
+    .await;
+    assert!(
+        preview["destroyEmails"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("PERMANENTLY")
+    );
+    let token = preview["destroyEmails"]["confirmationToken"].clone();
+
+    let other = exec_with(
+        &schema,
+        &client,
+        "mutation($t: String) { destroyEmails(emailIds: [\"x1\", \"x3\"], action: CONFIRM, confirmationToken: $t) { success } }",
+        json!({ "t": token }),
+    )
+    .await;
+    assert_eq!(other["destroyEmails"]["success"], false);
+    assert!(args_of(&server, "Email/set").await.is_empty());
+
+    let preview = exec(
+        &schema,
+        &client,
+        "mutation { destroyEmails(emailIds: [\"x2\", \"x1\"], action: PREVIEW) { confirmationToken } }",
+    )
+    .await;
+    let done = exec_with(
+        &schema,
+        &client,
+        "mutation($t: String) { destroyEmails(emailIds: [\"x1\", \"x2\"], action: CONFIRM, confirmationToken: $t) { success affected } }",
+        json!({ "t": preview["destroyEmails"]["confirmationToken"] }),
+    )
+    .await;
+    assert_eq!(
+        done["destroyEmails"],
+        json!({ "success": true, "affected": 2 })
+    );
+    assert_eq!(
+        args_of(&server, "Email/set").await[0]["destroy"],
+        json!(["x1", "x2"])
+    );
+}
+
+#[tokio::test]
+async fn emptying_a_folder_spares_mail_filed_elsewhere() {
+    let server = manage_server().await;
+    let schema = build_schema();
+    let client = client_for(&server);
+    let preview = exec(
+        &schema,
+        &client,
+        "mutation { emptyMailbox(mailbox: \"trash\", action: PREVIEW) { message confirmationToken } }",
+    )
+    .await;
+    let message = preview["emptyMailbox"]["message"].as_str().unwrap();
+    assert!(message.contains("2 are in no other folder"), "{message}");
+    let done = exec_with(
+        &schema,
+        &client,
+        "mutation($t: String) { emptyMailbox(mailbox: \"trash\", action: CONFIRM, confirmationToken: $t) { success affected } }",
+        json!({ "t": preview["emptyMailbox"]["confirmationToken"] }),
+    )
+    .await;
+    assert_eq!(
+        done["emptyMailbox"],
+        json!({ "success": true, "affected": 3 })
+    );
+    let sets = args_of(&server, "Email/set").await;
+    assert_eq!(
+        sets[0]["update"],
+        json!({ "x2": { "mailboxIds/mbT": null } })
+    );
+    assert_eq!(sets[1]["destroy"], json!(["x1", "x3"]));
+}
+
+#[tokio::test]
+async fn snippets_batch_per_search_and_need_one() {
+    let server = manage_server().await;
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "{ emails(filter: { text: \"hit\" }, first: 3) { nodes { id snippet { preview } } } \
+           unfiltered: emails(first: 1) { nodes { snippet { preview } } } }",
+    )
+    .await;
+    assert_eq!(
+        data["emails"]["nodes"][2]["snippet"]["preview"],
+        "a <mark>hit</mark> here"
+    );
+    assert!(data["unfiltered"]["nodes"][0]["snippet"].is_null());
+    let calls = args_of(&server, "SearchSnippet/get").await;
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["filter"], json!({ "text": "hit" }));
+    assert_eq!(calls[0]["emailIds"].as_array().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn an_attached_email_parses_and_other_attachments_do_not() {
+    let server = manage_server().await;
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "{ email(id: \"x1\") { attachments { nodes { name message { id subject textBody from { email } } } } } }",
+    )
+    .await;
+    let nodes = &data["email"]["attachments"]["nodes"];
+    assert_eq!(
+        nodes[0]["message"],
+        json!({ "id": "blob-eml", "subject": "Inner message", "textBody": "inner body",
+                "from": [{ "email": "inner@example.com" }] })
+    );
+    assert!(nodes[1]["message"].is_null());
+    let parses = args_of(&server, "Email/parse").await;
+    assert_eq!(parses.len(), 1);
+    assert_eq!(parses[0]["blobIds"], json!(["blob-eml"]));
+}
+
+#[tokio::test]
+async fn import_email_uploads_and_files_it() {
+    let server = manage_server().await;
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "mutation { importEmail(base64: \"aGVsbG8=\", mailboxes: [\"Archive\"], keywords: [\"imported\"], \
+           receivedAt: \"2024-01-02T03:04:05+01:00\") { success emailId error } }",
+    )
+    .await;
+    assert_eq!(data["importEmail"]["emailId"], "imp1", "{data}");
+    assert_eq!(
+        args_of(&server, "Email/import").await[0]["emails"]["new"],
+        json!({ "blobId": "Gup1", "mailboxIds": { "mbA": true },
+                "keywords": { "$seen": true, "imported": true },
+                "receivedAt": "2024-01-02T02:04:05Z" })
+    );
+}
+
+#[tokio::test]
+async fn scheduled_emails_list_and_cancel_back_to_drafts() {
+    let server = manage_server().await;
+    let schema = build_schema();
+    let client = client_for(&server);
+    let data = exec(
+        &schema,
+        &client,
+        "{ scheduledEmails { nodes { id sendAt recipients email { subject } } } }",
+    )
+    .await;
+    assert_eq!(
+        data["scheduledEmails"]["nodes"][0],
+        json!({ "id": "sub1", "sendAt": "2030-01-01T09:00:00Z",
+                "recipients": ["a@b.com", "hidden@b.com"], "email": { "subject": "Subject x1" } })
+    );
+    let done = exec(
+        &schema,
+        &client,
+        "mutation { cancelScheduledEmail(submissionId: \"sub1\") { success error } }",
+    )
+    .await;
+    assert_eq!(done["cancelScheduledEmail"]["success"], true, "{done}");
+    let set = &args_of(&server, "EmailSubmission/set").await[0];
+    assert_eq!(
+        set["update"],
+        json!({ "sub1": { "undoStatus": "canceled" } })
+    );
+    assert_eq!(
+        set["onSuccessUpdateEmail"],
+        json!({ "sub1": { "mailboxIds": { "mbD": true }, "keywords/$draft": true } })
+    );
+}
+
+#[tokio::test]
+async fn send_at_holds_the_message_for_every_recipient() {
+    let server = manage_server().await;
+    let schema = build_schema();
+    let client = client_for(&server);
+    let q = "mutation($t: String) { sendEmail(action: ACTION, to: \"a@b.com\", subject: \"Hi\", body: \"x\", \
+             bcc: \"hidden@b.com\", sendAt: \"2099-01-01T09:00:00+01:00\", confirmationToken: $t) \
+             { success preview confirmationToken error } }";
+
+    // A server that offers no delayed sending says so rather than sending now.
+    let refused = exec_with(&schema, &client, &q.replace("ACTION", "PREVIEW"), json!({})).await;
+    assert_eq!(refused["sendEmail"]["success"], false);
+    assert!(
+        refused["sendEmail"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("scheduled")
+    );
+
+    client.set_test_capability(
+        "urn:ietf:params:jmap:submission",
+        json!({ "maxDelayedSend": 100_i64 * 365 * 86_400, "submissionExtensions": { "FUTURERELEASE": [] } }),
+    );
+    let preview = exec_with(&schema, &client, &q.replace("ACTION", "PREVIEW"), json!({})).await;
+    assert!(
+        preview["sendEmail"]["preview"]
+            .as_str()
+            .unwrap()
+            .contains("2099-01-01T08:00:00Z")
+    );
+    let done = exec_with(
+        &schema,
+        &client,
+        &q.replace("ACTION", "CONFIRM"),
+        json!({ "t": preview["sendEmail"]["confirmationToken"] }),
+    )
+    .await;
+    assert_eq!(done["sendEmail"]["success"], true, "{done}");
+    assert_eq!(
+        args_of(&server, "EmailSubmission/set").await[0]["create"]["submission"]["envelope"],
+        json!({
+            "mailFrom": { "email": "me@example.com", "parameters": { "HOLDUNTIL": "2099-01-01T08:00:00Z" } },
+            "rcptTo": [{ "email": "a@b.com" }, { "email": "hidden@b.com" }]
+        })
+    );
+
+    let past = exec_with(
+        &schema,
+        &client,
+        &q.replace("ACTION", "PREVIEW").replace("2099", "2001"),
+        json!({}),
+    )
+    .await;
+    assert!(
+        past["sendEmail"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("past")
+    );
+}
+
+#[tokio::test]
+async fn identities_and_masked_email_notes_update() {
+    let server = manage_server().await;
+    let schema = build_schema();
+    let client = client_for(&server);
+    let data = exec(
+        &schema,
+        &client,
+        "mutation { updateIdentity(identity: \"ME@example.com\", textSignature: \"-- \\nMe\", replyTo: \"\") { id } \
+           updateMaskedEmail(id: \"m1\", description: \"bike shop\", url: \"\") { success } }",
+    )
+    .await;
+    assert_eq!(data["updateIdentity"]["id"], "ident1", "{data}");
+    assert_eq!(
+        args_of(&server, "Identity/set").await[0]["update"],
+        json!({ "ident1": { "textSignature": "-- \nMe", "replyTo": null } })
+    );
+    assert_eq!(
+        args_of(&server, "MaskedEmail/set").await[0]["update"],
+        json!({ "m1": { "description": "bike shop", "url": null } })
+    );
+}
