@@ -1,5 +1,6 @@
 mod events;
 pub mod lists;
+mod mailboxes;
 mod watch;
 
 use crate::commands::SearchFilter;
@@ -14,6 +15,7 @@ use std::time::Duration;
 use tracing::{debug, instrument};
 
 pub use events::{EventParser, ServerEvent};
+pub use mailboxes::MailboxPatch;
 pub use watch::{ArrivalWatcher, Arrivals, SharedJmapClient};
 
 const SESSION_URL: &str = "https://api.fastmail.com/jmap/session";

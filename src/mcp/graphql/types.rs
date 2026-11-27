@@ -47,6 +47,8 @@ pub(crate) async fn all_mailboxes(ctx: &Context<'_>) -> Result<std::sync::Arc<Ve
 
 /// Find a mailbox by name, falling back to matching its role. Case-insensitive
 /// both ways, so `"INBOX"`, `"Inbox"` and `"inbox"` all land on the same folder.
+/// An ID or a full path (`"Parent/Child"`) is matched first, so a folder whose
+/// name is shared with another can still be reached.
 pub(crate) fn find_by_name_or_role<'a>(
     mailboxes: &'a [Mailbox],
     name: &str,
@@ -54,12 +56,79 @@ pub(crate) fn find_by_name_or_role<'a>(
     let wanted = name.to_lowercase();
     mailboxes
         .iter()
-        .find(|m| m.name.to_lowercase() == wanted)
+        .find(|m| m.id == name)
+        .or_else(|| {
+            mailboxes
+                .iter()
+                .find(|m| mailbox_path(mailboxes, m).to_lowercase() == wanted)
+        })
+        .or_else(|| mailboxes.iter().find(|m| m.name.to_lowercase() == wanted))
         .or_else(|| {
             mailboxes
                 .iter()
                 .find(|m| m.role.as_deref().map(str::to_lowercase).as_deref() == Some(&wanted))
         })
+}
+
+/// A mailbox's names from the top of the tree down, joined by `/`.
+pub(crate) fn mailbox_path(mailboxes: &[Mailbox], mailbox: &Mailbox) -> String {
+    let mut names = vec![mailbox.name.as_str()];
+    let mut parent = mailbox.parent_id.as_deref();
+    // Bounded, so a cycle in a malformed tree cannot hang the request.
+    while let Some(id) = parent
+        && names.len() <= mailboxes.len()
+    {
+        let Some(p) = mailboxes.iter().find(|m| m.id == id) else {
+            break;
+        };
+        names.push(&p.name);
+        parent = p.parent_id.as_deref();
+    }
+    names.reverse();
+    names.join("/")
+}
+
+/// The one mailbox a reference names, for writes, where landing on the wrong
+/// one of two same-named folders is worse than asking. Tries, in order: an ID,
+/// a full path (`"Parent/Child"`), a name, a role; all case-insensitive except
+/// the ID. A name two folders share is refused with both paths and IDs.
+pub(crate) fn resolve_mailbox<'a>(
+    mailboxes: &'a [Mailbox],
+    reference: &str,
+) -> std::result::Result<&'a Mailbox, String> {
+    if let Some(m) = mailboxes.iter().find(|m| m.id == reference) {
+        return Ok(m);
+    }
+    let wanted = reference.to_lowercase();
+    let by_path: Vec<&Mailbox> = mailboxes
+        .iter()
+        .filter(|m| mailbox_path(mailboxes, m).to_lowercase() == wanted)
+        .collect();
+    let by_name: Vec<&Mailbox> = mailboxes
+        .iter()
+        .filter(|m| m.name.to_lowercase() == wanted)
+        .collect();
+    for candidates in [by_path, by_name] {
+        match candidates.as_slice() {
+            [] => {}
+            [one] => return Ok(one),
+            many => {
+                let listed: Vec<String> = many
+                    .iter()
+                    .map(|m| format!("\"{}\" (id {})", mailbox_path(mailboxes, m), m.id))
+                    .collect();
+                return Err(format!(
+                    "\"{reference}\" names {} mailboxes: {}. Pass a path or an id.",
+                    many.len(),
+                    listed.join(", ")
+                ));
+            }
+        }
+    }
+    mailboxes
+        .iter()
+        .find(|m| m.role.as_deref().map(str::to_lowercase).as_deref() == Some(&wanted))
+        .ok_or_else(|| crate::error::Error::MailboxNotFound(reference.into()).to_string())
 }
 
 /// What the account may do in a mailbox. Check these before a move or a flag
@@ -141,6 +210,13 @@ impl GqlMailbox {
     /// Permissions the account holds on this mailbox.
     async fn my_rights(&self) -> GqlMailboxRights {
         GqlMailboxRights::from(&self.0.my_rights)
+    }
+
+    /// The names from the top of the folder tree down to this one, joined
+    /// by `/`, e.g. `"Archive/2024"`. Accepted wherever a mailbox is named,
+    /// and the way to tell apart two folders with the same name.
+    async fn path(&self, ctx: &Context<'_>) -> Result<String> {
+        Ok(mailbox_path(&all_mailboxes(ctx).await?, &self.0))
     }
 
     /// The mailbox this one is nested under, if any.
@@ -1044,6 +1120,31 @@ pub async fn consume_nonce(
         return Err("Params changed between PREVIEW and CONFIRM. Re-run PREVIEW.");
     }
     Ok(())
+}
+
+/// What a mailbox create, update or delete did.
+#[derive(SimpleObject)]
+#[graphql(name = "MailboxResult")]
+pub struct GqlMailboxResult {
+    pub success: bool,
+    /// The mailbox as it now is: null after a delete or a failure.
+    pub mailbox: Option<GqlMailbox>,
+    pub message: Option<String>,
+    /// From a deleteMailbox PREVIEW: pass it back with CONFIRM.
+    pub confirmation_token: Option<String>,
+    pub error: Option<String>,
+}
+
+impl GqlMailboxResult {
+    pub(crate) fn failed(error: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            mailbox: None,
+            message: None,
+            confirmation_token: None,
+            error: Some(error.into()),
+        }
+    }
 }
 
 #[derive(SimpleObject)]

@@ -9,7 +9,7 @@ CLI for Fastmail's JMAP API. Read, search, send, manage and *watch* email from y
 | **Email**             | List, search, read, threads; send, reply, reply-all and forward with HTML bodies, attachments and a choice of identity |
 | **Drafts**            | Save any send, reply or forward as a draft, then edit, send or discard it (MCP) |
 | **Search**            | JMAP's whole filter tree: nested `and` / `or` / `not`, keywords, thread-wide keyword conditions, raw header matching, every sort comparator |
-| **Mailboxes**         | List folders, move emails, mark read/unread, spam and not spam (both train the filter) |
+| **Mailboxes**         | List, create, rename, move, (un)subscribe and delete folders (MCP); move emails, mark read/unread, spam and not spam (both train the filter) |
 | **Mailing lists**     | Every sender with an unsubscribe header, grouped; one-click (RFC 8058) or mailto unsubscribe |
 | **Bulk sweeps**       | Move, mark read or mark spam everything a filter matches, previewed with a count and sample first (MCP) |
 | **Real-time**         | `fastmail watch` streams arriving mail as NDJSON over JMAP push, with a polling fallback; also a GraphQL subscription over SSE |
@@ -48,6 +48,7 @@ real-time stream of incoming mail.
 | Forward                                               | ✅                                       | —                                    |
 | Drafts: create / edit / send / discard                | ✅ (MCP)                                 | create                               |
 | Move / archive / mark read                            | ✅                                       | ✅                                    |
+| Folders: create / rename / move / delete             | ✅ (MCP)                                 | —                                    |
 | Delete email                                          | —                                       | ✅                                    |
 | Message memos                                         | —                                       | ✅                                    |
 | Mark spam / not spam (trains the filter)              | ✅                                       | —                                    |

@@ -2842,3 +2842,242 @@ async fn spam_verdicts_set_the_training_keywords() {
         json!({ "mailboxIds": { "mbI": true }, "keywords/$junk": null, "keywords/$notjunk": true })
     );
 }
+
+// ============ Mailbox management ============
+
+/// A folder tree with two folders named "2024", one under Archive and one
+/// under Receipts, the shape that makes a bare name ambiguous. `Mailbox/set`
+/// creates `mbNew` and refuses nothing.
+async fn folder_server() -> MockServer {
+    let server = MockServer::start().await;
+    let rights = json!({
+        "mayReadItems": true, "mayAddItems": true, "mayRemoveItems": true,
+        "maySetSeen": true, "maySetKeywords": true, "mayCreateChild": true,
+        "mayRename": true, "mayDelete": true, "maySubmit": true
+    });
+    let folders = json!([
+        { "id": "mbI", "name": "Inbox", "role": "inbox", "totalEmails": 3, "myRights": rights },
+        { "id": "mbA", "name": "Archive", "role": "archive", "totalEmails": 0, "myRights": rights },
+        { "id": "mbA24", "name": "2024", "parentId": "mbA", "totalEmails": 7, "myRights": rights },
+        { "id": "mbR", "name": "Receipts", "totalEmails": 0, "myRights": rights },
+        { "id": "mbR24", "name": "2024", "parentId": "mbR", "totalEmails": 0, "myRights": rights },
+        { "id": "mbNew", "name": "Bikes", "parentId": "mbR", "totalEmails": 0, "myRights": rights },
+    ]);
+    Mock::given(method("POST"))
+        .and(path("/jmap"))
+        .respond_with(move |req: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+            let responses: Vec<Value> = body["methodCalls"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|mc| {
+                    let payload = match mc[0].as_str() {
+                        Some("Mailbox/get") => json!({ "list": folders }),
+                        Some("Email/get") => json!({
+                            "list": mc[1]["ids"].as_array().cloned().unwrap_or_default()
+                                .iter().filter_map(Value::as_str)
+                                .map(|id| email_json(id, "t1", false)).collect::<Vec<_>>(),
+                            "notFound": []
+                        }),
+                        Some("Mailbox/set") => json!({
+                            "created": mc[1].get("create").map(|_| json!({ "new": { "id": "mbNew" } })),
+                            "updated": mc[1].get("update").map(|_| json!({})),
+                            "destroyed": mc[1].get("destroy"),
+                        }),
+                        _ => json!({ "list": [], "notFound": [] }),
+                    };
+                    json!([mc[0], payload, mc[2]])
+                })
+                .collect();
+            ResponseTemplate::new(200).set_body_json(json!({ "methodResponses": responses }))
+        })
+        .mount(&server)
+        .await;
+    server
+}
+
+/// The arguments of every `Mailbox/set` sent, in order.
+async fn mailbox_sets(server: &MockServer) -> Vec<Value> {
+    let mut out = Vec::new();
+    for req in server.received_requests().await.unwrap_or_default() {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+        for mc in body["methodCalls"].as_array().cloned().unwrap_or_default() {
+            if mc[0] == "Mailbox/set" {
+                out.push(mc[1].clone());
+            }
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn mailboxes_report_their_path() {
+    let server = folder_server().await;
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "{ mailbox(name: \"Receipts/2024\") { id path } }",
+    )
+    .await;
+    assert_eq!(
+        data["mailbox"],
+        json!({ "id": "mbR24", "path": "Receipts/2024" })
+    );
+}
+
+#[tokio::test]
+async fn create_mailbox_nests_under_a_parent_named_by_path() {
+    let server = folder_server().await;
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "mutation { createMailbox(name: \"Bikes\", parent: \"receipts\") { success error mailbox { id path } } }",
+    )
+    .await;
+    assert_eq!(data["createMailbox"]["success"], true, "{data}");
+    assert_eq!(
+        data["createMailbox"]["mailbox"],
+        json!({ "id": "mbNew", "path": "Receipts/Bikes" })
+    );
+    let sets = mailbox_sets(&server).await;
+    assert_eq!(
+        sets[0]["create"]["new"],
+        json!({ "name": "Bikes", "parentId": "mbR", "isSubscribed": true })
+    );
+}
+
+#[tokio::test]
+async fn a_shared_name_is_refused_rather_than_guessed() {
+    let server = folder_server().await;
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "mutation { updateMailbox(mailbox: \"2024\", name: \"Old\") { success error } }",
+    )
+    .await;
+    let error = data["updateMailbox"]["error"].as_str().unwrap();
+    assert_eq!(data["updateMailbox"]["success"], false);
+    assert!(
+        error.contains("Archive/2024") && error.contains("mbR24"),
+        "{error}"
+    );
+    assert!(mailbox_sets(&server).await.is_empty());
+}
+
+#[tokio::test]
+async fn moving_email_to_a_shared_name_is_refused() {
+    let server = folder_server().await;
+    let resp = build_schema()
+        .execute(request(
+            "mutation { moveEmail(emailId: \"e1\", targetMailbox: \"2024\") { success } }",
+            client_for(&server),
+            CardDavCreds::default(),
+        ))
+        .await;
+    assert!(
+        resp.errors
+            .iter()
+            .any(|e| e.message.contains("names 2 mailboxes")),
+        "{:?}",
+        resp.errors
+    );
+}
+
+#[tokio::test]
+async fn update_mailbox_renames_and_moves_to_the_top_level() {
+    let server = folder_server().await;
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "mutation { updateMailbox(mailbox: \"Archive/2024\", name: \"Archive 2024\", toTopLevel: true, isSubscribed: false) { success error } }",
+    )
+    .await;
+    assert_eq!(data["updateMailbox"]["success"], true, "{data}");
+    assert_eq!(
+        mailbox_sets(&server).await[0]["update"],
+        json!({ "mbA24": { "name": "Archive 2024", "parentId": null, "isSubscribed": false } })
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_folder_with_children_is_refused_at_preview() {
+    let server = folder_server().await;
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "mutation { deleteMailbox(mailbox: \"Receipts\", action: PREVIEW) { success message confirmationToken } }",
+    )
+    .await;
+    assert_eq!(data["deleteMailbox"]["success"], false);
+    assert!(data["deleteMailbox"]["confirmationToken"].is_null());
+    assert!(
+        data["deleteMailbox"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Receipts/2024")
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_folder_with_mail_needs_remove_emails_and_a_token() {
+    let server = folder_server().await;
+    let client = client_for(&server);
+    let schema = build_schema();
+
+    let keep = exec(
+        &schema,
+        &client,
+        "mutation { deleteMailbox(mailbox: \"Archive/2024\", action: PREVIEW) { success confirmationToken } }",
+    )
+    .await;
+    assert_eq!(keep["deleteMailbox"]["success"], false);
+
+    let preview = exec(
+        &schema,
+        &client,
+        "mutation { deleteMailbox(mailbox: \"mbA24\", action: PREVIEW, removeEmails: true) { success message confirmationToken } }",
+    )
+    .await;
+    assert!(
+        preview["deleteMailbox"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("DESTROYED PERMANENTLY")
+    );
+    let token = preview["deleteMailbox"]["confirmationToken"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // The token covers removeEmails: confirming without it is refused.
+    let swapped = exec_with(
+        &schema,
+        &client,
+        "mutation($t: String) { deleteMailbox(mailbox: \"mbA24\", action: CONFIRM, confirmationToken: $t) { success } }",
+        json!({ "t": token }),
+    )
+    .await;
+    assert_eq!(swapped["deleteMailbox"]["success"], false);
+    assert!(mailbox_sets(&server).await.is_empty());
+
+    let preview = exec(
+        &schema,
+        &client,
+        "mutation { deleteMailbox(mailbox: \"mbA24\", action: PREVIEW, removeEmails: true) { confirmationToken } }",
+    )
+    .await;
+    let done = exec_with(
+        &schema,
+        &client,
+        "mutation($t: String) { deleteMailbox(mailbox: \"mbA24\", action: CONFIRM, removeEmails: true, confirmationToken: $t) { success error } }",
+        json!({ "t": preview["deleteMailbox"]["confirmationToken"] }),
+    )
+    .await;
+    assert_eq!(done["deleteMailbox"]["success"], true, "{done}");
+    assert_eq!(
+        mailbox_sets(&server).await[0],
+        json!({ "accountId": "acct1", "destroy": ["mbA24"], "onDestroyRemoveEmails": true })
+    );
+}
