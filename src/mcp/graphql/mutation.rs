@@ -1042,9 +1042,15 @@ impl MailMutation {
                 Err(e) => return Ok(fail(e)),
             };
             for (key, value) in more {
-                let clash = patch.get(&key).is_some_and(|v| *v != value)
-                    || (key.starts_with("mailboxIds") && patch.contains_key("mailboxIds"))
-                    || (key == "mailboxIds" && patch.keys().any(|k| k.starts_with("mailboxIds")));
+                // The same key must agree; a whole `mailboxIds` and a
+                // `mailboxIds/<id>` patch cannot go in one update.
+                let clash = match patch.get(&key) {
+                    Some(v) => *v != value,
+                    None if key == "mailboxIds" => {
+                        patch.keys().any(|k| k.starts_with("mailboxIds/"))
+                    }
+                    None => key.starts_with("mailboxIds/") && patch.contains_key("mailboxIds"),
+                };
                 if clash {
                     return Ok(fail(format!(
                         "changes conflict with moveTo, markRead or markSpam over {key}"
@@ -1232,13 +1238,22 @@ impl MailMutation {
             ));
         }
         Ok(match client.update_mailbox(&target.id, &patch).await {
-            Ok(()) => GqlMailboxResult {
-                success: true,
-                message: Some(format!("Updated \"{}\"", target.name)),
-                mailbox: reload_mailbox(ctx, &target.id).await?,
-                confirmation_token: None,
-                error: None,
-            },
+            Ok(()) => {
+                let mailbox = reload_mailbox(ctx, &target.id).await?;
+                let all = all_mailboxes(ctx).await?;
+                let now = mailbox.as_ref().map(|m| mailbox_path(&all, &m.0));
+                GqlMailboxResult {
+                    success: true,
+                    message: Some(format!(
+                        "Updated \"{}\", now \"{}\"",
+                        target.name,
+                        now.as_deref().unwrap_or(&target.name)
+                    )),
+                    mailbox,
+                    confirmation_token: None,
+                    error: None,
+                }
+            }
             Err(e) => GqlMailboxResult::failed(e.to_string()),
         })
     }

@@ -3539,3 +3539,59 @@ async fn identities_and_masked_email_notes_update() {
         json!({ "m1": { "description": "bike shop", "url": null } })
     );
 }
+
+#[tokio::test]
+async fn emptying_refuses_when_the_folder_changed_since_the_preview() {
+    let server = manage_server().await;
+    let schema = build_schema();
+    let client = client_for(&server);
+    // A token for the right folder but another set of contents, as a preview
+    // taken before new mail arrived would hold.
+    let nonce = super::types::issue_nonce(
+        schema.data::<super::types::NonceStore>().unwrap(),
+        client.tenant_key(),
+        &["empty_mailbox", "mbT", "x1", ""],
+    )
+    .await;
+    let done = exec_with(
+        &schema,
+        &client,
+        "mutation($t: String) { emptyMailbox(mailbox: \"trash\", action: CONFIRM, confirmationToken: $t) { success error } }",
+        json!({ "t": nonce }),
+    )
+    .await;
+    assert_eq!(done["emptyMailbox"]["success"], false);
+    assert!(
+        done["emptyMailbox"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("changed since the preview")
+    );
+    assert!(args_of(&server, "Email/set").await.is_empty());
+}
+
+#[tokio::test]
+async fn a_folder_listing_without_a_search_asks_for_no_snippets() {
+    let server = manage_server().await;
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "{ mailbox(name: \"Inbox\") { emails(first: 2) { nodes { snippet { preview } } } } }",
+    )
+    .await;
+    assert!(data["mailbox"]["emails"]["nodes"][0]["snippet"].is_null());
+    assert!(args_of(&server, "SearchSnippet/get").await.is_empty());
+}
+
+#[tokio::test]
+async fn sweep_accepts_the_same_move_named_twice() {
+    let server = manage_server().await;
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "mutation { sweepEmails(filter: { from: \"a@b.com\" }, action: PREVIEW, moveTo: \"Archive\", \
+           changes: { moveTo: \"archive\", flagged: true }) { success error } }",
+    )
+    .await;
+    assert_eq!(data["sweepEmails"]["success"], true, "{data}");
+}

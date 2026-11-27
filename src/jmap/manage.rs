@@ -181,16 +181,33 @@ pub fn parse_rfc3339(s: &str) -> Option<i64> {
         let at = rest.rfind(['+', '-'])?;
         let (t, off) = rest.split_at(at);
         let sign = if off.starts_with('-') { -1 } else { 1 };
-        let (h, m) = off[1..].split_once(':').unwrap_or((&off[1..], "0"));
+        // `+01:00`, and the ISO 8601 basic forms `+0100` and `+01`.
+        let digits = &off[1..];
+        let (h, m) = match (digits.split_once(':'), digits.len()) {
+            (Some((h, m)), _) => (h, m),
+            (None, 4) => digits.split_at(2),
+            (None, 2) => (digits, "0"),
+            _ => return None,
+        };
         let (h, m): (i64, i64) = (h.parse().ok()?, m.parse().ok()?);
+        if h > 23 || m > 59 {
+            return None;
+        }
         (t, sign * (h * 3600 + m * 60))
     };
     let mut t = time.split(':');
     let hour: i64 = t.next()?.parse().ok()?;
     let minute: i64 = t.next()?.parse().ok()?;
     let second: f64 = t.next().unwrap_or("0").parse().ok()?;
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let month_days = match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
     if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
+        || !(1..=month_days).contains(&day)
         || hour > 23
         || minute > 59
         || second >= 61.0
@@ -684,6 +701,22 @@ mod tests {
         assert_eq!(parse_rfc3339("2026-11-28T09:30:00"), None);
         assert_eq!(parse_rfc3339("2026-11-28"), None);
         assert_eq!(parse_rfc3339("2026-13-28T09:30:00Z"), None);
+        assert_eq!(parse_rfc3339("2026-02-29T09:30:00Z"), None);
+        assert_eq!(parse_rfc3339("2026-11-28T09:30:00+2500"), None);
+    }
+
+    #[test]
+    fn basic_offsets_read_as_hours_and_minutes() {
+        let want = parse_rfc3339("2026-11-28T09:00:00+01:00");
+        assert!(want.is_some());
+        assert_eq!(parse_rfc3339("2026-11-28T09:00:00+0100"), want);
+        assert_eq!(parse_rfc3339("2026-11-28T09:00:00+01"), want);
+        assert_eq!(
+            parse_rfc3339("2024-02-29T00:00:00Z")
+                .map(format_utc)
+                .as_deref(),
+            Some("2024-02-29T00:00:00Z")
+        );
     }
 
     #[test]

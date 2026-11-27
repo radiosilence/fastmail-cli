@@ -282,12 +282,17 @@ pub async fn emails_connection(
 
     let mailboxes = resolve_mailbox_names(ctx, filter.as_ref()).await?;
     let jmap_filter = filter.as_ref().and_then(|f| f.to_jmap(&mailboxes));
+    // Snippets explain a search, so only a caller's own filter makes one.
+    let searched = jmap_filter.is_some();
     let jmap_filter = match constraint {
         Some(c) => Some(and_also(jmap_filter, c)),
         None => jmap_filter,
     };
     let jmap_sort = sort_to_jmap(sort.as_deref()).map_err(async_graphql::Error::new)?;
-    let search: Option<std::sync::Arc<str>> = jmap_filter.as_ref().map(|f| f.to_string().into());
+    let search: Option<std::sync::Arc<str>> = jmap_filter
+        .as_ref()
+        .filter(|_| searched)
+        .map(|f| f.to_string().into());
 
     // Selecting nothing but `totalCount` should not fetch a single email; and
     // `totalCount` is the only thing that makes the server compute the total.

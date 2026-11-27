@@ -377,6 +377,7 @@ impl ManageMutation {
             return Ok(GqlBulkResult::failure(msg));
         }
         let outcome = client.destroy_emails(&ids).await?;
+        super::mutation::forget_mailboxes(ctx)?;
         Ok(GqlBulkResult::done(
             outcome.destroyed,
             &outcome.failed,
@@ -408,17 +409,27 @@ impl ManageMutation {
             Err(e) => return Ok(GqlBulkResult::failure(e)),
         };
         let path = mailbox_path(&all, &target);
-        let params = ["empty_mailbox", target.id.as_str()];
-
         let (ids, total) = client
             .query_email_ids(json!({ "inMailbox": target.id }), MAX_EMPTY)
             .await?;
         let memberships = client.email_mailbox_ids(&ids).await?;
-        let (only_here, elsewhere): (Vec<String>, Vec<String>) = ids.into_iter().partition(|id| {
-            memberships
-                .get(id)
-                .is_none_or(|m| m.iter().all(|mb| *mb == target.id))
-        });
+        // An email gone by the time its folders are read is left alone.
+        let (mut only_here, mut elsewhere): (Vec<String>, Vec<String>) = ids
+            .into_iter()
+            .filter(|id| memberships.contains_key(id))
+            .partition(|id| memberships[id].iter().all(|mb| *mb == target.id));
+        // The token covers exactly what the preview showed, so mail arriving
+        // in between is never destroyed unseen: CONFIRM refuses instead.
+        only_here.sort();
+        elsewhere.sort();
+        let destroy_key = only_here.join(",");
+        let remove_key = elsewhere.join(",");
+        let params = [
+            "empty_mailbox",
+            target.id.as_str(),
+            destroy_key.as_str(),
+            remove_key.as_str(),
+        ];
 
         if action == ConfirmAction::Preview {
             let mut text = format!(
@@ -457,7 +468,15 @@ impl ManageMutation {
         )
         .await
         {
-            return Ok(GqlBulkResult::failure(msg));
+            return Ok(GqlBulkResult::failure(
+                if msg.starts_with("Params changed") {
+                    format!(
+                        "\"{path}\" changed since the preview; PREVIEW again to see what is there now."
+                    )
+                } else {
+                    msg.to_string()
+                },
+            ));
         }
         let mut failed = Vec::new();
         let removed = if elsewhere.is_empty() {
