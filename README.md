@@ -61,7 +61,7 @@ a real-time stream of incoming mail.
 | Attachments: download, text from 56 formats, resize   | ✅                                       | —                                    |
 | Attached emails: read; import `.eml` files            | ✅ (MCP)                                 | —                                    |
 | Attachments: upload                                   | ✅                                       | ✅                                    |
-| Masked Email: create / enable / disable / edit notes  | ✅                                       | —                                    |
+| Masked Email: create / toggle / delete / edit notes    | ✅                                       | —                                    |
 | Identities                                            | ✅ (with signatures; create / edit)      | ✅                                    |
 | Scheduled send / cancel                               | ✅ (MCP)                                 | —                                    |
 | Contacts: search / create / update / delete           | ✅ (CardDAV)                             | ✅                                    |
