@@ -265,14 +265,23 @@ impl JmapClient {
             .get("maxDelayedSend")
             .and_then(Value::as_i64)
             .unwrap_or(0);
-        let future_release = cap
-            .get("submissionExtensions")
-            .is_some_and(|e| e.get("FUTURERELEASE").is_some());
-        if max_delay <= 0 || !future_release {
-            return Err(Error::Config(
-                "This server does not offer scheduled sending (no maxDelayedSend or FUTURERELEASE)"
-                    .into(),
-            ));
+        // RFC 8621 §1.3.2: a maxDelayedSend of 0 means no delayed send, and
+        // anything above it is the support. FUTURERELEASE in
+        // submissionExtensions is how the hold is asked for, but a server may
+        // honour it without listing it, so its absence alone does not refuse.
+        if max_delay <= 0 {
+            let extensions: Vec<&str> = cap
+                .get("submissionExtensions")
+                .and_then(Value::as_object)
+                .map(|e| e.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            return Err(Error::Config(format!(
+                "This server does not offer scheduled sending for this token: it reports \
+                 maxDelayedSend {} and submission extensions [{}]",
+                cap.get("maxDelayedSend")
+                    .map_or("(absent)".into(), Value::to_string),
+                extensions.join(", ")
+            )));
         }
         let at = parse_rfc3339(send_at).ok_or_else(|| {
             Error::Config(format!(
@@ -372,8 +381,7 @@ impl JmapClient {
                     "EmailSubmission/query",
                     {
                         "accountId": account_id,
-                        "filter": { "undoStatus": "pending" },
-                        "sort": [{ "property": "sendAt", "isAscending": true }]
+                        "filter": { "undoStatus": "pending" }
                     },
                     "q0"
                 ]),
@@ -391,10 +399,13 @@ impl JmapClient {
             responses.first().unwrap_or(&Value::Null),
             "EmailSubmission/query",
         )?;
-        let got: super::GetResponse<Submission> = Self::parse_response(
+        let mut got: super::GetResponse<Submission> = Self::parse_response(
             responses.get(1).unwrap_or(&Value::Null),
             "EmailSubmission/get",
         )?;
+        // Sorted here: Fastmail refuses a `sendAt` sort (unsupportedSort).
+        got.list
+            .sort_by_key(|s| s.send_at.as_deref().and_then(parse_rfc3339));
         Ok(got.list)
     }
 

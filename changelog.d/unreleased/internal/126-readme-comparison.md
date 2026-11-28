@@ -1,0 +1,1 @@
+- **README comparison covers 3.10.0.** The table against Fastmail's official MCP now lists reading attached emails and importing `.eml` files, flagging and labelling in bulk sweeps, and editing a masked email's notes.

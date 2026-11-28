@@ -3159,8 +3159,16 @@ async fn manage_server() -> MockServer {
                                 }))).collect::<serde_json::Map<_, _>>()
                         }),
                         "Email/import" => json!({ "created": { "new": { "id": "imp1" } } }),
-                        "EmailSubmission/query" => json!({ "ids": ["sub1"] }),
+                        "EmailSubmission/query" => {
+                            // Fastmail refuses a sendAt sort; the client sorts.
+                            assert!(args.get("sort").is_none(), "sorted server-side: {args}");
+                            json!({ "ids": ["sub2", "sub1"] })
+                        }
                         "EmailSubmission/get" => json!({ "list": [{
+                            "id": "sub2", "emailId": "new1", "sendAt": "2099-01-01T08:00:00Z",
+                            "undoStatus": "pending",
+                            "envelope": { "mailFrom": { "email": "me@example.com" }, "rcptTo": [] }
+                        }, {
                             "id": "sub1", "emailId": "x1", "sendAt": "2030-01-01T09:00:00Z",
                             "undoStatus": "pending",
                             "envelope": { "mailFrom": { "email": "me@example.com" },
@@ -3472,12 +3480,13 @@ async fn send_at_holds_the_message_for_every_recipient() {
         refused["sendEmail"]["error"]
             .as_str()
             .unwrap()
-            .contains("scheduled")
+            .contains("maxDelayedSend (absent)"),
+        "{refused}"
     );
 
     client.set_test_capability(
         "urn:ietf:params:jmap:submission",
-        json!({ "maxDelayedSend": 100_i64 * 365 * 86_400, "submissionExtensions": { "FUTURERELEASE": [] } }),
+        json!({ "maxDelayedSend": 100_i64 * 365 * 86_400, "submissionExtensions": {} }),
     );
     let preview = exec_with(&schema, &client, &q.replace("ACTION", "PREVIEW"), json!({})).await;
     assert!(
@@ -3494,6 +3503,14 @@ async fn send_at_holds_the_message_for_every_recipient() {
     )
     .await;
     assert_eq!(done["sendEmail"]["success"], true, "{done}");
+    // Read back from the server, not assumed from the request.
+    assert!(
+        done["sendEmail"]["preview"]
+            .as_str()
+            .unwrap()
+            .contains("holding it until 2099-01-01T08:00:00Z"),
+        "{done}"
+    );
     assert_eq!(
         args_of(&server, "EmailSubmission/set").await[0]["create"]["submission"]["envelope"],
         json!({
