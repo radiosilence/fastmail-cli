@@ -1,0 +1,1 @@
+- **Search results say why they matched.** `Email.snippet` on a filtered `emails` result gives the subject and a body excerpt with the matching terms in `<mark>` tags, from JMAP's `SearchSnippet/get`: one call per page of results.

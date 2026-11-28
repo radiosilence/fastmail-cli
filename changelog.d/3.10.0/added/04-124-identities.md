@@ -1,0 +1,1 @@
+- **Create, edit and remove sending identities.** `createIdentity`, `updateIdentity` (display name, Reply-To, automatic BCC, plain and HTML signatures) and `deleteIdentity`, naming an identity by its ID or its address.

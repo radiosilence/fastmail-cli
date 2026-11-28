@@ -1,0 +1,1 @@
+- **Flag, set keywords and file emails in several folders.** `updateEmails` takes up to 1000 IDs and `changes`: `flagged`, `read`, `addKeywords` / `removeKeywords` (any keyword, such as `$important` or your own), `addToMailboxes` / `removeFromMailboxes` (Fastmail folders work as labels) or `moveTo`. `sweepEmails` takes the same `changes` for everything a filter matches.

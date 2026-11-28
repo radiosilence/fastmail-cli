@@ -1,5 +1,47 @@
 # Changelog
 
+## 3.10.1
+
+### Fixed
+
+- **Scheduled sending works against Fastmail, and says whether it was held.** `scheduledEmails` failed with `unsupportedSort`, since Fastmail cannot sort submissions by `sendAt`; they are now sorted by the client. `sendAt` was refused unless the server listed `FUTURERELEASE` in its submission extensions as well as a `maxDelayedSend`; RFC 8621 makes `maxDelayedSend` alone the measure of support, so that is what is checked, and a refusal now quotes what the server reported. After a scheduled send, the result says when the server reports it will go, or warns if the server shows no pending send for it.
+
+### Internal
+
+- **README comparison covers 3.10.0.** The table against Fastmail's official MCP now lists reading attached emails and importing `.eml` files, flagging and labelling in bulk sweeps, and editing a masked email's notes.
+
+## 3.10.0
+
+### Added
+
+- **Read attached emails and import `.eml` files.** `Attachment.message` parses an attached email (`message/rfc822`, or an `.eml` file) with `Email/parse`, so its headers, bodies and own attachments read like any other email without downloading it. `importEmail` files a raw message, given as base64 or by blob ID (an attachment's included), into chosen folders without sending anything.
+- **Delete email for good, and empty Trash or Junk.** `destroyEmails` removes emails from every folder permanently and `emptyMailbox` empties a folder the way "Empty Trash" does: mail only in that folder is destroyed, mail also filed elsewhere is just taken out of it. Both are PREVIEW then CONFIRM, the preview listing what goes; moving to Trash remains the recoverable way to bin something.
+- **Flag, set keywords and file emails in several folders.** `updateEmails` takes up to 1000 IDs and `changes`: `flagged`, `read`, `addKeywords` / `removeKeywords` (any keyword, such as `$important` or your own), `addToMailboxes` / `removeFromMailboxes` (Fastmail folders work as labels) or `moveTo`. `sweepEmails` takes the same `changes` for everything a filter matches.
+- **Create, edit and remove sending identities.** `createIdentity`, `updateIdentity` (display name, Reply-To, automatic BCC, plain and HTML signatures) and `deleteIdentity`, naming an identity by its ID or its address.
+- **Create, rename, move and delete folders over MCP.** `createMailbox`, `updateMailbox` (rename, move under another folder or to the top level, reorder, subscribe or unsubscribe) and `deleteMailbox` wrap JMAP's `Mailbox/set`. Deleting is PREVIEW then CONFIRM: the preview says what the folder holds, and a folder with subfolders or with mail is refused unless `removeEmails` is set, which destroys mail in no other folder rather than moving it to Trash. `Mailbox.path` gives a folder's full path, such as `Archive/2024`.
+- **Edit a masked email's notes.** `updateMaskedEmail` changes its description, domain and URL; until now only its state could change.
+- **Schedule a send.** `sendEmail`, `replyToEmail`, `forwardEmail` and `sendDraft` take `sendAt` (RFC 3339 with an offset), which the server holds the message until, using RFC 4865 `HOLDUNTIL`; the preview and the confirmation token cover it, and a time in the past or beyond the server's `maxDelayedSend` is refused. `scheduledEmails` lists what is waiting and `cancelScheduledEmail` stops one, putting it back in Drafts.
+- **Search results say why they matched.** `Email.snippet` on a filtered `emails` result gives the subject and a body excerpt with the matching terms in `<mark>` tags, from JMAP's `SearchSnippet/get`: one call per page of results.
+
+### Security
+
+- **Contact changes go to the caller's own address book.** `createContact`, `updateContact` and `deleteContact` read the CardDAV username and app password from the server's local config or environment rather than from the request, so behind the hosted gateway a tenant's change either failed or landed in the operator's address book; they now use the request's `X-Fastmail-Username` and `X-Fastmail-App-Password`, falling back to local credentials only when a request carries no credential headers at all, as the `contacts` query does.
+- **`fastmail mcp --http` refuses requests from web pages while it holds your credentials.** The HTTP server accepted any `Host`, and a request without a token is answered with your own, so a web page that rebinds its hostname to 127.0.0.1 could read and send your mail; with a local token or local CardDAV credentials it now refuses a `Host` other than the bind address, `localhost`, `127.0.0.1` and `[::1]` (or one allowed with `--allowed-host` or `FASTMAIL_MCP_ALLOWED_HOSTS`), and an `Origin` other than its own. A hosted server with no local credentials, where every request brings its own, is unchanged.
+
+### Changed
+
+- **A folder name two folders share is refused rather than guessed.** Filters (`inMailbox`, `inMailboxOtherThan`), `moveEmail`, `markAsNotSpam`, `sweepEmails` and the new folder mutations took the first folder with a matching name, so of two folders called `2024` one was picked arbitrarily, and a sweep could change the wrong folder's mail; they now answer with both paths and IDs and take either. Everywhere a mailbox is named, an ID or a path (`Archive/2024`) now works as well as a name or role.
+
+### Internal
+
+- **Dependencies updated.** A fresh `cargo update`, with `zip` held at 8.6 until kreuzberg builds against zip 9.
+- **The MCP instructions mark email text as untrusted.** Nothing told an agent that subjects, bodies, attachments and sender names are written by strangers; the server instructions now say they are data, never instructions to follow.
+- **CI audits the dependencies.** `.cargo/audit.toml` acknowledged advisories that no job ever checked; a blocking `Security Audit` job now runs `cargo audit` on every push to main and on pull requests that change the manifests, the lockfile, `.cargo/` or `.github/`. `url` moves to 2.5.9 for the one new advisory with a fix, and the ignores now cover zip's and calamine's new advisories, each with why it does not reach this build.
+- **README comparison brought up to date.** The table against Fastmail's official MCP server now reflects its current 29 tools (calendar with RSVP, notes, memos, deleting mail) and lists the features `fastmail-cli` had added since it was written: drafts, forwarding, bulk sweeps, attachment upload, the connection check, GraphiQL and the container image.
+- **README covers setting up the MCP server.** Claude Code and Claude Desktop over stdio, a local HTTP server, the container image with its credential headers, a minimal Caddy gateway, and [mcp-gateway](https://github.com/radiosilence/mcp-gateway) for OAuth and several users.
+- **README explains choosing between a local and a remote MCP setup.** Why Claude's web, mobile and Desktop connectors need a public URL with OAuth, how an OAuth gateway sits in front of `fastmail mcp` and injects per-user credentials, and where mcp-gateway fits.
+- **Dependencies updated.** A fresh `cargo update` (rmcp 3.12, hyper 1.13, clap 4.6.10 and others), with `zip` still held at 8.6: kreuzberg 4.10.4 now resolves to zip 9 but does not build against it.
+
 ## 3.9.1
 
 ### Security

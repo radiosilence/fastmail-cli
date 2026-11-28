@@ -301,6 +301,30 @@ impl QueryRoot {
             .find(|a| a.blob_id == blob_id))
     }
 
+    /// Emails scheduled to send later (`sendAt`), soonest first, that the
+    /// server is still holding. `cancelScheduledEmail` stops one.
+    #[graphql(complexity = "page_complexity(first, last, child_complexity)")]
+    async fn scheduled_emails(
+        &self,
+        ctx: &Context<'_>,
+        after: Option<String>,
+        before: Option<String>,
+        first: Option<i32>,
+        last: Option<i32>,
+    ) -> Result<ListConnection<GqlScheduledEmail>> {
+        let pending = ctx.data::<SharedClient>()?.pending_submissions().await?;
+        paginate(
+            pending.into_iter().map(GqlScheduledEmail).collect(),
+            PageArgs {
+                after,
+                before,
+                first,
+                last,
+            },
+            |s| s.0.id.clone(),
+        )
+    }
+
     /// List all sender identities on the account. Includes signatures and default reply-to/bcc.
     #[graphql(complexity = "page_complexity(first, last, child_complexity)")]
     async fn identities(

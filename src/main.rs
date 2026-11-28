@@ -23,6 +23,7 @@ fn build_compose_params<'a>(
         .map(|p| util::load_attachment(p))
         .collect::<anyhow::Result<Vec<_>>>()?;
     Ok(jmap::ComposeParams {
+        send_at: None,
         cc: cc.map(util::parse_addresses).unwrap_or_default(),
         bcc: bcc.map(util::parse_addresses).unwrap_or_default(),
         from,

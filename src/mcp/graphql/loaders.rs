@@ -143,6 +143,62 @@ impl Loader<String> for BlobLoader {
     }
 }
 
+/// Batches `SearchSnippet/get`. Keyed by (JMAP filter as JSON, email ID), so
+/// a page of results from one search costs one call, and two searches in one
+/// query cost one each.
+pub struct SnippetLoader(SharedClient);
+
+impl Loader<(String, String)> for SnippetLoader {
+    type Value = Arc<crate::jmap::Snippet>;
+    type Error = LoadError;
+
+    async fn load(
+        &self,
+        keys: &[(String, String)],
+    ) -> Result<HashMap<(String, String), Self::Value>, Self::Error> {
+        let mut by_filter: HashMap<&str, Vec<String>> = HashMap::new();
+        for (filter, id) in keys {
+            by_filter.entry(filter).or_default().push(id.clone());
+        }
+        let mut out = HashMap::new();
+        for (filter, ids) in by_filter {
+            let parsed: serde_json::Value =
+                serde_json::from_str(filter).map_err(|e| Arc::new(Error::Json(e)))?;
+            for snippet in self
+                .0
+                .search_snippets(&parsed, &ids)
+                .await
+                .map_err(Arc::new)?
+            {
+                out.insert(
+                    (filter.to_string(), snippet.email_id.clone()),
+                    Arc::new(snippet),
+                );
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Batches `Email/parse` over message blobs: attached emails, by blob ID.
+pub struct ParsedEmailLoader(SharedClient);
+
+impl Loader<String> for ParsedEmailLoader {
+    type Value = Arc<Email>;
+    type Error = LoadError;
+
+    async fn load(&self, keys: &[String]) -> Result<HashMap<String, Arc<Email>>, Self::Error> {
+        Ok(self
+            .0
+            .parse_emails(keys)
+            .await
+            .map_err(Arc::new)?
+            .into_iter()
+            .map(|(k, v)| (k, Arc::new(v)))
+            .collect())
+    }
+}
+
 /// Cap on IDs per `Email/get`. JMAP servers bound how many records one call may
 /// request; this stays well inside Fastmail's limit while still collapsing a
 /// full page of list results into one round trip.
@@ -165,6 +221,8 @@ pub type Threads = DataLoader<ThreadLoader, HashMapCache>;
 /// resolver keeps the processed output — caching the raw download on top would
 /// only inflate peak memory. Within-batch deduplication still applies.
 pub type Blobs = DataLoader<BlobLoader>;
+pub type Snippets = DataLoader<SnippetLoader, HashMapCache>;
+pub type ParsedEmails = DataLoader<ParsedEmailLoader, HashMapCache>;
 
 /// All loaders for one GraphQL request, ready to be attached as request data.
 pub struct Loaders {
@@ -174,6 +232,8 @@ pub struct Loaders {
     pub masked: MaskedEmails,
     pub thread: Threads,
     pub blob: Blobs,
+    pub snippet: Snippets,
+    pub parsed: ParsedEmails,
 }
 
 impl Loaders {
@@ -205,6 +265,18 @@ impl Loaders {
                 tokio::spawn,
                 HashMapCache::default(),
             ),
+            snippet: Snippets::with_cache(
+                SnippetLoader(client.clone()),
+                tokio::spawn,
+                HashMapCache::default(),
+            )
+            .max_batch_size(EMAIL_BATCH),
+            parsed: ParsedEmails::with_cache(
+                ParsedEmailLoader(client.clone()),
+                tokio::spawn,
+                HashMapCache::default(),
+            )
+            .max_batch_size(BLOB_BATCH),
             blob: Blobs::new(BlobLoader(client), tokio::spawn).max_batch_size(BLOB_BATCH),
         }
     }

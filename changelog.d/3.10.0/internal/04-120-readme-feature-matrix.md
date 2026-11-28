@@ -1,0 +1,1 @@
+- **README comparison brought up to date.** The table against Fastmail's official MCP server now reflects its current 29 tools (calendar with RSVP, notes, memos, deleting mail) and lists the features `fastmail-cli` had added since it was written: drafts, forwarding, bulk sweeps, attachment upload, the connection check, GraphiQL and the container image.

@@ -18,6 +18,7 @@ pub async fn reply(
     let (to_addrs, cc_addrs) =
         expand_reply_recipients(&original, reply_all, my_email.as_deref(), params.cc);
     let params = ComposeParams {
+        send_at: None,
         cc: cc_addrs,
         ..params
     };

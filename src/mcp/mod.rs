@@ -291,7 +291,7 @@ impl FastmailMcp {
         title = "Fastmail schema",
         description = "The full GraphQL SDL for the Fastmail API, with documentation on every type, argument and per-field cost.\n\
 \n\
-You do not need this for everyday mail — the `graphql` tool's own description already carries the queries, filters, fields and send flow for that. Reach for this when you want something it lists as not covered (attachment payloads, masked email, contacts, identities, moveEmail, markAsRead, markAsSpam, markAsNotSpam, mailing lists and unsubscribing (mailingLists, unsubscribe), bulk changes (sweepEmails), the remaining filter and sort options), or the exact cost of a field.\n\
+You do not need this for everyday mail — the `graphql` tool's own description already carries the queries, filters, fields and send flow for that. Reach for this when you want something it lists as not covered (attachment payloads, masked email, contacts, identities, moveEmail, markAsRead, markAsSpam, markAsNotSpam, mailing lists and unsubscribing (mailingLists, unsubscribe), bulk changes (sweepEmails, updateEmails), permanent deletion (destroyEmails, emptyMailbox), scheduled sends (scheduledEmails, cancelScheduledEmail), identity and masked email edits, importing and parsing messages (importEmail, Attachment.message), folder management (createMailbox, updateMailbox, deleteMailbox), the remaining filter and sort options), or the exact cost of a field.\n\
 \n\
 Pass `types` to fetch only what you need: the whole schema is ~27KB, and `types: [\"MutationRoot\"]` or `[\"Attachment\", \"MaskedEmail\"]` is usually a few hundred bytes. Named types come back whole and documented, but the types they reference do not — name those too. An unrecognised name is reported back with the list of names that do exist. Omit `types` for the lot."
     )]
@@ -314,7 +314,7 @@ Everyday mail is covered below — call `schema_sdl` only for what isn't.
 QUERIES
   session: Session!                     # { status carddavConfigured username }
   mailboxes(first: Int): MailboxConnection!
-  mailbox(name: String!): Mailbox       # name or role — \"INBOX\", \"sent\", \"drafts\"
+  mailbox(name: String!): Mailbox       # id, path (\"Archive/2024\"), name or role
   emails(filter: EmailFilter, sort: [EmailSort!], collapseThreads: Boolean,
          first: Int, after: String): EmailConnection!
   email(id: String!): Email
@@ -332,6 +332,7 @@ EmailFilter — scalars on one object AND together, and/or/not nest arbitrarily:
 Email fields: id subject preview textBody htmlBody receivedAt sentAt size
   from to cc bcc { name email }  isUnread isFlagged isDraft hasAttachment
   mailboxes { name role }  thread { total }  attachments { nodes { name size } }
+  snippet { subject preview }           # in a filtered result: why it matched, <mark>ed
 
 Connections: `nodes` for items, first/last/after/before to page (default 25,
 max 100), cursors are IDs, `pageInfo { hasNextPage endCursor }`. `totalCount`
@@ -343,6 +344,7 @@ confirmationToken; CONFIRM repeats exactly the same arguments plus that token,
 and is rejected if any differ. Recipients are comma-separated strings, not lists.
   sendEmail(action: SendAction!, to: String!, subject: String!, body: String!,
             cc: String, bcc: String, from: String, htmlBody: String,
+            sendAt: String,             # RFC 3339 with offset: scheduled send
             attachments: [AttachmentInput!], confirmationToken: String): ComposeResult!
   ComposeResult { success emailId preview confirmationToken error }
 
@@ -380,8 +382,14 @@ payloads (base64/image/text), masked email, contacts and contact CRUD (CardDAV,
 so check `session { carddavConfigured }` first), identities, moveEmail,
 markAsRead, markAsSpam, markAsNotSpam, mailingLists (every sender with an
 unsubscribe header, grouped) and unsubscribe (one-click or mailto), sweepEmails
-(move / mark read / mark spam everything a filter matches), and the remaining
-filter and sort options."
+(move / mark read / mark spam everything a filter matches, and the same
+`changes` as updateEmails), updateEmails (flag, keywords, add to or remove from
+folders by ID), destroyEmails and emptyMailbox (permanent; PREVIEW then
+CONFIRM), scheduledEmails and cancelScheduledEmail, identity create / update /
+delete (signatures, reply-to), updateMaskedEmail, importEmail and
+`Attachment.message` (an attached email, parsed), folder management
+(createMailbox, updateMailbox to rename, move or (un)subscribe, deleteMailbox,
+PREVIEW then CONFIRM), and the remaining filter and sort options."
     )]
     async fn graphql(
         &self,

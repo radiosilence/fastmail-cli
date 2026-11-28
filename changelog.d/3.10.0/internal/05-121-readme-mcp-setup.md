@@ -1,0 +1,1 @@
+- **README covers setting up the MCP server.** Claude Code and Claude Desktop over stdio, a local HTTP server, the container image with its credential headers, a minimal Caddy gateway, and [mcp-gateway](https://github.com/radiosilence/mcp-gateway) for OAuth and several users.
