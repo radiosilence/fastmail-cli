@@ -51,16 +51,17 @@ a real-time stream of incoming mail.
 | Forward                                               | ✅                                       | —                                    |
 | Drafts: create / edit / send / discard                | ✅ (MCP)                                 | create                               |
 | Move / archive / mark read                            | ✅                                       | ✅                                    |
-| Folders: create / rename / move / delete             | ✅ (MCP)                                 | —                                    |
+| Folders: create / rename / move / delete              | ✅ (MCP)                                 | —                                    |
 | Delete email                                          | ✅ (MCP, permanent; preview → confirm)   | ✅                                    |
 | Message memos                                         | —                                       | ✅                                    |
 | Mark spam / not spam (trains the filter)              | ✅                                       | —                                    |
 | Mailing lists: find them, unsubscribe                 | ✅ (one-click or mailto)                 | —                                    |
-| Bulk move / mark read / mark spam over a filter       | ✅ (MCP)                                 | —                                    |
+| Bulk move / mark read / flag / label / spam by filter | ✅ (MCP)                                 | —                                    |
 | Real-time stream of incoming mail                     | ✅ (CLI + GraphQL subscription)          | —                                    |
 | Attachments: download, text from 56 formats, resize   | ✅                                       | —                                    |
+| Attached emails: read; import `.eml` files            | ✅ (MCP)                                 | —                                    |
 | Attachments: upload                                   | ✅                                       | ✅                                    |
-| Masked Email: create / enable / disable / delete      | ✅                                       | —                                    |
+| Masked Email: create / enable / disable / edit notes  | ✅                                       | —                                    |
 | Identities                                            | ✅ (with signatures; create / edit)      | ✅                                    |
 | Scheduled send / cancel                               | ✅ (MCP)                                 | —                                    |
 | Contacts: search / create / update / delete           | ✅ (CardDAV)                             | ✅                                    |
