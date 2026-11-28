@@ -1,0 +1,1 @@
+- **Dependencies updated.** A fresh `cargo update` on top of 3.10.1 (html-to-markdown-rs 3.23, ahash, arrayvec), with `zip` held at 8.6: kreuzberg 4.10.4 resolves to zip 9 but does not build against it.

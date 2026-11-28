@@ -38,9 +38,9 @@ dependencies = [
 
 [[package]]
 name = "ahash"
-version = "0.8.14"
+version = "0.8.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54dae3d1d7b8956f3506c4e999a74e77f932a59153ccf38ab8cf96db74bb9dc0"
+checksum = "3019c0b8d883a8a17df3129e417ef463c087807d245e8881a31d583dee1c0519"
 dependencies = [
  "cfg-if",
  "const-random",
@@ -193,9 +193,9 @@ dependencies = [
 
 [[package]]
 name = "arrayvec"
-version = "0.7.8"
+version = "0.7.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
+checksum = "47a64a0fd06e123e9e3cf3ad01432af17dcab8185e8023edcf184fe696f9675d"
 
 [[package]]
 name = "as-slice"
@@ -276,10 +276,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "astral-tl"
-version = "0.8.1"
+name = "astral-html"
+version = "0.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5fe43b63a04560c41783a27e23209ca87a3f5d01bab21c74bec93268bad39e3a"
+checksum = "d050c4dc17bfd8bf50da08bda9ef724b44a1b4ec09a5811f193f978cb6fbadbb"
 dependencies = [
  "memchr",
 ]
@@ -1962,12 +1962,12 @@ checksum = "d45ed4d99334da2a2f221504e8ffc8ad09baf2a452b154465a976bfde697b004"
 
 [[package]]
 name = "html-to-markdown-rs"
-version = "3.19.1"
+version = "3.23.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0c9d1d13553220b2dd9bbbd135b6d8d9dfcb8c1893a842e93f93b9f59bcc5a4"
+checksum = "9ad4dec09e3ad41baad5496380d1c6f86c43021dfdf4e4e26e61f4992ae49a98"
 dependencies = [
  "ahash",
- "astral-tl",
+ "astral-html",
  "base64 0.23.1",
  "bitflags",
  "html-escape",
@@ -1979,6 +1979,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "smallvec",
  "thiserror",
  "tracing",
  "url",
