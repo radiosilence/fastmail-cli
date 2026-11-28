@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.10.1
+
+### Fixed
+
+- **Scheduled sending works against Fastmail, and says whether it was held.** `scheduledEmails` failed with `unsupportedSort`, since Fastmail cannot sort submissions by `sendAt`; they are now sorted by the client. `sendAt` was refused unless the server listed `FUTURERELEASE` in its submission extensions as well as a `maxDelayedSend`; RFC 8621 makes `maxDelayedSend` alone the measure of support, so that is what is checked, and a refusal now quotes what the server reported. After a scheduled send, the result says when the server reports it will go, or warns if the server shows no pending send for it.
+
+### Internal
+
+- **README comparison covers 3.10.0.** The table against Fastmail's official MCP now lists reading attached emails and importing `.eml` files, flagging and labelling in bulk sweeps, and editing a masked email's notes.
+
 ## 3.10.0
 
 ### Added

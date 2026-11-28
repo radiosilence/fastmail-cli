@@ -1545,7 +1545,7 @@ dependencies = [
 
 [[package]]
 name = "fastmail-cli"
-version = "3.10.0"
+version = "3.10.1"
 dependencies = [
  "anyhow",
  "askama",
