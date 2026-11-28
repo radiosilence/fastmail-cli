@@ -116,7 +116,7 @@ impl MailMutation {
         }
 
         let draft = matches!(action, SendAction::Draft);
-        match client
+        let result: Result<GqlComposeResult> = match client
             .send_email(
                 to_addrs,
                 &subject,
@@ -129,7 +129,7 @@ impl MailMutation {
                     draft,
                     html_body,
                     attachments: attachments.into_iter().map(|a| a.data).collect(),
-                    send_at,
+                    send_at: send_at.clone(),
                 },
             )
             .await
@@ -148,7 +148,8 @@ impl MailMutation {
                 confirmation_token: None,
                 error: Some(e.to_string()),
             }),
-        }
+        };
+        Ok(confirm_held(client, result?, send_at.as_deref()).await)
     }
 
     /// Reply to an existing email thread. ALWAYS use action=PREVIEW first.
@@ -292,7 +293,7 @@ impl MailMutation {
         }
 
         let draft = matches!(action, SendAction::Draft);
-        match client
+        let result: Result<GqlComposeResult> = match client
             .reply_email(
                 &original,
                 &body,
@@ -304,7 +305,7 @@ impl MailMutation {
                     draft,
                     html_body,
                     attachments: attachments.into_iter().map(|a| a.data).collect(),
-                    send_at,
+                    send_at: send_at.clone(),
                 },
             )
             .await
@@ -323,7 +324,8 @@ impl MailMutation {
                 confirmation_token: None,
                 error: Some(e.to_string()),
             }),
-        }
+        };
+        Ok(confirm_held(client, result?, send_at.as_deref()).await)
     }
 
     /// Forward an email to new recipients. ALWAYS use action=PREVIEW first.
@@ -457,7 +459,7 @@ impl MailMutation {
         }
 
         let draft = matches!(action, SendAction::Draft);
-        match client
+        let result: Result<GqlComposeResult> = match client
             .forward_email(
                 &original,
                 to_addrs,
@@ -469,7 +471,7 @@ impl MailMutation {
                     draft,
                     html_body,
                     attachments: attachments.into_iter().map(|a| a.data).collect(),
-                    send_at,
+                    send_at: send_at.clone(),
                 },
             )
             .await
@@ -488,7 +490,8 @@ impl MailMutation {
                 confirmation_token: None,
                 error: Some(e.to_string()),
             }),
-        }
+        };
+        Ok(confirm_held(client, result?, send_at.as_deref()).await)
     }
 
     /// Put a file on the server without sending anything, and return its
@@ -661,7 +664,7 @@ impl MailMutation {
             return Ok(failure(msg.to_string()));
         }
 
-        Ok(match client.send_draft(&draft, send_at.as_deref()).await {
+        let result = match client.send_draft(&draft, send_at.as_deref()).await {
             Ok(()) => GqlComposeResult {
                 success: true,
                 email_id: Some(email_id),
@@ -670,7 +673,8 @@ impl MailMutation {
                 error: None,
             },
             Err(e) => failure(e.to_string()),
-        })
+        };
+        Ok(confirm_held(client, result, send_at.as_deref()).await)
     }
 
     /// Discard a draft by moving it to Trash, where it can still be recovered.
@@ -1655,6 +1659,40 @@ fn schedule(
             .map(Some)
             .map_err(|e| e.to_string()),
     }
+}
+
+/// After a scheduled send, ask the server whether it is really holding the
+/// message, and say so in the result: a server that ignored the hold would
+/// have sent it at once, and the caller must not be told it is waiting.
+async fn confirm_held(
+    client: &crate::jmap::JmapClient,
+    mut result: GqlComposeResult,
+    send_at: Option<&str>,
+) -> GqlComposeResult {
+    let (Some(at), true, Some(email_id)) = (send_at, result.success, result.email_id.clone())
+    else {
+        return result;
+    };
+    let note = match client.pending_submissions().await {
+        Ok(pending) => match pending.iter().find(|s| s.email_id == email_id) {
+            Some(s) => {
+                result.preview = Some(format!(
+                    "Scheduled: the server is holding it until {} (submission {}). Cancel with cancelScheduledEmail.",
+                    s.send_at.as_deref().unwrap_or(at),
+                    s.id
+                ));
+                return result;
+            }
+            None => format!(
+                "WARNING: asked to hold this until {at}, but the server reports no pending send for it, so it may have gone already. Check Sent."
+            ),
+        },
+        Err(e) => format!(
+            "Submitted to send at {at}, but whether the server is holding it could not be checked: {e}"
+        ),
+    };
+    result.error = Some(note);
+    result
 }
 
 /// A preview, saying when it will go if it is scheduled.
